@@ -4,6 +4,14 @@
   "description": "A pi extension that asynchronously delegates tasks to specialized subagents running in isolated pi processes.",
   "license": "MIT",
   "author": "Wolido",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Wolido/async-subagent-isolation.git"
+  },
+  "homepage": "https://github.com/Wolido/async-subagent-isolation#readme",
+  "bugs": {
+    "url": "https://github.com/Wolido/async-subagent-isolation/issues"
+  },
   "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",
