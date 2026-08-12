@@ -42,15 +42,12 @@ skills: /path/to/skill1,/path/to/skill2
 TUI 模式下 `subagent` 立即返回如下回执（不是结果！）：
 
 ```
-Subagent "coder" 已派出 (dispatched). taskId: 01912345-6789-7abc-8def-0123456789ab
-The subagent is running in the background. Its result will arrive later as a
-[subagent-result] system notification (NOT a user request). Do not treat this
-receipt as the result, do not fabricate results, and do not poll for status.
-Reuse session id "01912345-6789-7abc-8def-0123456789ab" to continue this task later.
+已派出 coder. taskId: 01912345-6789-7abc-8def-0123456789ab
 ```
 
 关键点：
 
+- **回执为单行。** 异步语义引导（不臆造结果、不轮询、结果以 `[subagent-result]` 通知到达）已内嵌于 `subagent` 工具的 `description` / `promptGuidelines`，回执本身保持单行。
 - **回执 ≠ 结果。** 不要臆造结果。
 - **taskId = sessionId。** 回执中的 `taskId` 就是 session ID，可直接复用。
 - **不要轮询。** 结果自动以 `[subagent-result]` 通知到达；如需确认还有哪些任务在途（如 `/tree` 回退后），用 `subagent_status` 工具查询。

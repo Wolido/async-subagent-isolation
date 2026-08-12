@@ -13,13 +13,27 @@
 
 </div>
 
-The main agent can't touch code. No `write`, no `edit`, no `bash`. It only has four read-only tools — `read`, `grep`, `find`, `ls` — plus a `subagent` tool for delegation. All file changes, shell commands, and execution logic go to subagents. Each subagent runs in its own `pi` process with its own system prompt and skills. No shared state between the main agent and subagents, or between subagents.
+**async-subagent-isolation** is an extension for [Pi Agent](https://github.com/earendil-works/pi) and the **async evolution** of [subagent-isolation](https://github.com/Wolido/subagent-isolation) (the synchronous version).
 
-**async-subagent-isolation** is an extension for [Pi Agent](https://github.com/earendil-works/pi). Pi already supports subagents. This extension adds one constraint — **it strips the main agent of execution tools and enforces isolation**. The main agent becomes a planner and observer, nothing more.
+The core constraint is unchanged: **the main agent can't touch code**. No `write`, no `edit`, no `bash` — only the four read-only tools `read`, `grep`, `find`, `ls`, plus a `subagent` tool for delegation. All file changes, shell commands, and execution logic go to subagents, each running in its own `pi` process with its own system prompt and skills. No shared state between the main agent and subagents, or between subagents.
 
-## Relationship to the original project
+The key difference is **async**: in TUI mode, the main agent dispatches a subagent and gets an **immediate receipt** (`已派出 <agent>. taskId: <taskId>`) without blocking. The subagent runs in a background process; when it finishes, the result arrives as a **[subagent-result] system notification**. If the main agent is idle the notification triggers processing right away; if busy, it queues. Meanwhile the main agent can dispatch multiple tasks in parallel and keep working.
 
-This project is the async evolution of [subagent-isolation](https://github.com/Wolido/subagent-isolation) (the synchronous version). Both share the same goal — strip execution from the main agent and run it in isolated `pi` processes — but differ in how delegation works: in TUI mode, this project dispatches subagents **asynchronously in the background** (an immediate receipt, with the result arriving later as a system notification), while the original waits synchronously for the subagent to finish. The original project continues to be maintained as the synchronous version.
+---
+
+## Sync vs async
+
+This project is the async evolution of [subagent-isolation](https://github.com/Wolido/subagent-isolation). Both share the same goal — strip execution from the main agent and run it in isolated `pi` processes. The only difference is delegation semantics:
+
+| | Sync (original) | Async (this project) |
+|---|---|---|
+| After dispatch | Blocks until the subagent finishes | **Returns a receipt immediately** (with `taskId`) |
+| Result delivery | Inlined in the tool return value | Arrives as a `[subagent-result]` system notification |
+| Parallelism | Each call blocks — serial only | Multiple tasks can be dispatched in parallel |
+| Waiting period | Main agent's turn is occupied | Main agent continues other work |
+| Result blocks the turn | Yes | No |
+
+**The original project continues to be maintained as the synchronous version.** If you need synchronous, blocking semantics (results returned in place), use the original. If you need async parallelism and background execution, use this project.
 
 ---
 
@@ -29,9 +43,11 @@ A model's effective context is not unlimited. When one agent reads code, edits f
 
 The point of a subagent system is to split that ever-growing context into smaller pieces. Each agent handles only its own slice, so no single conversation is dragged down by historical noise.
 
+**Async amplifies this benefit**: the main agent's turn is not occupied by the subagent's execution. Its context keeps only "what to do" and "what came back"; the subagent's long execution trail stays inside its own process and never pollutes the main agent's context.
+
 ## How this differs from plain subagents
 
-Many subagent implementations are just “spawn a tool call inside the main agent.” The subagent still reuses the main agent's prompt and skills, and the main agent still keeps write and shell access — isolation is optional and partial.
+Many subagent implementations are just "spawn a tool call inside the main agent." The subagent still reuses the main agent's prompt and skills, and the main agent still keeps write and shell access — isolation is optional and partial.
 
 async-subagent-isolation enforces complete isolation:
 
@@ -52,6 +68,7 @@ Plain subagents split work. async-subagent-isolation splits everything.
 | One agent plans and executes; context growth degrades reasoning | Main agent only plans and delegates; each subagent handles its own slice |
 | Main agent keeps write and shell access; isolation is partial | Main agent loses `write`, `edit`, and `bash`; subagents run in isolated processes |
 | All skills and tools pile up in one agent and interfere | Each subagent loads only the skills and tools it needs |
+| Main agent idles while the subagent runs; the turn is blocked | Dispatch returns immediately; you can parallelize and keep working |
 
 ---
 
@@ -62,19 +79,140 @@ Plain subagents split work. async-subagent-isolation splits everything.
 | Main agent | Understand requests, split tasks, delegate, and summarize | Your main `pi` session |
 | Subagent | Read, edit, run checks, and return results | Isolated `pi --mode json` process |
 
-A typical task flows like this:
-
-1. You describe the task to the main agent.
-2. The main agent uses the `subagent` tool to spawn an isolated `pi` process.
-3. The subagent receives only the delegated task and its own config, then performs the work.
-4. In TUI mode, `subagent` returns a dispatch receipt immediately (with `taskId`); the result arrives later as a `[subagent-result]` system notification. In non-TUI modes (print/json), `subagent` waits for the subagent to finish and returns the full result directly. The main agent decides the next step based on the result.
-
 Four levels of isolation:
 
 - **Process isolation**: every subagent spawns a fresh `pi --mode json` process. Its system prompt is written to a temp file and injected via `--append-system-prompt`, so subagents never pollute each other.
 - **Context isolation**: the subagent sees only the task you delegated, not the tool-call trail from the main agent.
 - **Capability isolation**: the `tools` and `skills` fields give each subagent a precise, minimal toolbox.
 - **Recursion boundary**: subagents cannot delegate further (depth limit = 1), keeping task scope manageable.
+
+---
+
+## Async workflow
+
+This is the biggest difference from the sync version, and the primary way to use it (TUI mode).
+
+### 1. Dispatch (the `subagent` tool)
+
+The main agent calls the `subagent` tool, which spawns an isolated `pi` process for the subagent. **Non-TUI modes (print/json) automatically fall back to synchronous** — they wait for the subagent to finish and return the result directly, with no notification.
+
+### 2. Receipt (returns immediately)
+
+In TUI mode, `subagent` **returns a dispatch receipt immediately** and does not block:
+
+```
+已派出 coder. taskId: 01912345-6789-7abc-8def-0123456789ab
+```
+
+The `taskId` is the session ID; reuse it later to continue the same task. **The receipt is not the result** — do not fabricate results.
+
+### 3. Background execution + progress widget
+
+The subagent runs in a background process. A progress widget appears above the TUI editor, listing all in-flight tasks in real time (taskId, agent, current phase, elapsed time):
+
+```
+● 01912345-abcd... coder    ⚡ read...         01:23
+```
+
+### 4. Result notification (`[subagent-result]`)
+
+When the subagent finishes, its result is pushed into the conversation as a **`[subagent-result]` system notification** — a system message, not a user request:
+
+- If the main agent is **idle**, the notification triggers a new turn immediately.
+- If the main agent is **busy**, the notification is queued and triggers a turn after the current one finishes.
+
+Results arrive automatically — **no polling**. To confirm which tasks are still in flight (e.g. after a `/tree` rewind loses the receipts), use the `subagent_status` tool.
+
+### 5. Read the full result (`/subagent-result`)
+
+The notification card shows only a summary. The user reads the full result in a full-screen viewer via `/subagent-result <taskId>`: `↑↓`/`jk` scroll, `Space`/`b` page, `g`/`G` top/bottom, `Enter`/`Esc`/`q` close.
+
+### The flow at a glance
+
+```
+Main agent dispatches subagent
+      │ immediate receipt (已派出 <agent>. taskId: <id>)
+      ▼
+Subagent runs in a background process (progress widget updates live)
+      │
+      ▼
+On completion, a [subagent-result] notification is pushed ──► processed now if idle, queued if busy
+      │
+      ▼
+User runs /subagent-result <taskId> to read the full output
+```
+
+---
+
+## Tools and commands
+
+### Tools (for the main agent)
+
+| Tool | Purpose | Key constraint |
+|------|---------|----------------|
+| `subagent` | Async dispatch (TUI mode); falls back to sync in non-TUI | Receipt ≠ result; results arrive as notifications, don't poll |
+| `subagent_status` | List in-flight tasks (taskId, agent, description, **no elapsed time**) | Only confirm "what's still running"; never poll with it |
+| `subagent_cancel` | Main agent cancels one in-flight task | Only when clearly wrong or no longer needed; never for being slow |
+
+### Commands (for the user)
+
+| Command | Purpose |
+|---------|---------|
+| `/subagent-cancel <taskId>` | Cancel one running background task (lists running tasks with no argument) |
+| `/subagent-cancel-all` | Cancel all running background tasks at once |
+| `/subagent-result <taskId>` | Read a task's full result in a full-screen viewer |
+
+---
+
+## Notification envelope and card
+
+### Envelope (the LLM contract)
+
+The `[subagent-result]` notification is **self-contained** — it carries everything the main agent needs to process the result in one message:
+
+```
+## [subagent-result] coder 成功 (taskId: 01912345-6789-7abc-8def-0123456789ab)
+
+- 状态: 成功
+- 任务: 将认证中间件重构为使用 async/await。
+- 耗时: 02:34 · 用量: 5 turns/↑12.5k/↓3.2k/$0.0042
+- 会话: 01912345-6789-7abc-8def-0123456789ab
+
+在途任务: 1
+- 01912345-aaaa-7bbb-8ccc-0123456789ab (writer): 更新 README。
+
+---
+<full subagent output>
+```
+
+- **Status**: `成功` (success) / `失败` (failure) / `超时` (timeout) / `已取消` (cancelled).
+- **In-flight block**: lists the other background tasks still running (not itself), so the main agent knows how many are outstanding — while the count is non-zero, do not report "all done" to the user.
+- **Full result**: the body enters the LLM context in full, untruncated.
+
+See [ADVANCED.en.md](ADVANCED.en.md) for the complete envelope format, status semantics, and cancel-origin distinctions.
+
+### Notification card (user-facing rendering)
+
+In the TUI, the user sees a **tinted summary card**, not the full result:
+
+- **Success**: green background (✓)
+- **Failure**: red background (✗)
+- **Timeout / cancelled**: yellow background
+
+The card shows only the agent, status, taskId, and usage summary, plus the hint `查看全文: /subagent-result <taskId>`. The full result text lives in the task's session file; read it with `/subagent-result`.
+
+---
+
+## Design discipline
+
+Async mode introduces a few rules, baked into the tool prompts and implementation, that the main agent follows automatically:
+
+- **Cancel-origin distinction**: `已取消` (cancelled) has three origins — user (`/subagent-cancel`), main agent (`subagent_cancel` tool), and session shutdown (`session_shutdown`). A user-initiated cancel must **never be auto-retried**; ask the user first.
+- **No polling**: results arrive automatically as notifications. `subagent_status` exists only to confirm what's in flight (e.g. after a `/tree` rewind), carries no elapsed time, and is not meant to be called frequently.
+- **Anti-abuse cancellation**: `subagent_cancel` ships with prompt guidance — cancel only when the task is clearly wrong or no longer needed, never just because it's taking long (background subagents are expected to run long).
+- **Resource-conflict discipline**: before dispatching multiple tasks in parallel, consider whether they touch the same files or code areas; when in doubt, dispatch sequentially or ask the user.
+- **Recursion blocked entirely**: a subagent (depth ≥ 1) can never dispatch `subagent`; delegation depth is capped at 1.
+- **TUI async / non-TUI sync fallback**: only TUI mode takes the async path; print/json and other non-TUI modes fall back to synchronous blocking, keeping scripted scenarios predictable.
 
 ---
 
@@ -108,9 +246,7 @@ Once installed, the `pi` command is available in your terminal.
 pi install npm:@wolido/async-subagent-isolation
 ```
 
-### 2. Copy the example agents
-
-The examples already include this configuration. Copy them directly or customize as needed:
+### 2. Copy the example agents and skills
 
 ```bash
 cp examples/pi/agent/agents/*.md ~/.pi/agent/agents/
@@ -119,8 +255,6 @@ cp -r examples/pi/agent/skills/* ~/.pi/agent/skills/
 ```
 
 See `examples/pi/agent/agents/` for the agent definitions; customize as needed.
-
-Use it as-is, or tweak it to fit your workflow.
 
 ### 3. Assign the task in natural language
 
@@ -147,7 +281,7 @@ Then tell the main agent:
 
 The main agent will automatically call the `coder` subagent via the `subagent` tool. You don't need to write JSON or worry about `sessionId` — the extension handles spawning and cleanup.
 
-In TUI mode, the `subagent` dispatch receipt includes a `taskId` (the session ID). The result arrives later as a `[subagent-result]` notification — the main agent processes it automatically, no intervention needed. Reuse the session ID from the receipt if you need to continue the same task. See [ADVANCED.en.md](ADVANCED.en.md) for the exact format.
+In TUI mode, `subagent` returns a dispatch receipt (`已派出 coder. taskId: <id>`); the result arrives later as a `[subagent-result]` notification — the main agent processes it automatically, no intervention needed. Reuse the `taskId` (the session ID) from the receipt if you need to continue the same task.
 
 ---
 
@@ -190,14 +324,10 @@ Agent discovery rules:
 
 The main agent should be a pure planner: read code, make decisions, delegate tasks. All concrete work — writing files, running commands, editing code — is handled by subagents, each running in its own isolated pi process. This keeps the main agent's context focused on what to do and what came back, rather than being polluted by tool-call traces.
 
-Use `examples/pi/agent/master.md` as the main agent system prompt — copy it to `~/.pi/agent/master.md`.
-
-See examples/pi/agent/master.md for the full example — copy it to ~/.pi/agent/master.md.
-
-Copy the example agents to `~/.pi/agent/agents/`:
+Use `examples/pi/agent/master.md` as the main agent system prompt — copy it to `~/.pi/agent/master.md`:
 
 ```bash
-cp examples/pi/agent/agents/*.md ~/.pi/agent/agents/
+cp examples/pi/agent/master.md ~/.pi/agent/master.md
 ```
 
 Then start the main agent with:
@@ -216,6 +346,8 @@ What each flag does:
 - `--append-system-prompt ~/.pi/agent/master.md`: appends the main agent system prompt to the default prompt.
 - `--skill ~/.pi/agent/skills/brainstorming/`: loads the brainstorming skill for task planning.
 
+Subagents (`coder`, `writer`) load their own skills via the `skills:` frontmatter field — no CLI flag needed.
+
 If you only want them for the current project, place them in `.pi/agents/`; the extension will load these project-level agents when invoking `subagent`.
 
 ---
@@ -230,7 +362,7 @@ Beyond model choice, you can also set a **thinking level** (reasoning depth) per
 
 ### Configuration file
 
-Use `subagent-isolation.json` to assign a model and thinking level per subagent:
+Use `subagent-isolation.json` to assign a model and thinking level per subagent. (The file name is retained from the sync original, so both projects can share the same config):
 
 - **User-level**: `~/.pi/agent/subagent-isolation.json`
 - **Project-level**: `.pi/subagent-isolation.json` (searched upward from the working directory)
@@ -282,28 +414,6 @@ Project-level configuration overrides user-level keys of the same name. For exam
 
 ---
 
-## Architecture and workflow
-
-1. The user makes a request.
-2. The main agent breaks it down and picks the right subagent.
-3. The `subagent` tool spawns an isolated `pi` process for that subagent. In TUI mode, the dispatch is async — it returns a receipt immediately; the result arrives later as a `[subagent-result]` notification. In non-TUI modes, it waits synchronously for completion.
-4. The subagent executes with a clean context and only the selected tools/skills.
-5. The main agent receives the result, summarizes, and continues.
-
-The main agent keeps only "what to do" and "what happened." All intermediate tool-call noise stays inside the subagent process. The more complex the task, the bigger the win.
-
-### TUI async mode
-
-In TUI mode, the `subagent` tool is asynchronous: it returns a **dispatch receipt** immediately (with `taskId` and session ID) and does not block. The subagent runs in the background; when it finishes, the result is pushed into the conversation as a `[subagent-result]` system notification — a system message, not a user request. The main agent recognizes and processes it automatically.
-
-- The receipt is not the result. Do not fabricate results.
-- Results arrive automatically — no need to poll. To confirm which tasks are still in flight (e.g. after a `/tree` rewind), use the `subagent_status` tool.
-- Dispatch independent tasks in parallel; for tasks with dependencies, wait for the corresponding notification before dispatching the next.
-
-Users can cancel a single running background task at any time with `/subagent-cancel <taskId>`, or cancel all running tasks at once with `/subagent-cancel-all`. All in-flight subprocesses are killed automatically on quit, session switch, or reload.
-
----
-
 ## Example skills
 
 The GitHub repo ships three ready-to-use skills in [`examples/pi/agent/skills/`](https://github.com/Wolido/subagent-isolation/tree/main/examples/pi/agent/skills):
@@ -348,6 +458,7 @@ If you need to construct `subagent` calls manually, reuse a `sessionId`, underst
 - `package.json` — npm package manifest
 - `tsconfig.json` — TypeScript configuration
 - `README.md` / `README.en.md` — documentation
+- `ADVANCED.md` / `ADVANCED.en.md` — advanced reference
 - `LICENSE` — MIT license
 
 ---

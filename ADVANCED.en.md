@@ -42,15 +42,12 @@ In TUI mode, the `subagent` tool is **asynchronous**: it returns a dispatch rece
 In TUI mode, `subagent` returns this receipt immediately (it is NOT the result!):
 
 ```
-Subagent "coder" 已派出 (dispatched). taskId: 01912345-6789-7abc-8def-0123456789ab
-The subagent is running in the background. Its result will arrive later as a
-[subagent-result] system notification (NOT a user request). Do not treat this
-receipt as the result, do not fabricate results, and do not poll for status.
-Reuse session id "01912345-6789-7abc-8def-0123456789ab" to continue this task later.
+已派出 coder. taskId: 01912345-6789-7abc-8def-0123456789ab
 ```
 
 Key points:
 
+- **The receipt is a single line.** The async-semantics guidance (don't fabricate results, don't poll, results arrive as a `[subagent-result]` notification) is embedded in the `subagent` tool's `description` / `promptGuidelines`; the receipt itself stays a single line.
 - **The receipt is not the result.** Do not fabricate results.
 - **taskId = sessionId.** The `taskId` in the receipt is the session ID; reuse it directly.
 - **Do not poll.** Results arrive automatically as `[subagent-result]` notifications; to confirm which tasks are still in flight (e.g. after a `/tree` rewind), use the `subagent_status` tool.

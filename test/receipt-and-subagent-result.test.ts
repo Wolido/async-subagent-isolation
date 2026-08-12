@@ -89,13 +89,16 @@ function createViewerCtx() {
 	return { ctx, notifyMock, customMock, getRendered: () => rendered };
 }
 
-/** Mock a TUI command ctx that captures handleInput for interactive testing. */
+/** Mock a TUI command ctx that captures handleInput for interactive testing.
+ * `done` is captured as a vi.fn() so tests can assert the viewer was closed
+ * (Enter/Esc/q all close via done()). */
 function createInteractiveViewerCtx() {
 	const notifyMock = vi.fn();
 	let component: any = null;
+	const doneMock = vi.fn();
 	const customMock = vi.fn(async (cb: any) => {
 		const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
-		component = cb(null, theme, null, () => {});
+		component = cb(null, theme, null, doneMock);
 	});
 	const ctx = { hasUI: true, mode: "tui" as const, ui: { notify: notifyMock, custom: customMock } };
 	return {
@@ -105,6 +108,7 @@ function createInteractiveViewerCtx() {
 		getComponent: () => component,
 		getRendered: (width = 80) => component ? component.render(width).join("\n") : "",
 		handleInput: (data: string) => component?.handleInput(data),
+		doneMock,
 	};
 }
 
@@ -567,6 +571,299 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 	});
 
 	// ================================================================
+	// 5. /subagent-result 替代按键（less/vim 风格，红阶段）
+	// PageUp/PageDown 需 Fn 组合难按，新增替代键：
+	//   空格=向下翻页  b=向上翻页  j=向下滚一行  k=向上滚一行
+	//   g=跳到开头     G=跳到底部
+	// ================================================================
+	describe("/subagent-result 替代按键（红阶段）", () => {
+		/** Generate a long multi-line text (200 lines). */
+		function generateLongText(lineCount = 200): string {
+			return Array.from({ length: lineCount }, (_, i) => `Line ${i + 1}: This is test content.`).join("\n");
+		}
+
+		/** Open the fullscreen viewer with a 200-line assistant text. */
+		async function openViewer(taskId: string) {
+			const { pi } = loadExtension();
+			const commandDef = pi._commandDefs.get("subagent-result");
+			expect(commandDef).toBeDefined();
+
+			const sessionDir = path.join(tempDir, "subagent-sessions", taskId);
+			writeSessionFile(sessionDir, taskId, [
+				{
+					type: "message",
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: generateLongText() }],
+					},
+				},
+			]);
+
+			const viewer = createInteractiveViewerCtx();
+			await commandDef.handler(taskId, viewer.ctx);
+			return viewer;
+		}
+
+		it("空格键应向下翻页（替代 PageDown）", async () => {
+			const { getRendered, handleInput } = await openViewer("space-page-down");
+
+			// Arrange: 初始在顶部
+			const initialRender = getRendered();
+			expect(initialRender).toContain("Line 1:");
+
+			// Act: 按空格（字符 " "）
+			handleInput(" ");
+
+			// Assert: 应发生向下翻页（输出变化）
+			expect(getRendered()).not.toBe(initialRender);
+		});
+
+		it("b 键应向上翻页（替代 PageUp）", async () => {
+			const { getRendered, handleInput } = await openViewer("b-page-up");
+
+			// Arrange: 先跳到底部
+			handleInput("\x1b[F"); // End
+			const bottomRender = getRendered();
+			expect(bottomRender).toContain("Line 200");
+
+			// Act: 按 b
+			handleInput("b");
+			const afterBRender = getRendered();
+
+			// Assert: 应向上翻页（输出向上变化，不再显示最后一行）
+			expect(afterBRender).not.toBe(bottomRender);
+			expect(afterBRender).not.toContain("Line 200");
+		});
+
+		it("j 键应向下滚动一行（替代 ↓）", async () => {
+			const { getRendered, handleInput } = await openViewer("j-scroll-down");
+
+			// Arrange: 初始在顶部
+			const initialRender = getRendered();
+
+			// Act: 按 j
+			handleInput("j");
+			const afterJRender = getRendered();
+
+			// Assert: 应下移一行（输出变化）
+			expect(afterJRender).not.toBe(initialRender);
+
+			// 再按 j：继续逐行下移
+			handleInput("j");
+			expect(getRendered()).not.toBe(afterJRender);
+		});
+
+		it("k 键应向上滚动一行（替代 ↑）", async () => {
+			const { getRendered, handleInput } = await openViewer("k-scroll-up");
+
+			// Arrange: 先用 ↓ 向下滚两行
+			handleInput("\x1b[B"); // ↓ 1 行
+			const oneDownRender = getRendered();
+			handleInput("\x1b[B"); // ↓ 2 行
+			expect(getRendered()).not.toBe(oneDownRender);
+
+			// Act: 按 k
+			handleInput("k");
+
+			// Assert: 应向上滚回一行（回到 ↓ 1 行时的输出）
+			expect(getRendered()).toBe(oneDownRender);
+		});
+
+		it("g 键应跳到开头（替代 Home）", async () => {
+			const { getRendered, handleInput } = await openViewer("g-jump-top");
+
+			// Arrange: 先跳到底部
+			handleInput("\x1b[F"); // End
+			expect(getRendered()).toContain("Line 200");
+
+			// Act: 按 g
+			handleInput("g");
+
+			// Assert: 应回到顶部（输出含第一行）
+			expect(getRendered()).toContain("Line 1:");
+		});
+
+		it("G 键应跳到底部（替代 End）", async () => {
+			const { getRendered, handleInput } = await openViewer("G-jump-bottom");
+
+			// Arrange: 初始在顶部
+			const initialRender = getRendered();
+			expect(initialRender).toContain("Line 1:");
+
+			// Act: 按 G
+			handleInput("G");
+			const afterGRender = getRendered();
+
+			// Assert: 应跳到底部（输出含最后一行）
+			expect(afterGRender).toContain("Line 200");
+			expect(afterGRender).not.toBe(initialRender);
+		});
+
+		it("空格在底部不再下移（与 PageDown 同 clamp 逻辑）", async () => {
+			const { getRendered, handleInput } = await openViewer("space-bottom-clamp");
+
+			// Act: 多次按空格应滚到底部（当前空格无响应 → 停留顶部）
+			for (let i = 0; i < 50; i++) {
+				handleInput(" ");
+			}
+			const atBottomRender = getRendered();
+
+			// Assert: 应滚到底部（输出含最后一行）
+			expect(atBottomRender).toContain("Line 200");
+
+			// 底部再按空格：不越界、输出不再变化
+			handleInput(" ");
+			expect(getRendered()).toBe(atBottomRender);
+		});
+
+		it("g 在顶部不越界（clamp 到 0，不崩溃）", async () => {
+			const { getRendered, handleInput } = await openViewer("g-top-clamp");
+
+			// Arrange: 初始在顶部
+			const initialRender = getRendered();
+			expect(initialRender).toContain("Line 1:");
+
+			// 先向下滚动 3 行
+			for (let i = 0; i < 3; i++) {
+				handleInput("\x1b[B"); // ↓
+			}
+			expect(getRendered()).not.toBe(initialRender);
+
+			// Act: 按 g 应回到顶部
+			handleInput("g");
+
+			// Assert: 恰好回到顶部（不越界、不偏移）
+			expect(getRendered()).toBe(initialRender);
+		});
+
+		// ============================================================
+		// 5b. 替代按键的 Kitty 键盘协议（CSI-u）形态（红阶段）
+		// Kitty/WezTerm/ghostty/foot 等终端启用 Kitty 协议后，普通字符也
+		// 会被编码为 CSI-u 序列（flag 1 disambiguate / flag 4 alternate
+		// keys）：按 k 收到 \x1b[107u、空格 \x1b[32u、shift+g 收到
+		// \x1b[103:71;2u。当前 handleInput 用裸字符比较（data === "k" 等），
+		// 这些序列全部不响应。修复方向：改用 matchesKey(data, "k") /
+		// matchesKey(data, Key.space) / matchesKey(data, Key.shift("g"))
+		// （matchesKey 同时覆盖原始字符与 CSI-u 两种形态）。
+		// ============================================================
+		describe("替代按键（Kitty CSI-u 形态，红阶段）", () => {
+			it("CSI-u 空格（\\x1b[32u）应向下翻页（替代 PageDown）", async () => {
+				const { getRendered, handleInput } = await openViewer("csi-u-space-page-down");
+
+				// Arrange: 初始在顶部
+				const initialRender = getRendered();
+				expect(initialRender).toContain("Line 1:");
+
+				// Act: Kitty 协议下按空格，终端发送 CSI-u 序列 \x1b[32u（空格 = 0x20 = 32）
+				handleInput("\x1b[32u");
+
+				// Assert: 应发生向下翻页（输出变化）——当前裸字符比较不响应 → 红
+				expect(getRendered()).not.toBe(initialRender);
+			});
+
+			it("CSI-u k（\\x1b[107u）应向上滚动一行（替代 ↑）", async () => {
+				const { getRendered, handleInput } = await openViewer("csi-u-k-scroll-up");
+
+				// Arrange: 先用 ↓ 向下滚两行
+				handleInput("\x1b[B"); // ↓ 1 行
+				const oneDownRender = getRendered();
+				handleInput("\x1b[B"); // ↓ 2 行
+				expect(getRendered()).not.toBe(oneDownRender);
+
+				// Act: Kitty 协议下按 k，终端发送 CSI-u 序列 \x1b[107u（k = 0x6b = 107）
+				handleInput("\x1b[107u");
+
+				// Assert: 应向上滚回一行（回到 ↓ 1 行时的输出）——当前不响应 → 红
+				expect(getRendered()).toBe(oneDownRender);
+			});
+
+			it("CSI-u j（\\x1b[106u）应向下滚动一行（替代 ↓）", async () => {
+				const { getRendered, handleInput } = await openViewer("csi-u-j-scroll-down");
+
+				// Arrange: 初始在顶部
+				const initialRender = getRendered();
+
+				// Act: Kitty 协议下按 j，终端发送 CSI-u 序列 \x1b[106u（j = 0x6a = 106）
+				handleInput("\x1b[106u");
+
+				// Assert: 应下移一行（输出变化）——当前不响应 → 红
+				expect(getRendered()).not.toBe(initialRender);
+			});
+
+			it("CSI-u shift+g（\\x1b[103:71;2u）应跳到底部（替代 End）", async () => {
+				const { getRendered, handleInput } = await openViewer("csi-u-shift-g-jump-bottom");
+
+				// Arrange: 初始在顶部
+				const initialRender = getRendered();
+				expect(initialRender).toContain("Line 1:");
+
+				// Act: Kitty 协议下按 shift+G，终端发送 CSI-u 序列 \x1b[103:71;2u
+				//（codepoint 103='g' : shifted 71='G' ; mod 2 = shift，flag 4 alternate keys）
+				handleInput("\x1b[103:71;2u");
+
+				// Assert: 应跳到底部（输出含最后一行）——当前不响应 → 红
+				expect(getRendered()).toContain("Line 200");
+				expect(getRendered()).not.toBe(initialRender);
+			});
+		});
+
+		// ============================================================
+		// 5c. q 键关闭查看器（红阶段）
+		// 需求：/subagent-result 全屏查看器加 q 键退出，与 Enter/Esc 并列。
+		// 当前 handleInput 仅对 enter/escape 调用 done()，q 无处理 → 红。
+		// 修复方向：与替代按键一致使用 matchesKey(data, "q")，以同时兼容
+		// 裸字符 q 与 Kitty CSI-u 形态 \x1b[113u（q = 0x71 = 113）。
+		// ============================================================
+		describe("q 键关闭查看器（红阶段）", () => {
+			it("裸 q（\"q\"）应关闭查看器（done 被调用）", async () => {
+				const { handleInput, doneMock } = await openViewer("q-close-bare");
+
+				// Arrange: 打开查看器后 done 未被调用
+				expect(doneMock).not.toHaveBeenCalled();
+
+				// Act: 按 q
+				handleInput("q");
+
+				// Assert: 应调用 done 关闭查看器 —— 当前 q 无处理 → 红
+				expect(doneMock).toHaveBeenCalled();
+			});
+
+			it("CSI-u q（\\x1b[113u）应关闭查看器（done 被调用）", async () => {
+				const { handleInput, doneMock } = await openViewer("q-close-csi-u");
+
+				// Arrange: 打开查看器后 done 未被调用
+				expect(doneMock).not.toHaveBeenCalled();
+
+				// Act: Kitty 协议下按 q，终端发送 CSI-u 序列 \x1b[113u（q = 0x71 = 113）
+				handleInput("\x1b[113u");
+
+				// Assert: 应调用 done 关闭查看器 —— 当前不响应 → 红
+				expect(doneMock).toHaveBeenCalled();
+			});
+
+			it("回归：Enter（\\r）应关闭查看器（done 被调用）", async () => {
+				const { handleInput, doneMock } = await openViewer("enter-close-regression");
+
+				// Act: 按 Enter
+				handleInput("\r");
+
+				// Assert: 应调用 done —— 既有行为，保持绿
+				expect(doneMock).toHaveBeenCalled();
+			});
+
+			it("回归：Esc（\\x1b）应关闭查看器（done 被调用）", async () => {
+				const { handleInput, doneMock } = await openViewer("escape-close-regression");
+
+				// Act: 按 Esc
+				handleInput("\x1b");
+
+				// Assert: 应调用 done —— 既有行为，保持绿
+				expect(doneMock).toHaveBeenCalled();
+			});
+		});
+	});
+
+	// ================================================================
 	// 3. /subagent-result 修复红阶段测试
 	// ================================================================
 	describe("/subagent-result 修复红阶段测试", () => {
@@ -670,6 +967,83 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 			expect(customMock).toHaveBeenCalled();
 			// Should NOT write to stdout
 			expect(stdoutSpy).not.toHaveBeenCalled();
+		});
+	});
+
+	// ================================================================
+	// 6. /subagent-result 操作提示位置（红阶段）
+	// 修复目标：操作提示从底部 footer 移到标题行（第一行永远可见）：
+	//   Subagent Result: <taskId>  ↑↓/jk 滚动 · Space/b 翻页 · g/G 首尾 · Enter/Esc/q 关闭
+	// 当前实现：提示在底部 footer 行（被挤到屏幕外），标题行只有 taskId → 以下测试红。
+	// 渲染结构：[顶部边框, 标题行, body..., footer, 底部边框]，标题行 = 第一行内容行。
+	// ================================================================
+	describe("/subagent-result 操作提示位置（红阶段）", () => {
+		/** 操作提示关键词（取自 footer 提示文本，任一命中即视为含提示）。 */
+		const HINT_PATTERN = /Space|翻页|关闭|滚动|首尾/;
+
+		/** 用受控短文本打开查看器（内容不含提示关键词，避免误判）。 */
+		async function openShortViewer(taskId: string, text = "The answer is 4.") {
+			const { pi } = loadExtension();
+			const commandDef = pi._commandDefs.get("subagent-result");
+			expect(commandDef).toBeDefined();
+			const sessionDir = path.join(tempDir, "subagent-sessions", taskId);
+			writeSessionFile(sessionDir, taskId, [
+				{
+					type: "message",
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text }],
+					},
+				},
+			]);
+			const viewer = createInteractiveViewerCtx();
+			await commandDef.handler(taskId, viewer.ctx);
+			return viewer;
+		}
+
+		/** 渲染行数组（getRendered 以 \n 拼接，拆回行数组）。 */
+		function renderedLines(viewer: ReturnType<typeof createInteractiveViewerCtx>): string[] {
+			return viewer.getRendered().split("\n");
+		}
+
+		/** 标题行 = 渲染输出的第一行内容行（顶部边框之后的 "Subagent Result: ..." 行）。 */
+		function titleLine(viewer: ReturnType<typeof createInteractiveViewerCtx>): string {
+			return renderedLines(viewer).find((line) => line.includes("Subagent Result")) ?? "";
+		}
+
+		it("标题行（第一行内容行）应包含操作提示关键词（当前提示在底部 footer → 红）", async () => {
+			// Arrange: 打开查看器
+			const viewer = await openShortViewer("hint-title-red");
+
+			// Act: 取标题行
+			const title = titleLine(viewer);
+
+			// Assert: 标题行应含操作提示关键词（如 "Space" / "翻页" / "关闭"）
+			// 当前实现标题行仅 "Subagent Result: <taskId>"，提示在底部 footer → 红
+			expect(title).toMatch(HINT_PATTERN);
+		});
+
+		it("第一行（标题行）应同时包含标题与操作提示 → 红", async () => {
+			const viewer = await openShortViewer("hint-title-both");
+
+			const title = titleLine(viewer);
+
+			// 标题行应包含标题本身……
+			expect(title).toContain("Subagent Result");
+			// ……且同一行还包含操作提示（当前提示在 footer，不同行 → 红）
+			expect(title).toMatch(HINT_PATTERN);
+		});
+
+		it("操作提示不应残留在底部 footer 行（footer 删除 → 红）", async () => {
+			const viewer = await openShortViewer("hint-footer-removed");
+
+			// 渲染结构：[顶部边框, 标题, body..., footer, 底部边框]
+			// 底部边框前的最后一行内容（当前是 footer 提示行）
+			const lines = renderedLines(viewer);
+			const lastContentLine = lines[lines.length - 2] ?? "";
+
+			// 当前 footer 行含提示关键词 → 红
+			expect(lastContentLine).not.toMatch(HINT_PATTERN);
 		});
 	});
 });

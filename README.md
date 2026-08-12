@@ -13,13 +13,27 @@
 
 </div>
 
-主 agent 不能碰代码。没有 `write`，没有 `edit`，没有 `bash`。它只有 `read`、`grep`、`find`、`ls` 四个只读工具，外加一个 `subagent` 工具用来委派任务。所有修改文件、跑命令、执行逻辑的工作，全部交给子 agent——每个子 agent 跑在独立的 `pi` 进程中，有自己的 system prompt 和 skills。主 agent 和子 agent 之间，子 agent 和子 agent 之间，进程完全隔离。
+**async-subagent-isolation** 是 [Pi Agent](https://github.com/earendil-works/pi) 的扩展，也是 [subagent-isolation](https://github.com/Wolido/subagent-isolation)（同步版）的**异步演进**。
 
-**async-subagent-isolation** 是 [Pi Agent](https://github.com/earendil-works/pi) 的扩展。Pi 本身已经支持子 agent，但这个扩展做了一个关键的约束——**剥夺主 agent 的执行能力，强制隔离**。主 agent 变成纯粹的计划者和观察者。
+核心约束不变：**主 agent 不能碰代码**。没有 `write`、没有 `edit`、没有 `bash`，只有 `read`、`grep`、`find`、`ls` 四个只读工具，外加一个 `subagent` 工具用来委派任务。所有修改文件、跑命令、执行逻辑的工作都交给子 agent——每个子 agent 跑在独立的 `pi` 进程中，有自己的 system prompt 和 skills，主 agent 与子 agent、子 agent 与子 agent 之间进程完全隔离。
 
-## 与原项目的关系
+关键区别在**异步**：在 TUI 模式下，主 agent 派发子 agent 后**立即返回回执**（`已派出 <agent>. taskId: <taskId>`），不阻塞等待；子 agent 在后台独立进程运行，完成后结果以 **[subagent-result] 系统通知**推回对话。主 agent 空闲时通知直接触发处理，忙碌时排队。等待期间主 agent 可以并行派发多个任务、继续做其他工作。
 
-本项目是 [subagent-isolation](https://github.com/Wolido/subagent-isolation)（同步版）的异步演进。两者目标一致——把执行能力从主 agent 剥离、放到隔离的 `pi` 进程中；区别在委派方式：本项目在主 agent 的 **TUI 模式**下以**后台异步**方式派发子 agent（立即返回回执，结果稍后以系统通知到达），原项目同步等待子 agent 完成。原项目继续作为同步版维护。
+---
+
+## 同步版 vs 异步版
+
+本项目是 [subagent-isolation](https://github.com/Wolido/subagent-isolation) 的异步演进，两者目标一致——把执行能力从主 agent 剥离、放进隔离的 `pi` 进程；区别只在委派语义：
+
+| | 同步版（原项目） | 异步版（本项目） |
+|---|---|---|
+| 派发后 | 阻塞等待子 agent 完成 | **立即返回回执**（含 `taskId`） |
+| 结果呈现 | 在工具返回值处直接内联 | 以 `[subagent-result]` 系统通知到达 |
+| 并行 | 每次调用阻塞，只能串行 | 可并行派发多个任务 |
+| 等待期 | 主 agent 回合被占用 | 等待期间继续其他工作 |
+| 结果是否阻塞主 agent 回合 | 阻塞 | 不阻塞 |
+
+**原项目继续作为同步版维护。** 需要同步阻塞语义（结果就在调用处返回）的用户，用原项目；需要异步并行、后台执行、派发即返回的用户，用本项目。
 
 ---
 
@@ -29,9 +43,11 @@
 
 子 agent 系统的核心目的就是把一个不断膨胀的上下文切成多块。每个 agent 只处理自己那一小块任务，避免单一会话被历史痕迹拖垮。
 
+**异步进一步放大了这个收益**：主 agent 派发后不被子 agent 的执行过程占用回合，上下文里只留下"要做什么"和"结果是什么"；子 agent 漫长的执行痕迹全部留在它自己的进程里，不会污染主 agent 的上下文。
+
 ## 和常规子 agent 的区别
 
-很多子 agent 实现只是“在主 agent 内部开一个工具调用”。子 agent 仍然复用主 agent 的提示词和 skills，主 agent 也仍然保留着写文件、跑命令的能力——隔离是可选的、不彻底的。
+很多子 agent 实现只是"在主 agent 内部开一个工具调用"。子 agent 仍然复用主 agent 的提示词和 skills，主 agent 也仍然保留着写文件、跑命令的能力——隔离是可选的、不彻底的。
 
 async-subagent-isolation 做的是强制且完全的隔离：
 
@@ -41,7 +57,7 @@ async-subagent-isolation 做的是强制且完全的隔离：
 - **执行能力完全隔离**：主 agent 被剥夺 `write`/`edit`/`bash`，只能委派，无法自己执行。
 - **独立可配置**：每个 agent 单独定义自己的 `tools` 和 `skills`，精确控制它能做什么、不能做什么。
 
-常规子 agent 是“分工”；async-subagent-isolation 是“彻底分家”。
+常规子 agent 是"分工"；async-subagent-isolation 是"彻底分家"。
 
 ---
 
@@ -52,6 +68,7 @@ async-subagent-isolation 做的是强制且完全的隔离：
 | 一个 agent 同时做规划和执行，上下文超过阈值后推理质量下降 | 主 agent 只规划委派，每个子 agent 只处理自己的任务片段 |
 | 主 agent 仍保留写文件、跑命令能力，隔离不彻底 | 主 agent 被剥夺 `write`/`edit`/`bash`，子 agent 在独立进程中运行 |
 | 所有 skill 和工具堆在一个 agent 里，互相干扰 | 每个子 agent 只加载自己需要的 skill 和 tools |
+| 子 agent 执行时主 agent 只能干等，回合被阻塞 | 派发即返回，等待期可并行派发、继续其他工作 |
 
 ---
 
@@ -59,15 +76,8 @@ async-subagent-isolation 做的是强制且完全的隔离：
 
 | 角色 | 职责 | 运行位置 |
 |------|------|----------|
-| 主 agent | 理解需求、拆分任务、委派与汇总 | 你的 `pi` 主会话 |
+| 主 agent | 理解需求、拆分任务、派发与汇总 | 你的 `pi` 主会话 |
 | 子 agent | 读代码、改代码、跑验证并返回结果 | 独立的 `pi --mode json` 进程 |
-
-一个典型任务这样流转：
-
-1. 你向主 agent 提出任务。
-2. 主 agent 通过 `subagent` tool 启动一个独立 pi 进程。
-3. 子 agent 只拿到委派的那一句话和自身配置，完成具体修改。
-4. TUI 模式下，`subagent` 立即返回派发回执（含 `taskId`），结果稍后以 `[subagent-result]` 系统通知到达。非 TUI 模式（print/json）则等待子 agent 完成后直接返回结果。主 agent 根据结果决定下一步。
 
 四个层面的隔离：
 
@@ -75,6 +85,134 @@ async-subagent-isolation 做的是强制且完全的隔离：
 - **上下文隔离**：子 agent 看不到主 agent 的执行痕迹，只拿到你委派的那一句话。
 - **能力隔离**：通过 `tools` 和 `skills` 字段，给不同子 agent 配备不同的工具箱。
 - **递归边界**：子 agent 不可再委派（深度限制为 1），任务范围始终可控。
+
+---
+
+## 异步工作流
+
+这是本项目与同步版最大的不同，也是核心使用方式（TUI 模式）。
+
+### 1. 派发（`subagent` 工具）
+
+主 agent 调用 `subagent` 工具，为子 agent 启动独立的 `pi` 进程。**非 TUI 模式（print/json）会自动降级为同步**——等待子 agent 完成后直接返回结果，无通知。
+
+### 2. 回执（立即返回）
+
+TUI 模式下 `subagent` **立即返回派发回执**，不阻塞：
+
+```
+已派出 coder. taskId: 01912345-6789-7abc-8def-0123456789ab
+```
+
+`taskId` 就是 session ID，之后可复用来继续同一任务。**回执不是结果**——不要臆造结果。
+
+### 3. 后台执行 + 进度 widget
+
+子 agent 在后台独立进程运行。TUI 编辑器上方会显示进度 widget，实时列出所有在飞任务（taskId、agent、当前阶段、耗时），例如：
+
+```
+● 01912345-abcd... coder    ⚡ read...         01:23
+```
+
+### 4. 结果通知（`[subagent-result]`）
+
+子 agent 完成后，结果以 **`[subagent-result]` 系统通知**推送到对话。这是系统消息，不是用户请求：
+
+- 主 agent **空闲**时，通知直接触发新的对话回合，立即处理。
+- 主 agent **忙碌**时，通知进入队列，当前回合结束后再触发。
+
+结果自动到达，**无需轮询**。如需确认还有哪些任务在途（例如 `/tree` 回退后回执丢失），用 `subagent_status` 工具查询。
+
+### 5. 查看全文（`/subagent-result`）
+
+通知卡片只显示摘要。用户用 `/subagent-result <taskId>` 在全屏查看器中阅读完整返回：`↑↓`/`jk` 滚动、`Space`/`b` 翻页、`g`/`G` 首尾、`Enter`/`Esc`/`q` 关闭。
+
+### 完整流程一览
+
+```
+主 agent 派发 subagent
+      │ 立即返回回执（已派出 <agent>. taskId: <id>）
+      ▼
+子 agent 在后台独立进程运行（进度 widget 实时显示）
+      │
+      ▼
+完成后推 [subagent-result] 系统通知 ──► 主 agent 空闲直接处理 / 忙碌排队
+      │
+      ▼
+用户 /subagent-result <taskId> 查看完整返回
+```
+
+---
+
+## 工具与命令面
+
+### 工具（主 agent 使用）
+
+| 工具 | 作用 | 关键约束 |
+|------|------|----------|
+| `subagent` | 异步派发任务（TUI 模式）；非 TUI 自动降级同步 | 回执≠结果；结果以通知到达，勿轮询 |
+| `subagent_status` | 查询在途任务（taskId、agent、任务描述，**无耗时**） | 仅确认"还有什么在跑"，勿用它轮询完成 |
+| `subagent_cancel` | 主 agent 取消单个在途任务 | 仅当任务明显错误或不再需要，勿因耗时久而取消 |
+
+### 命令（用户使用）
+
+| 命令 | 作用 |
+|------|------|
+| `/subagent-cancel <taskId>` | 取消单个运行中的后台任务（不带参数时列出运行中任务） |
+| `/subagent-cancel-all` | 一键取消全部运行中的后台任务 |
+| `/subagent-result <taskId>` | 全屏查看某任务的完整返回 |
+
+---
+
+## 通知信封与卡片
+
+### 信封（LLM 契约）
+
+`[subagent-result]` 通知是**自包含**的，一次带全主 agent 处理结果所需的全部信息：
+
+```
+## [subagent-result] coder 成功 (taskId: 01912345-6789-7abc-8def-0123456789ab)
+
+- 状态: 成功
+- 任务: 将认证中间件重构为使用 async/await。
+- 耗时: 02:34 · 用量: 5 turns/↑12.5k/↓3.2k/$0.0042
+- 会话: 01912345-6789-7abc-8def-0123456789ab
+
+在途任务: 1
+- 01912345-aaaa-7bbb-8ccc-0123456789ab (writer): 更新 README。
+
+---
+<子 agent 完整结果文本>
+```
+
+- **状态**：`成功` / `失败` / `超时` / `已取消`。
+- **在途任务块**：列出其余仍在运行的后台任务（不含自身），让主 agent 知道还有几个任务没回来——剩余不为 0 时，不要向用户汇报"全部完成"。
+- **完整结果**：正文全量进入 LLM 上下文，不截断。
+
+信封的完整格式、状态语义与取消来源区分见 [ADVANCED.md](ADVANCED.md)。
+
+### 通知卡片（用户侧渲染）
+
+用户在 TUI 中看到的是**带底色的摘要卡片**，不是完整结果全文：
+
+- **成功**：绿色底色（✓）
+- **失败**：红色底色（✗）
+- **超时 / 已取消**：黄色底色
+
+卡片只显示 agent、状态、taskId 和用量摘要，并提示 `查看全文: /subagent-result <taskId>`。完整结果全文保存在任务会话文件中，用 `/subagent-result` 查看。
+
+---
+
+## 设计纪律
+
+异步模式引入的几条纪律，内嵌在工具提示词和实现中，主 agent 会自动遵守：
+
+- **取消来源区分**：`已取消` 有三种来源——用户（`/subagent-cancel`）、主 agent（`subagent_cancel` 工具）、会话关闭（`session_shutdown`）。用户主动取消**不得自动重试**，须先询问用户。
+- **防轮询**：结果自动以通知到达。`subagent_status` 只用于确认在途（如 `/tree` 回退后），不带耗时，也不鼓励频繁调用。
+- **防滥用取消**：`subagent_cancel` 内嵌提示词——仅当任务明显错误或不再需要时取消，勿因耗时久而取消（后台任务本就预期长时间运行）。
+- **资源冲突纪律**：并行派发多个任务前，考虑它们是否会改同一批文件或代码区域；冲突时串行派发或先问用户。
+- **递归委派完全禁止**：子 agent（深度 ≥ 1）不可再派发 `subagent`，委派深度限制为 1。
+- **TUI 异步 / 非 TUI 同步降级**：只在 TUI 模式走异步路径；print/json 等非 TUI 模式降级为同步阻塞，保证脚本化场景行为可预期。
 
 ---
 
@@ -108,9 +246,7 @@ npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 pi install npm:@wolido/async-subagent-isolation
 ```
 
-### 2. 复制示例 agent
-
-示例已经包含这个配置，你可以直接复制，也可以按需修改：
+### 2. 复制示例 agent 与 skill
 
 ```bash
 cp examples/pi/agent/agents/*.md ~/.pi/agent/agents/
@@ -119,8 +255,6 @@ cp -r examples/pi/agent/skills/* ~/.pi/agent/skills/
 ```
 
 各 agent 的具体定义见 `examples/pi/agent/agents/` 目录，可按需修改。
-
-直接复制即可使用，也可以根据自己的需求调整。
 
 ### 3. 用自然语言指派任务
 
@@ -147,7 +281,7 @@ alias pp='pi --tools read,grep,find,ls,subagent --no-skills --append-system-prom
 
 主 agent 会自动通过 `subagent` tool 调用 `coder`。你不需要手写 JSON，也不需要关心 `sessionId`——扩展会处理隔离进程的启动和回收。
 
-TUI 模式下，`subagent` 返回的派发回执包含 `taskId`（即 session ID），结果稍后以 `[subagent-result]` 通知到达——主 agent 收到后自动处理，无需你干预。如需复用会话，使用回执中的 session ID。具体格式见 [ADVANCED.md](ADVANCED.md)。
+TUI 模式下，`subagent` 返回派发回执（`已派出 coder. taskId: <id>`），结果稍后以 `[subagent-result]` 通知到达——主 agent 收到后自动处理，无需你干预。如需复用会话，使用回执中的 `taskId`（即 session ID）。
 
 ---
 
@@ -188,16 +322,12 @@ Agent 搜索规则：
 
 ## 主 agent 推荐配置
 
-主 agent 应该是一个纯粹的规划者：只读代码、做判断、委派任务。所有写文件、跑命令、改代码的具体操作都交给子 agent，每个子 agent 在独立的 pi 进程中运行。这样主 agent 的上下文只会保留“要做什么”和“结果是什么”，不会被工具调用细节污染。
+主 agent 应该是一个纯粹的规划者：只读代码、做判断、委派任务。所有写文件、跑命令、改代码的具体操作都交给子 agent，每个子 agent 在独立的 pi 进程中运行。这样主 agent 的上下文只会保留"要做什么"和"结果是什么"，不会被工具调用细节污染。
 
-主 agent 的系统提示示例见 `examples/pi/agent/master.md`，复制到 `~/.pi/agent/master.md` 即可。
-
-完整的示例文件见 examples/pi/agent/master.md，可直接复制到 ~/.pi/agent/master.md 使用。
-
-把示例 agent 复制到 `~/.pi/agent/agents/`：
+主 agent 的系统提示示例见 `examples/pi/agent/master.md`，复制到 `~/.pi/agent/master.md` 即可：
 
 ```bash
-cp examples/pi/agent/agents/*.md ~/.pi/agent/agents/
+cp examples/pi/agent/master.md ~/.pi/agent/master.md
 ```
 
 然后使用以下命令启动主 agent：
@@ -232,7 +362,7 @@ pi --tools read,grep,find,ls,subagent \
 
 ### 配置文件
 
-通过 `subagent-isolation.json` 为每个子 agent 单独指定模型和 thinking level：
+通过 `subagent-isolation.json` 为每个子 agent 单独指定模型和 thinking level（该配置文件名沿用同步版原项目，两者可共享配置）：
 
 - **用户级**：`~/.pi/agent/subagent-isolation.json`
 - **项目级**：`.pi/subagent-isolation.json`（从工作目录向上搜索）
@@ -284,28 +414,6 @@ model 和 thinking 的优先级相同（从高到低）：
 
 ---
 
-## 架构与工作流程
-
-1. 用户提出需求。
-2. 主 agent 拆分任务，并决定委派给哪个子 agent。
-3. `subagent` tool 为子 agent 启动独立的 pi 进程。TUI 模式下异步派发——立即返回回执，结果稍后以 `[subagent-result]` 通知到达；非 TUI 模式则同步等待完成。
-4. 子 agent 在干净上下文中执行，只使用指定的 tools/skills。
-5. 主 agent 收到结果后汇总，决定下一步。
-
-主 agent 只保留"要做什么"和"结果是什么"，中间的工具调用痕迹全部留在子 agent 的进程里。任务越复杂，这种隔离带来的收益越明显。
-
-### TUI 异步模式
-
-在 TUI 交互模式下，`subagent` 工具是异步的：调用后**立即返回派发回执**（含 `taskId` 和 session ID），不会阻塞。子 agent 在后台运行，完成后结果以 `[subagent-result]` 系统通知推送到对话中——这是一个系统消息、不是用户请求，主 agent 会自动识别并处理。
-
-- 回执 ≠ 结果。不要臆造结果。
-- 结果自动以通知到达，无需轮询。如需确认还有哪些任务在途（如 `/tree` 回退后），用 `subagent_status` 工具查询。
-- 无依赖的任务可并行派出；有依赖的需等对应通知到达后再派。
-
-用户可以随时用 `/subagent-cancel <taskId>` 取消单个正在运行的后台任务，或用 `/subagent-cancel-all` 一键取消全部运行中的任务。退出、切会话或 reload 时会自动终止所有在飞子进程。
-
----
-
 ## 示例 skills
 
 GitHub 仓库的 [`examples/pi/agent/skills/`](https://github.com/Wolido/subagent-isolation/tree/main/examples/pi/agent/skills) 提供了三个可直接使用的 skill：
@@ -350,6 +458,7 @@ Skill 搜索规则与 agent 相同：`~/.pi/agent/skills/`（用户级）和 `.p
 - `package.json` — npm 包清单
 - `tsconfig.json` — TypeScript 配置
 - `README.md` / `README.en.md` — 说明文档
+- `ADVANCED.md` / `ADVANCED.en.md` — 进阶参考
 - `LICENSE` — MIT 许可证
 
 ---

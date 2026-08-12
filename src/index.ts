@@ -27,7 +27,7 @@ import {
 	getAgentDir,
 	parseFrontmatter,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Key, Markdown, matchesKey, Spacer, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Box, Container, Key, Markdown, matchesKey, Spacer, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 // ===== UUID v7 helper =====
@@ -2109,51 +2109,51 @@ export default function (pi: ExtensionAPI) {
 			if (cmdCtx.hasUI && cmdCtx.mode === "tui") {
 				await cmdCtx.ui.custom((tui, theme, _kb, done) => {
 					const border = new DynamicBorder((s: string) => theme.fg("accent", s));
-					const title = new Text(theme.fg("accent", theme.bold(`Subagent Result: ${taskId}`)), 1, 0);
+					// Title row doubles as the key-hint row (the footer row was pushed
+					// off-screen). Truncated from the tail at render time so the front
+					// keys stay visible when the combined line exceeds the width.
+					const titleText =
+						theme.fg("accent", theme.bold(`Subagent Result: ${taskId}`)) +
+						theme.fg("dim", "  ↑↓/jk 滚动 · Space/b 翻页 · g/G 首尾 · Enter/Esc/q 关闭");
 					const md = new Markdown(text.trim(), 1, 1, getMarkdownTheme());
-					const footer = new Text(
-						theme.fg("dim", "↑↓ 滚动 · PgUp/PgDn 翻页 · Home/End 首尾 · Enter/Esc 关闭"),
-						1,
-						0,
-					);
 					// Scroll state: render(width) slices the fully-rendered markdown
 					// lines to the visible window; handleInput moves the window.
 					let scrollOffset = 0;
 					let lastWidth = 80;
-					// Overhead: top border + title + footer + bottom border = 4 rows.
-					const visibleHeight = () => Math.max(1, (process.stdout.rows || 24) - 4);
+					// Overhead: top border + title + bottom border = 3 rows.
+					const visibleHeight = () => Math.max(1, (process.stdout.rows || 24) - 3);
 					const maxScroll = () => Math.max(0, md.render(lastWidth).length - visibleHeight());
 					return {
 						render: (width: number) => {
 							lastWidth = width;
 							scrollOffset = Math.min(scrollOffset, maxScroll());
 							const body = md.render(width).slice(scrollOffset, scrollOffset + visibleHeight());
+							const title = new Text(truncateToWidth(titleText, width - 2), 1, 0);
 							return [
 								...border.render(width),
 								...title.render(width),
 								...body,
-								...footer.render(width),
 								...border.render(width),
 							];
 						},
 						invalidate: () => md.invalidate(),
 						handleInput: (data: string) => {
-							if (matchesKey(data, Key.enter) || matchesKey(data, Key.escape)) {
+							if (matchesKey(data, Key.enter) || matchesKey(data, Key.escape) || matchesKey(data, "q")) {
 								done(undefined);
 								return;
 							}
-							if (matchesKey(data, Key.up)) {
+							if (matchesKey(data, Key.up) || matchesKey(data, "k")) {
 								scrollOffset = Math.max(0, scrollOffset - 1);
-							} else if (matchesKey(data, Key.down)) {
+							} else if (matchesKey(data, Key.down) || matchesKey(data, "j")) {
 								scrollOffset = Math.min(maxScroll(), scrollOffset + 1);
-							} else if (matchesKey(data, Key.pageUp)) {
+							} else if (matchesKey(data, Key.pageUp) || matchesKey(data, "b")) {
 								// 整页翻页：一页 = 当前可见行数
 								scrollOffset = Math.max(0, scrollOffset - visibleHeight());
-							} else if (matchesKey(data, Key.pageDown)) {
+							} else if (matchesKey(data, Key.pageDown) || matchesKey(data, Key.space)) {
 								scrollOffset = Math.min(maxScroll(), scrollOffset + visibleHeight());
-							} else if (matchesKey(data, Key.home)) {
+							} else if (matchesKey(data, Key.home) || matchesKey(data, "g")) {
 								scrollOffset = 0;
-							} else if (matchesKey(data, Key.end)) {
+							} else if (matchesKey(data, Key.end) || matchesKey(data, Key.shift("g"))) {
 								scrollOffset = maxScroll();
 							} else {
 								return;
@@ -2209,7 +2209,13 @@ export default function (pi: ExtensionAPI) {
 			const usageStr = details ? formatUsageStats(details.usage) : "";
 			if (usageStr) text += ` ${theme.fg("dim", usageStr)}`;
 			if (details?.taskId) text += `\n${theme.fg("muted", `查看全文: /subagent-result ${details.taskId}`)}`;
-			return new Text(text, 0, 0);
+			// Background tint mirrors the dispatch-receipt tool rows: success and
+			// failure reuse the tool-row colors; timeout, cancelled and unknown
+			// states fall back to the neutral pending tint.
+			const bg = isOk ? "toolSuccessBg" : status === STATUS_WORDS.failure ? "toolErrorBg" : "toolPendingBg";
+			const box = new Box(1, 0, (s) => theme.bg(bg, s));
+			box.addChild(new Text(text, 0, 0));
+			return box;
 		} catch {
 			// Rendering must never break the session; fall back to raw content.
 			return new Text(typeof message.content === "string" ? message.content : "", 0, 0);
