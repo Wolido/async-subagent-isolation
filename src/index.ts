@@ -768,6 +768,82 @@ export function extractFinalAssistantText(filePath: string): string | null {
 	return last;
 }
 
+/** Truncate a single-line-ish summary to maxLen chars, appending an ellipsis. */
+function truncateSummary(text: string, maxLen: number): string {
+	return text.length > maxLen ? `${text.slice(0, maxLen)}…` : text;
+}
+
+/**
+ * Extract the full session transcript (方案 A) from a pi session JSONL file:
+ * the task text (first user message) followed by the conversation in original
+ * order — assistant texts, tool calls (`→ name args`) and tool results
+ * (`← name: summary`). Returns null when the file is unreadable or contains
+ * no assistant text (same contract as extractFinalAssistantText).
+ */
+export function extractSessionTranscript(filePath: string): string | null {
+	let raw: string;
+	try {
+		raw = fs.readFileSync(filePath, "utf-8");
+	} catch {
+		return null;
+	}
+	let taskText: string | null = null;
+	const entries: string[] = [];
+	let hasAssistantText = false;
+	for (const line of raw.split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		let record: any;
+		try {
+			record = JSON.parse(trimmed);
+		} catch {
+			continue; // skip malformed lines
+		}
+		if (record?.type !== "message") continue;
+		const message = record.message;
+		const role = message?.role;
+		const parts = message?.content;
+		if (!Array.isArray(parts)) continue;
+		const textOf = () =>
+			parts
+				.filter((p: any) => p?.type === "text" && typeof p.text === "string")
+				.map((p: any) => p.text)
+				.join("\n");
+		if (role === "user") {
+			// The first user message is the dispatched task ("Task: ...");
+			// later user messages (follow-ups) are not shown.
+			if (taskText === null) {
+				const text = textOf();
+				if (text) taskText = text;
+			}
+		} else if (role === "assistant") {
+			for (const part of parts) {
+				if (part?.type === "text" && typeof part.text === "string" && part.text.trim()) {
+					hasAssistantText = true;
+					entries.push(`[assistant] ${part.text}`);
+				} else if (part?.type === "toolCall" && typeof part.name === "string") {
+					const args = truncateSummary(JSON.stringify(part.arguments ?? {}), 200);
+					entries.push(`→ ${part.name} ${args}`);
+				}
+			}
+		} else if (role === "toolResult") {
+			const text = textOf();
+			if (text) {
+				const toolName = typeof message.toolName === "string" ? `${message.toolName}: ` : "";
+				entries.push(`← ${toolName}${truncateSummary(text, 500)}`);
+			}
+		}
+		// other roles (thinking etc.) are skipped
+	}
+	if (!hasAssistantText) return null;
+	const sections: string[] = [];
+	// Plain-text section labels (not markdown headings): headings would invoke
+	// theme closures that throw when the global theme is uninitialized (tests).
+	if (taskText) sections.push(`任务原文\n\n${taskText}`);
+	sections.push(`会话记录\n\n${entries.join("\n\n")}`);
+	return sections.join("\n\n");
+}
+
 /**
  * Parse an integer environment variable with NaN fallback. Garbage values
  * (e.g. PI_SUBAGENT_DEPTH=abc) must fail safe to the fallback instead of
@@ -2098,7 +2174,7 @@ export default function (pi: ExtensionAPI) {
 				cmdCtx.ui?.notify?.(`无此任务记录: ${taskId}`, "warning");
 				return;
 			}
-			const text = extractFinalAssistantText(file);
+			const text = extractSessionTranscript(file);
 			if (!text) {
 				cmdCtx.ui?.notify?.(`任务无最终输出（未产生 assistant 文本，可能已被终止）: ${taskId}\n会话文件: ${file}`, "warning");
 				return;

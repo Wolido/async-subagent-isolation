@@ -311,7 +311,7 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 			expect(allOutput).toMatch(/无|not found|不存在|没有|no.*record/i);
 		});
 
-		it("多消息 JSONL 应只取最后一条 assistant 文本", async () => {
+		it("多消息 JSONL 应保留完整会话顺序（方案 A）", async () => {
 			const { pi } = loadExtension();
 			const commandDef = pi._commandDefs.get("subagent-result");
 			expect(commandDef).toBeDefined();
@@ -344,8 +344,9 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 			// Should contain the LAST assistant text
 			expect(customMock).toHaveBeenCalled();
 			expect(getRendered()).toContain("Final answer");
-			// Should NOT contain the FIRST assistant text
-			expect(getRendered()).not.toContain("First response");
+			// 方案 A: 完整会话记录包含中间轮文本，且保持原始会话顺序
+			expect(getRendered()).toContain("First response");
+			expect(getRendered().indexOf("First response")).toBeLessThan(getRendered().indexOf("Final answer"));
 			expect(stdoutSpy).not.toHaveBeenCalled();
 		});
 	});
