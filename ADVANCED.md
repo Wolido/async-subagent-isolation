@@ -33,6 +33,70 @@ skills: /path/to/skill1,/path/to/skill2
 | `thinking` | `string` | 可选，思考等级。值为 `off \| minimal \| low \| medium \| high \| xhigh \| max`。 |
 | `skills` | `string[]`（逗号分隔） | 可选的 skill 路径列表。若存在，则禁用全局 skills，仅加载列出的 skill。路径可绝对或相对于工作目录。 |
 
+## 子 agent 模型与思考等级配置（subagent-isolation.json）
+
+可用 `subagent-isolation.json` 为每个子 agent 单独指定模型与思考等级（thinking level）。配置文件名沿用同步版，两个项目可共享同一份配置。
+
+### 配置文件位置
+
+| 层级 | 路径 |
+|------|------|
+| 用户级 | `~/.pi/agent/subagent-isolation.json` |
+| 项目级 | `.pi/subagent-isolation.json`（从当前工作目录向上查找最近的 `.pi/` 目录） |
+
+项目级覆盖用户级**同名 key**；未覆盖的 key 继续沿用用户级配置。
+
+### 配置格式
+
+每个 key 是 agent 名，value 支持两种写法：
+
+- **纯字符串（旧格式）**：只指定模型，等价于 `{ "model": "..." }`。
+- **对象**：`{ "model": ..., "thinking": ... }`，两个字段均可选，但须至少提供一个。
+
+```json
+{
+  "coder": { "model": "deepseek/deepseek-v4-pro", "thinking": "high" },
+  "writer": "deepseek/deepseek-v4-flash"
+}
+```
+
+`model` 须为非空字符串；`thinking` 须为下表中的合法等级（大小写敏感），非法值会被忽略。
+
+### thinking 可选值
+
+| 值 | 含义 |
+|----|------|
+| `off` | 关闭思考 |
+| `minimal` | 最低思考量 |
+| `low` | 低 |
+| `medium` | 中 |
+| `high` | 高 |
+| `xhigh` | 很高 |
+| `max` | 最高 |
+
+### 优先级规则
+
+以 agent `coder` 为例，模型与思考等级分别取第一个非空值：
+
+**模型**：
+
+1. 配置文件（`subagent-isolation.json` 中该 agent 的 `model`）
+2. Agent frontmatter（`coder.md` 的 `model:` 字段）
+3. 继承主 agent 当前使用的模型
+
+**思考等级**：
+
+1. 配置文件（`subagent-isolation.json` 中该 agent 的 `thinking`）
+2. Agent frontmatter（`coder.md` 的 `thinking:` 字段）
+
+思考等级不继承主 agent。
+
+### 合并规则
+
+项目级配置与用户级配置按 **key 合并**：项目级 key 覆盖用户级同名 key，其余 key 保留。即最近的 `.pi/subagent-isolation.json` 覆盖 `~/.pi/agent/subagent-isolation.json` 中的同名项。
+
+> **注意**：当指定模型的 provider 不支持 reasoning 时，pi 会自动把 thinking 钳制为 `off`。
+
 ## 异步模式（TUI）
 
 在 TUI 交互模式下，`subagent` 工具是**异步**的：调用后立即返回派发回执，子 agent 在后台运行，完成后结果以 `[subagent-result]` 系统通知推送到对话中。非 TUI 模式（print/json，包括 `mode` 为 `undefined`）则降级为同步——等待子 agent 完成后直接返回完整结果，无通知。

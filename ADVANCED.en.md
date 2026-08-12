@@ -33,6 +33,70 @@ You are a senior TypeScript engineer. Prefer async/await and avoid callbacks.
 | `thinking` | `string` | Optional thinking level. One of `off \| minimal \| low \| medium \| high \| xhigh \| max`. |
 | `skills` | `string[]` (comma-separated) | Optional skill path list. If present, global skills are disabled and only these are loaded. Paths can be absolute or relative to the working directory. |
 
+## Per-subagent model & thinking level config (subagent-isolation.json)
+
+Use `subagent-isolation.json` to assign a model and thinking level to each subagent. The file name is retained from the sync original, so both projects can share one config.
+
+### Config file locations
+
+| Scope | Path |
+|-------|------|
+| User-level | `~/.pi/agent/subagent-isolation.json` |
+| Project-level | `.pi/subagent-isolation.json` (the nearest `.pi/` directory found by walking up from the working directory) |
+
+The project-level file overrides the user-level file **per key**; keys not overridden keep their user-level value.
+
+### Format
+
+Each key is an agent name; the value can be either:
+
+- **Plain string (legacy format)**: model only, equivalent to `{ "model": "..." }`.
+- **Object**: `{ "model": ..., "thinking": ... }` — both fields optional, but at least one must be present.
+
+```json
+{
+  "coder": { "model": "deepseek/deepseek-v4-pro", "thinking": "high" },
+  "writer": "deepseek/deepseek-v4-flash"
+}
+```
+
+`model` must be a non-empty string; `thinking` must be a valid level from the table below (case-sensitive). Invalid values are ignored.
+
+### Valid thinking levels
+
+| Value | Meaning |
+|-------|---------|
+| `off` | Thinking off |
+| `minimal` | Minimal thinking |
+| `low` | Low thinking |
+| `medium` | Medium thinking |
+| `high` | High thinking |
+| `xhigh` | Extra high thinking |
+| `max` | Maximum thinking |
+
+### Priority rules
+
+For a subagent such as `coder`, the model and thinking level each resolve to the first non-empty value:
+
+**Model**:
+
+1. Config file (`model` for this agent in `subagent-isolation.json`)
+2. Agent frontmatter (`model:` in `coder.md`)
+3. Inherit the main agent's current model
+
+**Thinking level**:
+
+1. Config file (`thinking` for this agent in `subagent-isolation.json`)
+2. Agent frontmatter (`thinking:` in `coder.md`)
+
+The thinking level is not inherited from the main agent.
+
+### Merge rules
+
+Project-level and user-level configs merge **per key**: a project-level key overrides the same key in the user-level file; all other keys are kept. In other words, the nearest `.pi/subagent-isolation.json` overrides matching keys in `~/.pi/agent/subagent-isolation.json`.
+
+> **Note**: when the selected model's provider does not support reasoning, pi automatically clamps the thinking level to `off`.
+
 ## Async mode (TUI)
 
 In TUI mode, the `subagent` tool is **asynchronous**: it returns a dispatch receipt immediately, the subagent runs in the background, and its result arrives later as a `[subagent-result]` system notification. Non-TUI modes (print/json, including `mode` `undefined`) fall back to synchronous — they wait for the subagent to finish and return the full result directly, with no notification.
