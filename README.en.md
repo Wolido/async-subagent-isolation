@@ -39,6 +39,20 @@ This project is the async evolution of [subagent-isolation](https://github.com/W
 
 ---
 
+## Face the dispatcher, not the cluster
+
+In the sync version, every delegation blocks, so the experience feels like facing a "swarm of agents": the main agent dispatches and goes silent until the subagent finishes, leaving you with stretches of relayed execution. The async version flips this — **your conversation is always with the main agent alone**.
+
+The main agent is the dispatcher: it understands the request, splits it into tasks, dispatches them, and summarizes the results. Subagents are behind-the-scenes workers, each running in its own background process and reporting back through a `[subagent-result]` notification. You never talk to a subagent directly, and you shouldn't need to: read results with `/subagent-result`, cancel with `/subagent-cancel`, and leave everything in between to the dispatcher.
+
+More important is **the freedom after dispatch**. While a task runs in the background, you keep talking to the main agent — refine the requirements, adjust the plan, discuss next steps, or raise a new task. The main agent doesn't wait idle; it can keep planning and even dispatch more tasks in parallel. Foreground conversation and background work move forward together.
+
+Finally, **review when the result returns**. The subagent finishes, the notification arrives, and the main agent processes it and reports back. While you wait, you can check in-flight status any time (the progress widget or `subagent_status`), but you never have to watch.
+
+In one line: sync traps you in the "swarm execution" block; async keeps you facing a single dispatcher while background work runs alongside your own pace.
+
+---
+
 ## How this differs from plain subagents
 
 Many subagent implementations are just "spawn a tool call inside the main agent": the subagent still reuses the main agent's prompt and skills, and the main agent keeps write and shell access — isolation is optional and partial.
