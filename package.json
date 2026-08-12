@@ -1,0 +1,64 @@
+{
+  "name": "@wolido/async-subagent-isolation",
+  "version": "0.1.0",
+  "description": "A pi extension that asynchronously delegates tasks to specialized subagents running in isolated pi processes.",
+  "license": "MIT",
+  "author": "Wolido",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "files": [
+    "src",
+    "logo.svg",
+    "README.md",
+    "README.en.md",
+    "ADVANCED.md",
+    "ADVANCED.en.md",
+    "LICENSE",
+    "examples/pi",
+    "examples/README.md",
+    "examples/README.en.md"
+  ],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "subagent",
+    "isolation",
+    "async",
+    "background"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": false
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "@types/node": "^20.0.0",
+    "typebox": "*",
+    "typescript": "^5.4.0",
+    "vitest": "^4.1.10"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  }
+}
