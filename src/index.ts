@@ -27,7 +27,7 @@ import {
 	getAgentDir,
 	parseFrontmatter,
 } from "@earendil-works/pi-coding-agent";
-import { Box, Container, Key, Markdown, matchesKey, Spacer, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Box, Container, Key, Markdown, matchesKey, Spacer, Text, truncateToWidth, visibleWidth, sliceByColumn } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 // ===== UUID v7 helper =====
@@ -545,6 +545,10 @@ interface AgentProgress {
 const PROGRESS_WIDGET_KEY = "async-subagent-isolation-progress";
 const MAX_WIDGET_LINES = 20;
 const MAX_RECENT_TOOLS = 3;
+// Cap for the dynamic name column: wide enough for typical agent names
+// (existing tests require a 20-char name to render in full), small enough
+// to leave room for the phase/elapsed columns on narrow terminals.
+const MAX_NAME_WIDTH = 30;
 
 /** Plain-text one-line summary of a tool call for the progress widget (no theme colors). */
 function summarizeToolCall(toolName: string, args: Record<string, any>): string {
@@ -559,6 +563,22 @@ function getRecentToolSummaries(messages: Message[]): string[] {
 		.filter((item): item is Extract<DisplayItem, { type: "toolCall" }> => item.type === "toolCall")
 		.slice(-MAX_RECENT_TOOLS)
 		.map((item) => summarizeToolCall(item.name, item.args));
+}
+
+/**
+ * Fit an agent name into a fixed-width column: pad short names with spaces,
+ * truncate over-long names with a "..." suffix. Unlike truncateToWidth this
+ * never injects ANSI reset codes around the ellipsis (agent names carry no
+ * styling), so every row keeps the phase/elapsed columns at the same raw
+ * string offset as well as the same display column. Callers must pass
+ * width >= 4 so the ellipsis fits.
+ */
+function fitNameColumn(name: string, width: number): string {
+	const nameWidth = visibleWidth(name);
+	if (nameWidth <= width) return name + " ".repeat(width - nameWidth);
+	// strict: never keep a wide char that would straddle the cut boundary
+	const cut = sliceByColumn(name, 0, width - 3, true);
+	return cut + "..." + " ".repeat(Math.max(0, width - 3 - visibleWidth(cut)));
 }
 
 export function formatElapsed(startedAt: number): string {
@@ -622,6 +642,9 @@ export class SubagentProgressManager {
 		const maxAgentRows = Math.max(1, Math.min(process.stdout.rows || MAX_WIDGET_LINES, MAX_WIDGET_LINES));
 		const visible = sorted.slice(-maxAgentRows);
 		const total = sorted.length;
+		// Name column width adapts to the longest visible agent name (capped),
+		// so the phase and elapsed columns start at the same offset on every row.
+		const nameColWidth = Math.min(MAX_NAME_WIDTH, Math.max(...visible.map((a) => visibleWidth(a.name))));
 		// Note: the factory closes over `theme`; between a theme change and the next
 		// refresh (≤1s) the widget may briefly use the stale theme. The 1Hz timer
 		// replaces the factory on every tick, so this self-heals.
@@ -640,7 +663,7 @@ export class SubagentProgressManager {
 				return borderColor("─") + theme.fg("accent", label) + borderColor("─".repeat(width - labelWidth - 1));
 			};
 			const renderRow = (a: AgentProgress, width: number): string => {
-				const nameCol = a.name;
+				const nameCol = fitNameColumn(a.name, nameColWidth);
 				const phaseCol = truncateToWidth(formatPhase(a.phase), 20, "...", true);
 				const toolHint = a.recentTools.length > 0 ? `  → ${a.recentTools[a.recentTools.length - 1]}` : "";
 				const line =
