@@ -1,10 +1,9 @@
 /**
- * Red-phase tests for active tasks tracking (subagent_status tool, envelope active list, cancel return)
- * 
- * Expected failures (red phase):
- * - subagent_status tool not registered
- * - Envelope does not include active tasks list
- * - subagent_cancel does not return active tasks list
+ * Tests for active tasks tracking (单入口 action 模式: subagent action=status,
+ * envelope active list, cancel return)
+ *
+ * 契约：subagent_status / subagent_cancel 独立工具已移除，
+ * status/cancel 由 subagent 工具 action 参数分派。
  */
 
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
@@ -135,7 +134,7 @@ async function raceWithTimeout<T>(
 	}
 }
 
-describe("在途任务台账 — 红阶段测试", () => {
+describe("在途任务台账", () => {
 	let tmpBase: string;
 	let agentDir: string;
 	let defaultCwd: string;
@@ -182,42 +181,55 @@ describe("在途任务台账 — 红阶段测试", () => {
 		extension(pi as any);
 		const toolsByName = new Map(pi._toolDefs.map((t: any) => [t.name, t] as const));
 		const executeSubagentTool = toolsByName.get("subagent")?.execute as ExecuteFn | undefined;
-		const executeStatusTool = toolsByName.get("subagent_status")?.execute as ExecuteFn | undefined;
-		const executeCancelTool = toolsByName.get("subagent_cancel")?.execute as ExecuteFn | undefined;
+		// 新契约：status/cancel 通过 subagent 工具的 action 参数分派
+		const executeStatusTool = (
+			toolCallId: string,
+			params: Record<string, unknown>,
+			signal: AbortSignal | undefined,
+			onUpdate: unknown,
+			ctx: unknown,
+		) => executeSubagentTool!(toolCallId, { action: "status", ...params }, signal, onUpdate, ctx);
+		const executeCancelTool = (
+			toolCallId: string,
+			params: Record<string, unknown>,
+			signal: AbortSignal | undefined,
+			onUpdate: unknown,
+			ctx: unknown,
+		) => executeSubagentTool!(toolCallId, { action: "cancel", ...params }, signal, onUpdate, ctx);
 		return { pi, executeSubagentTool, executeStatusTool, executeCancelTool, toolsByName };
 	}
 
 	// ================================================================
-	// 1. subagent_status 工具注册
+	// 1. 单入口 action 参数（新契约）
 	// ================================================================
-	describe("1. subagent_status 工具注册", () => {
-		it('扩展应注册名为 "subagent_status" 的工具', () => {
-			const { pi, toolsByName } = setupExtension();
+	describe("1. 单入口 action 参数（新契约）", () => {
+		it("subagent 工具 parameters 应声明 action 字段", () => {
+			const { toolsByName } = setupExtension();
 
-			expect(pi.registerTool).toHaveBeenCalled();
-			expect(toolsByName.has("subagent_status")).toBe(true);
+			const subagent = toolsByName.get("subagent");
+			expect(subagent, "subagent tool should be registered").toBeDefined();
+			const props = subagent.parameters.properties || {};
+			expect(props.action, "subagent parameters should declare an action field").toBeDefined();
 		});
 
-		it('subagent_status 工具应为无参数', () => {
+		it("subagent_status 工具不应再单独注册", () => {
 			const { toolsByName } = setupExtension();
-			const statusTool = toolsByName.get("subagent_status");
-			expect(statusTool, "subagent_status tool should be registered").toBeDefined();
-			
-			// Should have no required parameters or empty parameters schema
-			const params = statusTool.parameters;
-			expect(params).toBeDefined();
-			// Empty object or no properties
-			expect(params.properties || {}).toEqual({});
+			expect(toolsByName.has("subagent_status")).toBe(false);
+		});
+
+		it("subagent_cancel 工具不应再单独注册", () => {
+			const { toolsByName } = setupExtension();
+			expect(toolsByName.has("subagent_cancel")).toBe(false);
 		});
 	});
 
 	// ================================================================
-	// 2. 查询在途列表
+	// 2. 查询在途列表（action=status）
 	// ================================================================
-	describe("2. 查询在途列表", () => {
+	describe("2. 查询在途列表（action=status）", () => {
 		it("应返回在途任务的 taskId、agent 名、任务描述", async () => {
 			const { executeSubagentTool, executeStatusTool } = setupExtension();
-			expect(executeStatusTool, "subagent_status tool should be registered").toBeDefined();
+			expect(executeStatusTool, "subagent tool should be registered (status dispatched via action param)").toBeDefined();
 			const ctx = createMockTuiCtx(defaultCwd);
 
 			// Arrange: dispatch 2 tasks
@@ -255,7 +267,7 @@ describe("在途任务台账 — 红阶段测试", () => {
 
 		it("不应包含耗时格式（如 00: 或 已运行）", async () => {
 			const { executeSubagentTool, executeStatusTool } = setupExtension();
-			expect(executeStatusTool, "subagent_status tool should be registered").toBeDefined();
+			expect(executeStatusTool, "subagent tool should be registered (status dispatched via action param)").toBeDefined();
 			const ctx = createMockTuiCtx(defaultCwd);
 
 			// Arrange: dispatch a task
@@ -271,7 +283,8 @@ describe("在途任务台账 — 红阶段测试", () => {
 			// Act: query status
 			const result = await executeStatusTool!("call-2", {}, undefined, undefined, ctx);
 
-			// Assert: should NOT contain elapsed time format
+			// Assert: NOT an error response, and should NOT contain elapsed time format
+			expect(result.isError).toBeFalsy();
 			const text = result.content.map((c: any) => c.text).join("");
 			expect(text).not.toMatch(/\d{2}:\d{2}/); // No MM:SS format
 			expect(text).not.toMatch(/已运行/);
@@ -279,8 +292,8 @@ describe("在途任务台账 — 红阶段测试", () => {
 
 		it("应只列 status === 'running' 的任务", async () => {
 			const { executeSubagentTool, executeStatusTool, executeCancelTool } = setupExtension();
-			expect(executeStatusTool, "subagent_status tool should be registered").toBeDefined();
-			expect(executeCancelTool, "subagent_cancel tool should be registered").toBeDefined();
+			expect(executeStatusTool, "subagent tool should be registered (status dispatched via action param)").toBeDefined();
+			expect(executeCancelTool, "subagent tool should be registered (cancel dispatched via action param)").toBeDefined();
 			const ctx = createMockTuiCtx(defaultCwd);
 
 			// Arrange: dispatch 2 tasks
@@ -321,7 +334,7 @@ describe("在途任务台账 — 红阶段测试", () => {
 	describe("3. 空在途", () => {
 		it("注册表为空时应返回'当前无在途任务'", async () => {
 			const { executeStatusTool } = setupExtension();
-			expect(executeStatusTool, "subagent_status tool should be registered").toBeDefined();
+			expect(executeStatusTool, "subagent tool should be registered (status dispatched via action param)").toBeDefined();
 			const ctx = createMockTuiCtx(defaultCwd);
 
 			expect(taskRegistry.size).toBe(0);
@@ -420,12 +433,12 @@ describe("在途任务台账 — 红阶段测试", () => {
 	});
 
 	// ================================================================
-	// 5. subagent_cancel 返回在途列表
+	// 5. action=cancel 返回在途列表
 	// ================================================================
-	describe("5. subagent_cancel 返回在途列表", () => {
+	describe("5. action=cancel 返回在途列表", () => {
 		it("取消成功后应返回剩余在途任务信息", async () => {
 			const { executeSubagentTool, executeCancelTool } = setupExtension();
-			expect(executeCancelTool, "subagent_cancel tool should be registered").toBeDefined();
+			expect(executeCancelTool, "subagent tool should be registered (cancel dispatched via action param)").toBeDefined();
 			const ctx = createMockTuiCtx(defaultCwd);
 
 			// Arrange: dispatch 2 tasks
@@ -462,7 +475,7 @@ describe("在途任务台账 — 红阶段测试", () => {
 
 		it("取消后在途列表应排除被取消的任务", async () => {
 			const { executeSubagentTool, executeCancelTool } = setupExtension();
-			expect(executeCancelTool, "subagent_cancel tool should be registered").toBeDefined();
+			expect(executeCancelTool, "subagent tool should be registered (cancel dispatched via action param)").toBeDefined();
 			const ctx = createMockTuiCtx(defaultCwd);
 
 			// Arrange: dispatch 2 tasks
@@ -541,7 +554,7 @@ describe("在途任务台账 — 红阶段测试", () => {
 
 		it("取消信封应仍包含 cancelledBy 字段", async () => {
 			const { executeSubagentTool, executeCancelTool, pi } = setupExtension();
-			expect(executeCancelTool, "subagent_cancel tool should be registered").toBeDefined();
+			expect(executeCancelTool, "subagent tool should be registered (cancel dispatched via action param)").toBeDefined();
 			const ctx = createMockTuiCtx(defaultCwd);
 
 			// Arrange: dispatch a task

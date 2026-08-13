@@ -1,10 +1,10 @@
 /**
- * Tests for timeout behavior in runSubagent (src/index.ts)
- * 
- * These tests verify three bugs that need to be fixed:
- * 1. stderr data should reset activity timer
- * 2. Activity timer should start immediately after spawn
- * 3. Timeout kills should set structured stopReason
+ * Regression tests for timeout behavior in runSingleAgent (src/index.ts)
+ *
+ * These tests lock in the fixed behavior for three former bugs:
+ * 1. stderr data resets the activity timer
+ * 2. Activity timer starts immediately after spawn
+ * 3. Timeout kills set a structured stopReason
  */
 
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
@@ -83,7 +83,7 @@ function createSuccessfulProc() {
 	return proc;
 }
 
-describe("runSubagent timeout behavior", () => {
+describe("runSingleAgent timeout behavior", () => {
 	let tmpBase: string;
 	let agentDir: string;
 	let defaultCwd: string;
@@ -116,7 +116,7 @@ describe("runSubagent timeout behavior", () => {
 
 		const pi = {
 			registerTool: (tool: { name: string; execute: ExecuteFn }) => {
-				// The extension registers two tools (subagent + subagent_cancel); these tests exercise subagent.
+				// The extension registers a single subagent tool; status/cancel are dispatched via its action parameter. These tests exercise subagent.
 				if (tool.name === "subagent") executeTool = tool.execute;
 			},
 		};
@@ -136,7 +136,7 @@ describe("runSubagent timeout behavior", () => {
 		vi.useRealTimers();
 	});
 
-	async function runSubagent() {
+	async function runSingleAgent() {
 		return executeTool("call-1", {
 			agent: "tester",
 			task: "test task",
@@ -153,7 +153,7 @@ describe("runSubagent timeout behavior", () => {
 			process.env.PI_SUBAGENT_ACTIVITY_TIMEOUT_MS = "1000";
 			delete process.env.PI_SUBAGENT_HARD_TIMEOUT_MS;
 
-			const resultPromise = runSubagent();
+			const resultPromise = runSingleAgent();
 			
 			// Wait for spawn to be called
 			await vi.advanceTimersByTimeAsync(0);
@@ -166,7 +166,7 @@ describe("runSubagent timeout behavior", () => {
 			// Wait for most of the timeout period
 			await vi.advanceTimersByTimeAsync(800);
 
-			// Emit stderr data - this SHOULD reset the timer (but currently doesn't - Bug #1)
+			// Emit stderr data - this resets the timer (Bug #1 fix)
 			procRef!.stderr.emit("data", Buffer.from("shell command output\n"));
 			await vi.advanceTimersByTimeAsync(0);
 
@@ -174,8 +174,7 @@ describe("runSubagent timeout behavior", () => {
 			// because stderr activity should have reset the timer
 			await vi.advanceTimersByTimeAsync(500);
 
-			// If Bug #1 exists: process will be killed (total time: 1300ms > 1000ms)
-			// If Bug #1 is fixed: process will NOT be killed (timer reset at 800ms, so next timeout at 1800ms)
+			// Bug #1 fixed: process is NOT killed (timer reset at 800ms, so next timeout at 1800ms)
 			expect(procRef!.kill).not.toHaveBeenCalled();
 
 			// Clean up
@@ -191,7 +190,7 @@ describe("runSubagent timeout behavior", () => {
 			process.env.PI_SUBAGENT_ACTIVITY_TIMEOUT_MS = "1000";
 			delete process.env.PI_SUBAGENT_HARD_TIMEOUT_MS;
 
-			const resultPromise = runSubagent();
+			const resultPromise = runSingleAgent();
 			
 			// Wait for spawn to be called
 			await vi.advanceTimersByTimeAsync(0);
@@ -203,8 +202,7 @@ describe("runSubagent timeout behavior", () => {
 			// Wait for the full timeout period
 			await vi.advanceTimersByTimeAsync(1000);
 
-			// If Bug #2 exists: process will NOT be killed (timer never started)
-			// If Bug #2 is fixed: process WILL be killed (timer started at spawn)
+			// Bug #2 fixed: process IS killed (timer started at spawn)
 			expect(procRef!.kill).toHaveBeenCalledWith("SIGKILL");
 
 			// Clean up
@@ -215,7 +213,7 @@ describe("runSubagent timeout behavior", () => {
 			process.env.PI_SUBAGENT_ACTIVITY_TIMEOUT_MS = "1000";
 			delete process.env.PI_SUBAGENT_HARD_TIMEOUT_MS;
 
-			const resultPromise = runSubagent();
+			const resultPromise = runSingleAgent();
 			await vi.advanceTimersByTimeAsync(0);
 
 			// Emit activity before timeout
@@ -241,7 +239,7 @@ describe("runSubagent timeout behavior", () => {
 			process.env.PI_SUBAGENT_ACTIVITY_TIMEOUT_MS = "1000";
 			delete process.env.PI_SUBAGENT_HARD_TIMEOUT_MS;
 
-			const resultPromise = runSubagent();
+			const resultPromise = runSingleAgent();
 			await vi.advanceTimersByTimeAsync(0);
 
 			// Emit some initial activity
@@ -256,8 +254,7 @@ describe("runSubagent timeout behavior", () => {
 
 			const result = await resultPromise;
 
-			// If Bug #3 exists: stopReason will be undefined
-			// If Bug #3 is fixed: stopReason should be "activity_timeout"
+			// Bug #3 fixed: stopReason is "activity_timeout"
 			expect(result.details.results[0].stopReason).toBe("activity_timeout");
 		});
 
@@ -265,7 +262,7 @@ describe("runSubagent timeout behavior", () => {
 			process.env.PI_SUBAGENT_HARD_TIMEOUT_MS = "2000";
 			delete process.env.PI_SUBAGENT_ACTIVITY_TIMEOUT_MS;
 
-			const resultPromise = runSubagent();
+			const resultPromise = runSingleAgent();
 			await vi.advanceTimersByTimeAsync(0);
 
 			// Emit activity to keep process alive (activity timeout disabled)
@@ -278,8 +275,7 @@ describe("runSubagent timeout behavior", () => {
 
 			const result = await resultPromise;
 
-			// If Bug #3 exists: stopReason will be undefined
-			// If Bug #3 is fixed: stopReason should be "hard_timeout"
+			// Bug #3 fixed: stopReason is "hard_timeout"
 			expect(result.details.results[0].stopReason).toBe("hard_timeout");
 		});
 
@@ -287,7 +283,7 @@ describe("runSubagent timeout behavior", () => {
 			process.env.PI_SUBAGENT_ACTIVITY_TIMEOUT_MS = "1000";
 			delete process.env.PI_SUBAGENT_HARD_TIMEOUT_MS;
 
-			const resultPromise = runSubagent();
+			const resultPromise = runSingleAgent();
 			await vi.advanceTimersByTimeAsync(0);
 
 			procRef!.stdout.emit("data", Buffer.from('{"type":"turn_start"}\n'));
@@ -310,7 +306,7 @@ describe("runSubagent timeout behavior", () => {
 			process.env.PI_SUBAGENT_ACTIVITY_TIMEOUT_MS = "1000";
 			delete process.env.PI_SUBAGENT_HARD_TIMEOUT_MS;
 
-			const resultPromise = runSubagent();
+			const resultPromise = runSingleAgent();
 			await vi.advanceTimersByTimeAsync(0);
 
 			// Start with stdout activity

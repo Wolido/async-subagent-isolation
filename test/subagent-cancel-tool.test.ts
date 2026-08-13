@@ -1,11 +1,15 @@
 /**
- * Red-phase tests for subagent_cancel tool
+ * Red-phase tests for action=cancel (单入口 action 模式)
  *
- * Verifies the main agent can cancel tasks via a subagent_cancel tool
+ * Verifies the main agent can cancel tasks via subagent 工具的 action=cancel
  * (parallel to /subagent-cancel command, with cancelledBy="agent" in envelope).
  *
+ * 已按新契约适配：subagent_cancel 独立工具被移除，取消改由 subagent 工具
+ * action=cancel 分派；取消防滥用引导迁移至 subagent 工具 description。
+ *
  * Expected failures (red phase):
- * - Tool does not exist yet
+ * - subagent 工具未声明 action 参数（action=cancel 报缺 agent）
+ * - subagent_cancel 工具仍在注册
  * - cancelledBy field does not exist on details / task record
  * - Agent cancel body text does not exist
  */
@@ -138,7 +142,7 @@ async function raceWithTimeout<T>(
 	}
 }
 
-describe("subagent_cancel 工具 — 红阶段测试", () => {
+describe("action=cancel 单入口 — 红阶段测试", () => {
 	let tmpBase: string;
 	let agentDir: string;
 	let defaultCwd: string;
@@ -188,19 +192,33 @@ describe("subagent_cancel 工具 — 红阶段测试", () => {
 		extension(pi as any);
 		const toolsByName = new Map(pi._toolDefs.map((t: any) => [t.name, t] as const));
 		const executeSubagentTool = toolsByName.get("subagent")?.execute as ExecuteFn | undefined;
-		const executeCancelTool = toolsByName.get("subagent_cancel")?.execute as ExecuteFn | undefined;
+		// 新契约：取消通过 subagent 工具 action=cancel 分派
+		const executeCancelTool = (
+			toolCallId: string,
+			params: Record<string, unknown>,
+			signal: AbortSignal | undefined,
+			onUpdate: unknown,
+			ctx: unknown,
+		) => executeSubagentTool!(toolCallId, { action: "cancel", ...params }, signal, onUpdate, ctx);
 		return { pi, executeSubagentTool, executeCancelTool, toolsByName };
 	}
 
 	// ================================================================
-	// 1. subagent_cancel 工具注册
+	// 1. 单入口 action 参数（新契约）
 	// ================================================================
-	describe("1. subagent_cancel 工具注册", () => {
-		it('扩展应注册名为 "subagent_cancel" 的工具', () => {
-			const { pi, toolsByName } = setupExtension();
+	describe("1. 单入口 action 参数（新契约）", () => {
+		it("subagent 工具 parameters 应声明 action 字段（RED：当前 schema 无 action）", () => {
+			const { toolsByName } = setupExtension();
 
-			expect(pi.registerTool).toHaveBeenCalled();
-			expect(toolsByName.has("subagent_cancel")).toBe(true);
+			const subagent = toolsByName.get("subagent");
+			expect(subagent, "subagent tool should be registered").toBeDefined();
+			const props = subagent.parameters.properties || {};
+			expect(props.action, "subagent parameters should declare an action field").toBeDefined();
+		});
+
+		it("subagent_cancel 工具不应再单独注册（RED：当前仍注册）", () => {
+			const { toolsByName } = setupExtension();
+			expect(toolsByName.has("subagent_cancel")).toBe(false);
 		});
 	});
 
@@ -208,9 +226,9 @@ describe("subagent_cancel 工具 — 红阶段测试", () => {
 	// 2. 工具取消行为
 	// ================================================================
 	describe("2. 工具取消行为（kill + 信封 cancelledBy=agent + agent 正文）", () => {
-		it("调用 subagent_cancel 后子进程应被 SIGTERM（kill 调用）且任务状态变为 cancelled", async () => {
+		it("action=cancel 后子进程应被 SIGTERM（kill 调用）且任务状态变为 cancelled", async () => {
 			const { executeSubagentTool, executeCancelTool } = setupExtension();
-			expect(executeCancelTool, "subagent_cancel tool should be registered").toBeDefined();
+			expect(executeCancelTool, "executeCancelTool should be defined").toBeDefined();
 			const ctx = createMockTuiCtx(defaultCwd);
 
 			// Arrange: dispatch a task
@@ -235,9 +253,9 @@ describe("subagent_cancel 工具 — 红阶段测试", () => {
 			expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
 		});
 
-		it("调用 subagent_cancel 后信封 details 应含 cancelledBy='agent'", async () => {
+		it("action=cancel 后信封 details 应含 cancelledBy='agent'", async () => {
 			const { executeSubagentTool, executeCancelTool, pi } = setupExtension();
-			expect(executeCancelTool, "subagent_cancel tool should be registered").toBeDefined();
+			expect(executeCancelTool, "executeCancelTool should be defined").toBeDefined();
 			const ctx = createMockTuiCtx(defaultCwd);
 
 			// Arrange: dispatch a task
@@ -264,9 +282,9 @@ describe("subagent_cancel 工具 — 红阶段测试", () => {
 			expect(message.details.cancelledBy).toBe("agent");
 		});
 
-		it('调用 subagent_cancel 后信封正文应含"主 agent"与"subagent_cancel"字样', async () => {
+		it('action=cancel 后信封正文应标明由主 agent 取消（区分来源，非用户取消文案）', async () => {
 			const { executeSubagentTool, executeCancelTool, pi } = setupExtension();
-			expect(executeCancelTool, "subagent_cancel tool should be registered").toBeDefined();
+			expect(executeCancelTool, "executeCancelTool should be defined").toBeDefined();
 			const ctx = createMockTuiCtx(defaultCwd);
 
 			// Arrange
@@ -285,17 +303,18 @@ describe("subagent_cancel 工具 — 红阶段测试", () => {
 			endProcess(allProcs[0], null, "SIGTERM");
 			await vi.advanceTimersByTimeAsync(1000);
 
-			// Assert
+			// Assert: 取消信封（已取消）+ 主 agent 来源 + 非用户取消文案
 			expect(pi.sendMessage).toHaveBeenCalled();
 			const [message] = pi._sendMessageCalls[0];
 			const content: string = message.content;
+			expect(content).toMatch(/已取消/);
 			expect(content).toMatch(/主\s*agent/);
-			expect(content).toMatch(/subagent_cancel/);
+			expect(content).not.toMatch(/请勿自动重新派发/);
 		});
 
-		it("subagent_cancel 应返回成功回执，确认任务已取消", async () => {
+		it("action=cancel 应返回成功回执，确认任务已取消", async () => {
 			const { executeSubagentTool, executeCancelTool } = setupExtension();
-			expect(executeCancelTool, "subagent_cancel tool should be registered").toBeDefined();
+			expect(executeCancelTool, "executeCancelTool should be defined").toBeDefined();
 			const ctx = createMockTuiCtx(defaultCwd);
 
 			// Arrange
@@ -381,12 +400,12 @@ describe("subagent_cancel 工具 — 红阶段测试", () => {
 	});
 
 	// ================================================================
-	// 4. 工具取消不存在任务
+	// 4. action=cancel 取消不存在任务
 	// ================================================================
-	describe("4. 工具取消不存在任务", () => {
-		it("subagent_cancel 传入不存在的 taskId → isError 或错误提示", async () => {
+	describe("4. action=cancel 取消不存在任务", () => {
+		it("action=cancel 传入不存在的 taskId → 错误提示无此运行中任务（RED：当前报缺 agent）", async () => {
 			const { executeCancelTool } = setupExtension();
-			expect(executeCancelTool, "subagent_cancel tool should be registered").toBeDefined();
+			expect(executeCancelTool, "executeCancelTool should be defined").toBeDefined();
 
 			const ctx = createMockTuiCtx(defaultCwd);
 
@@ -398,17 +417,15 @@ describe("subagent_cancel 工具 — 红阶段测试", () => {
 				ctx,
 			);
 
-			// Should be an error or contain error message
-			const isErrorResponse = result.isError === true;
+			// 错误且提示无此运行中任务（不能只是任意参数错误）
+			expect(result.isError).toBe(true);
 			const text = result.content.map((c: any) => c.text).join("");
-			const hasErrorText = /not found|不存在|no.*task|no.*running/i.test(text);
-
-			expect(isErrorResponse || hasErrorText).toBe(true);
+			expect(text).toMatch(/无此运行中任务|no running|not found|不存在/i);
 		});
 
-		it("subagent_cancel 传入空 taskId → isError 或错误提示", async () => {
+		it("action=cancel 传入空 taskId → 错误提示必填（RED：当前报缺 agent）", async () => {
 			const { executeCancelTool } = setupExtension();
-			expect(executeCancelTool, "subagent_cancel tool should be registered").toBeDefined();
+			expect(executeCancelTool, "executeCancelTool should be defined").toBeDefined();
 
 			const ctx = createMockTuiCtx(defaultCwd);
 
@@ -420,37 +437,37 @@ describe("subagent_cancel 工具 — 红阶段测试", () => {
 				ctx,
 			);
 
-			const isErrorResponse = result.isError === true;
+			expect(result.isError).toBe(true);
 			const text = result.content.map((c: any) => c.text).join("");
-			const hasErrorText = /required|missing|empty|必填|缺少|不能为空/i.test(text);
-
-			expect(isErrorResponse || hasErrorText).toBe(true);
+			// 必须指向 taskId 参数，而不是其它参数
+			expect(text).toMatch(/taskId/);
+			expect(text).toMatch(/必填|不能为空|required|missing|empty/i);
 		});
 	});
 
 	// ================================================================
-	// 5. 防滥用引导
+	// 5. 防滥用引导（迁移至 subagent 工具 description）
 	// ================================================================
-	describe("5. 防滥用引导", () => {
-		it('subagent_cancel 工具的 description 应包含"取消"字样', () => {
+	describe("5. 防滥用引导（subagent 工具 description）", () => {
+		it('subagent 工具的 description 应包含"取消"字样（RED：当前描述无取消防滥用引导）', () => {
 			const { toolsByName } = setupExtension();
-			const cancelTool = toolsByName.get("subagent_cancel");
-			expect(cancelTool, "subagent_cancel tool should be registered").toBeDefined();
-			expect(cancelTool.description).toMatch(/取消|cancel/i);
+			const subagent = toolsByName.get("subagent");
+			expect(subagent, "subagent tool should be registered").toBeDefined();
+			expect(subagent.description).toMatch(/取消|cancel/i);
 		});
 
-		it('subagent_cancel 工具的 description 应包含"错误"或"不再需要"类引导', () => {
+		it('subagent 工具的 description 应包含"错误"或"不再需要"类引导（RED）', () => {
 			const { toolsByName } = setupExtension();
-			const cancelTool = toolsByName.get("subagent_cancel");
-			expect(cancelTool, "subagent_cancel tool should be registered").toBeDefined();
-			expect(cancelTool.description).toMatch(/错误|不再需要|wrong|no longer needed|unnecessary/i);
+			const subagent = toolsByName.get("subagent");
+			expect(subagent, "subagent tool should be registered").toBeDefined();
+			expect(subagent.description).toMatch(/错误|不再需要|wrong|no longer needed|unnecessary/i);
 		});
 
-		it("subagent_cancel 工具的 description 应包含不要因等待时间长而取消的引导", () => {
+		it("subagent 工具的 description 应包含不要因等待时间长而取消的引导（RED）", () => {
 			const { toolsByName } = setupExtension();
-			const cancelTool = toolsByName.get("subagent_cancel");
-			expect(cancelTool, "subagent_cancel tool should be registered").toBeDefined();
-			expect(cancelTool.description).toMatch(/等待|wait|时间长|long.*time|slow|patience/i);
+			const subagent = toolsByName.get("subagent");
+			expect(subagent, "subagent tool should be registered").toBeDefined();
+			expect(subagent.description).toMatch(/耐心|patience|be patient|不要.*取消|Do NOT cancel/i);
 		});
 	});
 

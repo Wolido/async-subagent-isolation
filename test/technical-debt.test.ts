@@ -1,11 +1,14 @@
 /**
  * Tests for technical debt items in runSingleAgent (src/index.ts)
  *
- * These tests verify four race condition / boundary bugs:
+ * These tests verify seven race condition / boundary bugs (Debt #1–#7):
  * 1. Abort grace period: activity timer can fire during abort grace period
  * 2. Post-exit grace period: activity timer can fire after process exit
  * 3. stopReason override: timeout stopReason overridden by buffer flush
  * 4. Race conditions: (a) abort+timeout, (b) activity+hard timeout
+ * 5. Pre-aborted spawn: hard timer armed despite pending abort
+ * 6. Abort event: hard timer re-armed after abort cleared it
+ * 7. Coverage gaps: existing timer guards act as regression locks
  *
  * Mock pattern: createControllableProc() returns a fake ChildProcess whose
  * kill() is a no-op (does NOT auto-exit). This lets us observe timer behavior
@@ -95,7 +98,7 @@ describe("Technical debt: race conditions and boundary bugs", () => {
 
 		const pi = {
 			registerTool: (tool: { name: string; execute: ExecuteFn }) => {
-				// The extension registers two tools (subagent + subagent_cancel); these tests exercise subagent.
+				// The extension registers a single subagent tool; status/cancel are dispatched via its action parameter. These tests exercise subagent.
 				if (tool.name === "subagent") executeTool = tool.execute;
 			},
 		};
@@ -605,7 +608,7 @@ describe("Technical debt: race conditions and boundary bugs", () => {
 	// Debt #6: abort event clears hard timer
 	//
 	// When abort event fires (not pre-aborted), killProc() clears hardTimer.
-	// But setupHardTimer() at L1207 runs AFTER killProc() and creates a NEW
+	// But setupHardTimer() runs AFTER killProc() and creates a NEW
 	// hardTimer without checking wasAborted. Same bug as Debt #5 but via
 	// the addEventListener path instead of pre-aborted check.
 	// ----------------------------------------------------------------
@@ -614,7 +617,7 @@ describe("Technical debt: race conditions and boundary bugs", () => {
 		it("should not fire hard timer after abort event", async () => {
 			// Hard timeout at 1000ms. Abort at T=100ms.
 			// killProc() at T=100ms clears hardTimer (created at T=0).
-			// Bug: setupHardTimer() at L1207 creates NEW hardTimer for T=1100ms.
+			// Bug: setupHardTimer() creates NEW hardTimer for T=1100ms.
 			// At T=1100ms, hard timer fires → proc.kill("SIGKILL").
 			// Expected: no hard timer armed after abort, no SIGKILL before T=5100ms.
 			process.env.PI_SUBAGENT_HARD_TIMEOUT_MS = "1000";
@@ -657,7 +660,7 @@ describe("Technical debt: race conditions and boundary bugs", () => {
 	// Debt #7: coverage gaps — guards already exist
 	//
 	// These tests verify that existing guards prevent re-arming timers
-	// in edge cases. The guards are at L1077 in resetActivityTimer():
+	// in edge cases. The guards are in resetActivityTimer():
 	// - `wasAborted` guard: prevents activity timer after abort
 	// - `exitCodeValue !== null` guard: prevents activity timer after exit
 	//
