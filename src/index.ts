@@ -1447,7 +1447,7 @@ export interface AsyncSubagentTask {
 	status: "running" | "cancelled" | "killed_on_shutdown";
 	/**
 	 * Who cancelled the task: "user" via /subagent-cancel, "agent" via the
-	 * subagent_cancel tool. Set by cancelTask so the result envelope can name
+	 * subagent tool's action="cancel". Set by cancelTask so the result envelope can name
 	 * the cancel's origin; undefined for non-cancelled endings.
 	 */
 	cancelledBy?: "user" | "agent";
@@ -1470,7 +1470,7 @@ export const taskRegistry = new Map<string, AsyncSubagentTask>();
  * Cancel a running async subagent task: mark it cancelled, record who
  * cancelled it (for the envelope), and fire its abort controller — reusing
  * the SIGTERM -> 5s -> SIGKILL cascade in runSingleAgent. Shared by the
- * /subagent-cancel command and the subagent_cancel tool. Returns false when
+ * /subagent-cancel command and the subagent tool's action="cancel". Returns false when
  * no running task with that id exists.
  */
 function cancelTask(taskId: string, cancelledBy: "user" | "agent"): boolean {
@@ -1490,8 +1490,8 @@ export function truncateTaskDescription(task: string, maxLen = 200): string {
 
 /**
  * Format the in-flight task list (status === "running") shared by the
- * subagent_status tool, the result envelope's 在途 block, and the
- * subagent_cancel receipt. Deliberately carries no elapsed time: the list
+ * action="status" branch, the result envelope's 在途 block, and the
+ * action="cancel" receipt. Deliberately carries no elapsed time: the list
  * answers "what is still running", not "how long has it run".
  */
 export function formatActiveTasks(): string {
@@ -1543,7 +1543,7 @@ const DETAILS_OUTPUT_MAX_CHARS = 16 * 1024;
  */
 function abortedFallbackBody(stopReason?: string, cancelledBy?: "user" | "agent"): string {
 	if (stopReason === "killed_on_shutdown") return "任务因会话关闭被终止（session_shutdown）。";
-	if (cancelledBy === "agent") return "该任务已由主 agent 通过 subagent_cancel 工具取消。";
+	if (cancelledBy === "agent") return "该任务已由主 agent 通过 subagent 工具（action=cancel）取消。";
 	return "该任务已由用户通过 /subagent-cancel 取消，属用户主动操作。请勿自动重新派发；如需重新派发，先询问用户。";
 }
 
@@ -1668,9 +1668,24 @@ const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
 	default: "both",
 });
 
+// Union-of-literals (anyOf + const) rather than StringEnum so the emitted
+// JSON Schema enumerates each action as its own const branch.
+const SubagentActionSchema = Type.Union(
+	[Type.Literal("dispatch"), Type.Literal("status"), Type.Literal("cancel")],
+	{
+		description:
+			'Action to perform. "dispatch" (default): delegate the task to a subagent. "status": list in-flight background tasks. "cancel": cancel a running background task by taskId.',
+		default: "dispatch",
+	},
+);
+
 const SubagentParams = Type.Object({
-	agent: Type.String({ description: "Name of the agent to invoke" }),
-	task: Type.String({ description: "Task to delegate. Must be non-empty and include background, input, requirements, output format, and acceptance criteria." }),
+	action: Type.Optional(SubagentActionSchema),
+	agent: Type.Optional(Type.String({ description: "Name of the agent to invoke (required for action=dispatch)" })),
+	task: Type.Optional(Type.String({ description: "Task to delegate (required for action=dispatch). Must be non-empty and include background, input, requirements, output format, and acceptance criteria." })),
+	taskId: Type.Optional(Type.String({
+		description: "taskId of the running background subagent task to cancel (required for action=cancel; from the dispatch receipt).",
+	})),
 	sessionId: Type.Optional(Type.String({
 		pattern: "^[A-Za-z0-9_.-]+$",
 		description: "Optional session ID to reuse; a new UUID v7 is generated if omitted. Allowed characters: letters, digits, underscore, dot, and hyphen.",
@@ -1689,16 +1704,25 @@ export default function (pi: ExtensionAPI) {
 		description: [
 			"Delegate a task to a specialized subagent with isolated context.",
 			"",
+			"ACTIONS (action parameter, default \"dispatch\"):",
+			"- dispatch: delegate the task (async in TUI mode, blocking otherwise).",
+			"- status: list in-flight background tasks (taskId, agent, task description).",
+			"- cancel: cancel a running background task by taskId.",
+			"",
 			"ASYNC (TUI mode): returns immediately with a dispatch receipt (taskId + session id).",
 			"The result arrives later as a system notification message prefixed with",
 			"[subagent-result] — that is a system notification, NOT a user request.",
 			"- Do NOT treat the receipt as the result. Do NOT fabricate results.",
 			"- Do NOT poll for results; they arrive automatically. To confirm which",
-			"  tasks are still in flight (e.g. after a /tree rewind), use the",
-			"  subagent_status tool.",
+			"  tasks are still in flight (e.g. after a /tree rewind), use action=\"status\".",
 			"- Continue with independent work, or end the turn. Process the result when",
 			"  the [subagent-result] notification arrives. Reuse the session id from the",
 			"  receipt to continue the same task later.",
+			"",
+			"CANCEL DISCIPLINE: cancel a task (action=\"cancel\") only when it is clearly",
+			"wrong (错误) or no longer needed (不再需要). Do NOT cancel just because it is",
+			"taking a long time — background subagents are expected to run long; be patient",
+			"(耐心等待) and let the [subagent-result] notification arrive.",
 			"",
 			"SYNC (non-TUI modes): waits for the subagent to finish and returns the full",
 			"result directly (no notification follows).",
@@ -1712,26 +1736,74 @@ export default function (pi: ExtensionAPI) {
 			"subagent: In TUI mode this tool is asynchronous — it returns a dispatch receipt, not the result; the real result arrives later as a [subagent-result] system notification, so never fabricate results and never poll for status.",
 			"subagent: A message prefixed with [subagent-result] is a system notification carrying a finished subagent result, not a user request; process it in the context of the task that dispatched it.",
 			"subagent: Dispatch subagents driven by task dependencies — delegate only work whose result you actually need, prefer reusing the session id from the receipt to continue a previous subagent task, and keep independent work in the main context.",
-			"subagent: A [subagent-result] notification with status 已取消 (cancelled) can come from the user (/subagent-cancel) or from you (subagent_cancel); the envelope body states the source. A user-initiated cancel is a deliberate user action, so do NOT automatically retry or re-dispatch it; ask the user before re-dispatching.",
+			"subagent: A [subagent-result] notification with status 已取消 (cancelled) can come from the user (/subagent-cancel) or from you (action=\"cancel\"); the envelope body states the source. A user-initiated cancel is a deliberate user action, so do NOT automatically retry or re-dispatch it; ask the user before re-dispatching.",
 			"subagent: Before dispatching multiple tasks in parallel, consider whether they touch the same files or code areas — parallel tasks modifying the same files can conflict. When in doubt, dispatch sequentially or ask the user.",
 		],
 		parameters: SubagentParams,
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
-			const currentDepth = parseEnvInt(process.env.PI_SUBAGENT_DEPTH, 0);
+			// Single-entry action dispatch (default "dispatch").
+			const action = (params.action as string | undefined) ?? "dispatch";
 
-			// Recursive delegation is blocked entirely: a subagent (depth >= 1)
-			// can never spawn another subagent.
+			// Depth gate runs BEFORE any action dispatch: a subagent (depth >= 1)
+			// is blocked from every action — dispatch spawns a nested subagent, and
+			// status/cancel would let it observe or kill the parent's in-flight
+			// tasks. The tool surface simply does not exist inside a subagent.
+			const currentDepth = parseEnvInt(process.env.PI_SUBAGENT_DEPTH, 0);
 			if (currentDepth >= MAX_SUBAGENT_DEPTH) {
 				const agentName = process.env.PI_CURRENT_AGENT_NAME || "current agent";
 				return {
 					content: [{
 						type: "text",
-						text: `Subagent delegation is blocked: depth limit reached (depth: ${currentDepth}, max: ${MAX_SUBAGENT_DEPTH}). Agent \`${agentName}\` runs inside a subagent and recursive delegation is not allowed.`,
+						text: `Subagent tool is blocked: depth limit reached (depth: ${currentDepth}, max: ${MAX_SUBAGENT_DEPTH}). Agent \`${agentName}\` runs inside a subagent and cannot invoke subagent actions (dispatch/status/cancel).`,
 					}],
 					details: {
 						mode: "single",
-						agentScope: params.agentScope ?? "both",
+						agentScope: (params.agentScope ?? "both") as AgentScope,
+						projectAgentsDir: null,
+						results: [],
+					} as SubagentDetails,
+					isError: true,
+				};
+			}
+
+			if (action === "status") {
+				return {
+					content: [{ type: "text", text: formatActiveTasks() }],
+					details: { activeTasks: [...taskRegistry.values()].filter((t) => t.status === "running").map((t) => t.taskId) },
+				};
+			}
+
+			if (action === "cancel") {
+				const taskId = typeof params.taskId === "string" ? params.taskId.trim() : "";
+				if (!taskId) {
+					return {
+						content: [{ type: "text", text: 'Missing or empty required parameter: "taskId" (taskId 必填，不能为空).' }],
+						details: { taskId: "", cancelled: false },
+						isError: true,
+					};
+				}
+				// Only registry (async/TUI) tasks are cancellable; sync-mode tasks are
+				// awaited inline and never enter the registry.
+				if (!cancelTask(taskId, "agent")) {
+					return {
+						content: [{ type: "text", text: `无此运行中任务: ${taskId} (no running subagent task with this id).` }],
+						details: { taskId, cancelled: false },
+						isError: true,
+					};
+				}
+				return {
+					content: [{ type: "text", text: `已发送取消请求: ${taskId} (cancel request sent); 结果稍后以 [subagent-result] 通知返回。\n${formatActiveTasks()}` }],
+					details: { taskId, cancelled: true },
+				};
+			}
+
+			if (action !== "dispatch") {
+				return {
+					content: [{ type: "text", text: `Invalid action: "${action}". Must be one of "dispatch" (default), "status", "cancel".` }],
+					details: {
+						mode: "single",
+						agentScope: (params.agentScope ?? "both") as AgentScope,
 						projectAgentsDir: null,
 						results: [],
 					} as SubagentDetails,
@@ -1849,7 +1921,7 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			progressManager.register(ctx, effectiveSessionId, params.agent);
+			progressManager.register(ctx, effectiveSessionId, agentName);
 
 			// TUI mode: dispatch asynchronously. execute() returns a receipt
 			// immediately; the finished result is pushed later as a
@@ -1858,7 +1930,7 @@ export default function (pi: ExtensionAPI) {
 			if (ctx.mode === "tui") {
 				const taskRecord: AsyncSubagentTask = {
 					taskId: effectiveSessionId,
-					agentName: params.agent,
+					agentName,
 					task,
 					startedAt: Date.now(),
 					// Per-task controller: the turn-level `signal` fires when the
@@ -1871,7 +1943,7 @@ export default function (pi: ExtensionAPI) {
 				runSingleAgent(
 					ctx.cwd,
 					agents,
-					params.agent,
+					agentName,
 					task,
 					params.cwd,
 					undefined,
@@ -1901,7 +1973,7 @@ export default function (pi: ExtensionAPI) {
 					(err) => completeAsyncTask(pi, taskRecord, null, err),
 				);
 				return {
-					content: [{ type: "text", text: buildDispatchReceipt(params.agent, effectiveSessionId) }],
+					content: [{ type: "text", text: buildDispatchReceipt(agentName, effectiveSessionId) }],
 					details: makeDetails([]),
 				};
 			}
@@ -1910,7 +1982,7 @@ export default function (pi: ExtensionAPI) {
 				const result = await runSingleAgent(
 					ctx.cwd,
 					agents,
-					params.agent,
+					agentName,
 					task,
 					params.cwd,
 					undefined,
@@ -1959,8 +2031,11 @@ export default function (pi: ExtensionAPI) {
 
 		renderResult(result, { expanded }, theme, context) {
 			const details = result.details as SubagentDetails | undefined;
-			if (!details || details.results.length === 0) {
-				return new Text(result.content[0]?.type === "text" ? result.content[0].text : "(no output)", 0, 0);
+			// status/cancel receipts carry no `results` array (activeTasks /
+			// taskId+cancelled instead) — fall back to the plain-text content
+			// instead of throwing on details.results.length.
+			if (!details || !Array.isArray(details.results) || details.results.length === 0) {
+				return new Text(result.content?.[0]?.type === "text" ? result.content[0].text : "(no output)", 0, 0);
 			}
 
 			const mdTheme = getMarkdownTheme();
@@ -2055,80 +2130,6 @@ export default function (pi: ExtensionAPI) {
 
 			return new Text(theme.fg("muted", "(no subagent result)"), 0, 0);
 		}
-	});
-
-	// Read-only in-flight query. Results still arrive automatically as
-	// [subagent-result] notifications; this tool exists only to confirm which
-	// tasks are still running (e.g. after a /tree rewind wiped the receipts).
-	pi.registerTool({
-		name: "subagent_status",
-		label: "Subagent Status",
-		description: [
-			"List currently running background subagent tasks (在途任务: taskId、agent、任务描述).",
-			"Results arrive automatically as [subagent-result] notifications — do NOT use",
-			"this tool to poll for completion. Use it only to confirm which tasks are still",
-			"in flight (e.g. after a /tree rewind), or to pick a taskId for subagent_cancel.",
-		].join("\n"),
-		promptSnippet:
-			"List in-flight background subagent tasks (not for polling — results arrive as [subagent-result] notifications).",
-		parameters: Type.Object({}),
-
-		async execute() {
-			return {
-				content: [{ type: "text", text: formatActiveTasks() }],
-				details: { activeTasks: [...taskRegistry.values()].filter((t) => t.status === "running").map((t) => t.taskId) },
-			};
-		},
-	});
-
-	// Cancellation has two paths sharing cancelTask (which reuses the SIGTERM
-	// -> 5s -> SIGKILL abort cascade and records who cancelled on the task so
-	// the result envelope can name the origin): the main agent's subagent_cancel
-	// tool below, and the user's /subagent-cancel command.
-	pi.registerTool({
-		name: "subagent_cancel",
-		label: "Subagent Cancel",
-		description: [
-			"Cancel a running background subagent task (取消一个仍在运行的后台 subagent 任务) by taskId.",
-			"Use only when the task is clearly wrong (错误) or no longer needed (不再需要).",
-			"Do NOT cancel just because it is taking a long time — background subagents are",
-			"expected to run long; be patient (耐心等待) and let the [subagent-result]",
-			"notification arrive.",
-		].join("\n"),
-		promptSnippet:
-			"Cancel a running background subagent task by taskId (only when it is clearly wrong or no longer needed).",
-		promptGuidelines: [
-			"subagent_cancel: Cancel a background subagent task only when it is clearly wrong or no longer needed — never cancel merely because it is taking long; the cancellation arrives later as a [subagent-result] notification with status 已取消 (cancelled).",
-		],
-		parameters: Type.Object({
-			taskId: Type.String({
-				description: "taskId of the running background subagent task to cancel (from the subagent dispatch receipt).",
-			}),
-		}),
-
-		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-			const taskId = typeof params.taskId === "string" ? params.taskId.trim() : "";
-			if (!taskId) {
-				return {
-					content: [{ type: "text", text: 'Missing or empty required parameter: "taskId" (taskId 必填，不能为空).' }],
-					details: { taskId: "", cancelled: false },
-					isError: true,
-				};
-			}
-			// Only registry (async/TUI) tasks are cancellable; sync-mode tasks are
-			// awaited inline and never enter the registry.
-			if (!cancelTask(taskId, "agent")) {
-				return {
-					content: [{ type: "text", text: `无此运行中任务: ${taskId} (no running subagent task with this id).` }],
-					details: { taskId, cancelled: false },
-					isError: true,
-				};
-			}
-			return {
-				content: [{ type: "text", text: `已发送取消请求: ${taskId} (cancel request sent); 结果稍后以 [subagent-result] 通知返回。\n${formatActiveTasks()}` }],
-				details: { taskId, cancelled: true },
-			};
-		},
 	});
 
 	// /subagent-cancel <taskId> is the user's cancel path.
