@@ -47,7 +47,7 @@ The main agent is the dispatcher: it understands the request, splits it into tas
 
 More important is **the freedom after dispatch**. While a task runs in the background, you keep talking to the main agent — refine the requirements, adjust the plan, discuss next steps, or raise a new task. The main agent doesn't wait idle; it can keep planning and even dispatch more tasks in parallel. Foreground conversation and background work move forward together.
 
-Finally, **review when the result returns**. The subagent finishes, the notification arrives, and the main agent processes it and reports back. While you wait, you can check in-flight status any time (the progress widget or `subagent_status`), but you never have to watch.
+Finally, **review when the result returns**. The subagent finishes, the notification arrives, and the main agent processes it and reports back. While you wait, you can check in-flight status any time (the progress widget or the `subagent` tool with `action="status"`), but you never have to watch.
 
 In one line: sync traps you in the "swarm execution" block; async keeps you facing a single dispatcher while background work runs alongside your own pace.
 
@@ -104,7 +104,7 @@ When the subagent finishes, its result is pushed as a **`[subagent-result]` syst
 - If the main agent is **idle**, the notification triggers a new turn immediately.
 - If the main agent is **busy**, it is queued and triggers a turn after the current one finishes.
 
-Results arrive automatically — **no polling**. To confirm which tasks are still in flight (e.g. after a `/tree` rewind loses the receipts), use the `subagent_status` tool.
+Results arrive automatically — **no polling**. To confirm which tasks are still in flight (e.g. after a `/tree` rewind loses the receipts), use the `subagent` tool with `action="status"`.
 
 ### 5. Read the full result (`/subagent-result`)
 
@@ -133,9 +133,9 @@ User runs /subagent-result <taskId> to read the full output
 
 | Tool | Purpose | Key constraint |
 |------|---------|----------------|
-| `subagent` | Async dispatch (TUI mode); falls back to sync in non-TUI | Receipt ≠ result; results arrive as notifications, don't poll |
-| `subagent_status` | List in-flight tasks (taskId, agent, description, **no elapsed time**) | Only confirm "what's still running"; never poll with it |
-| `subagent_cancel` | Main agent cancels one in-flight task | Only when clearly wrong or no longer needed; never for being slow |
+| `subagent` | Single-entry tool (`action` parameter); `action="dispatch"` (default) dispatches asynchronously (TUI mode), falls back to sync in non-TUI | Receipt ≠ result; results arrive as notifications, don't poll |
+| `subagent` `action="status"` | List in-flight tasks (taskId, agent, description, **no elapsed time**) | Only confirm "what's still running"; never poll with it |
+| `subagent` `action="cancel"` | Main agent cancels one in-flight task | Only when clearly wrong or no longer needed; never for being slow |
 
 ### Commands (for the user)
 
@@ -180,11 +180,11 @@ See [ADVANCED.en.md](ADVANCED.en.md) for the complete envelope format, status se
 
 Async mode introduces a few rules, baked into the tool prompts and implementation, that the main agent follows automatically:
 
-- **Cancel-origin distinction**: `已取消` (cancelled) has three origins — user (`/subagent-cancel`), main agent (`subagent_cancel` tool), and session shutdown (`session_shutdown`). A user-initiated cancel must **never be auto-retried**; ask the user first.
-- **No polling**: results arrive automatically as notifications. `subagent_status` only confirms what's in flight (e.g. after a `/tree` rewind), carries no elapsed time, and is not meant to be called frequently.
-- **Anti-abuse cancellation**: `subagent_cancel` ships with prompt guidance — cancel only when the task is clearly wrong or no longer needed, never just because it's slow (background subagents are expected to run long).
+- **Cancel-origin distinction**: `已取消` (cancelled) has three origins — user (`/subagent-cancel`), main agent (`subagent` tool with `action="cancel"`), and session shutdown (`session_shutdown`). A user-initiated cancel must **never be auto-retried**; ask the user first.
+- **No polling**: results arrive automatically as notifications. `action="status"` only confirms what's in flight (e.g. after a `/tree` rewind), carries no elapsed time, and is not meant to be called frequently.
+- **Anti-abuse cancellation**: `action="cancel"` ships with prompt guidance — cancel only when the task is clearly wrong or no longer needed, never just because it's slow (background subagents are expected to run long).
 - **Resource-conflict discipline**: before dispatching multiple tasks in parallel, consider whether they touch the same files or code areas; when in doubt, dispatch sequentially or ask the user.
-- **Recursion blocked entirely**: a subagent (depth ≥ 1) can never dispatch `subagent`; delegation depth is capped at 1.
+- **Subagents cannot call the subagent tool**: a subagent (depth ≥ 1) can never call any `subagent` action (including `action="status"` / `action="cancel"`); delegation depth is capped at 1.
 - **TUI async / non-TUI sync fallback**: only TUI mode takes the async path; print/json and other non-TUI modes fall back to synchronous blocking.
 
 ---
@@ -273,7 +273,7 @@ Put it in `~/.pi/agent/subagent-isolation.json` (user-level) or `.pi/subagent-is
 
 ## Advanced usage
 
-Manual `subagent` calls, `sessionId` reuse, envelope and in-flight block details, `subagent_status` queries, cancellation, and environment variables are covered in [ADVANCED.en.md](ADVANCED.en.md).
+Manual `subagent` calls, `sessionId` reuse, envelope and in-flight block details, `action="status"` queries, `action="cancel"` cancellation, and environment variables are covered in [ADVANCED.en.md](ADVANCED.en.md).
 
 ---
 

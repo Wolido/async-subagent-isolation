@@ -47,7 +47,7 @@
 
 更关键的是**派发之后的自由**。任务在后台跑的时候，你可以继续和主 agent 聊天：细化需求、调整规划、商量下一步，或提出新任务。主 agent 不必干等，可以继续规划，甚至并行派发更多任务。前台对话与后台工作并行推进。
 
-最后是**结果回来再验收**。子 agent 完成，通知到达，主 agent 处理并向你汇报。等待期间你可以随时查看在途状态（进度 widget 或 `subagent_status`），但不必盯着。
+最后是**结果回来再验收**。子 agent 完成，通知到达，主 agent 处理并向你汇报。等待期间你可以随时查看在途状态（进度 widget 或 `subagent` 工具 `action="status"`），但不必盯着。
 
 一句话：同步版让你陷在"集群执行"的阻塞感里；异步版让你只面对调度者，后台工作与你自己的节奏并行。
 
@@ -104,7 +104,7 @@ TUI 模式下 `subagent` **立即返回派发回执**，不阻塞：
 - 主 agent **空闲**时，通知直接触发新的对话回合，立即处理。
 - 主 agent **忙碌**时，通知进入队列，当前回合结束后再触发。
 
-结果自动到达，**无需轮询**。如需确认还有哪些任务在途（例如 `/tree` 回退后回执丢失），用 `subagent_status` 工具查询。
+结果自动到达，**无需轮询**。如需确认还有哪些任务在途（例如 `/tree` 回退后回执丢失），用 `subagent` 工具（`action="status"`）查询。
 
 ### 5. 查看全文（`/subagent-result`）
 
@@ -133,9 +133,9 @@ TUI 模式下 `subagent` **立即返回派发回执**，不阻塞：
 
 | 工具 | 作用 | 关键约束 |
 |------|------|----------|
-| `subagent` | 异步派发任务（TUI 模式）；非 TUI 自动降级同步 | 回执≠结果；结果以通知到达，勿轮询 |
-| `subagent_status` | 查询在途任务（taskId、agent、任务描述，**无耗时**） | 仅确认"还有什么在跑"，勿用它轮询完成 |
-| `subagent_cancel` | 主 agent 取消单个在途任务 | 仅当任务明显错误或不再需要，勿因耗时久而取消 |
+| `subagent` | 单入口工具（`action` 参数）；`action="dispatch"`（默认）异步派发任务（TUI 模式），非 TUI 自动降级同步 | 回执≠结果；结果以通知到达，勿轮询 |
+| `subagent` `action="status"` | 查询在途任务（taskId、agent、任务描述，**无耗时**） | 仅确认"还有什么在跑"，勿用它轮询完成 |
+| `subagent` `action="cancel"` | 主 agent 取消单个在途任务 | 仅当任务明显错误或不再需要，勿因耗时久而取消 |
 
 ### 命令（用户使用）
 
@@ -180,11 +180,11 @@ TUI 模式下 `subagent` **立即返回派发回执**，不阻塞：
 
 异步模式引入的几条纪律，内嵌在工具提示词和实现中，主 agent 自动遵守：
 
-- **取消来源区分**：`已取消` 有用户（`/subagent-cancel`）、主 agent（`subagent_cancel`）、会话关闭（`session_shutdown`）三种来源；用户取消**不得自动重试**，须先询问。
-- **防轮询**：结果以通知自动到达；`subagent_status` 只用于确认在途（如 `/tree` 回退后），不带耗时、不鼓励频繁调用。
-- **防滥用取消**：`subagent_cancel` 内嵌提示词——仅当任务明显错误或不再需要时取消，勿因耗时长而取消（后台任务本就预期长时间运行）。
+- **取消来源区分**：`已取消` 有用户（`/subagent-cancel`）、主 agent（`subagent` 工具 `action="cancel"`）、会话关闭（`session_shutdown`）三种来源；用户取消**不得自动重试**，须先询问。
+- **防轮询**：结果以通知自动到达；`action="status"` 只用于确认在途（如 `/tree` 回退后），不带耗时、不鼓励频繁调用。
+- **防滥用取消**：`action="cancel"` 内嵌提示词——仅当任务明显错误或不再需要时取消，勿因耗时长而取消（后台任务本就预期长时间运行）。
 - **资源冲突纪律**：并行派发多个任务前，考虑它们是否会改同一批文件或代码区域；冲突时串行派发或先问用户。
-- **递归委派完全禁止**：子 agent（深度 ≥ 1）不可再派发 `subagent`，深度限制为 1。
+- **子 agent 不可调用 subagent 工具**：子 agent（深度 ≥ 1）不可调用任何 `subagent` action（含 `action="status"` / `action="cancel"`），深度限制为 1。
 - **TUI 异步 / 非 TUI 同步降级**：只在 TUI 模式走异步路径；print/json 等非 TUI 模式降级为同步阻塞。
 
 ---
@@ -273,7 +273,7 @@ alias pp='pi --tools read,grep,find,ls,subagent --no-skills --append-system-prom
 
 ## 进阶用法
 
-手写 `subagent` 调用、复用 `sessionId`、信封与在途任务块细节、`subagent_status` 查询、取消任务、环境变量等见 [ADVANCED.md](ADVANCED.md)。
+手写 `subagent` 调用、复用 `sessionId`、信封与在途任务块细节、`action="status"` 查询、`action="cancel"` 取消任务、环境变量等见 [ADVANCED.md](ADVANCED.md)。
 
 ---
 

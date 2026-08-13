@@ -114,7 +114,7 @@ Key points:
 - **The receipt is a single line.** The async-semantics guidance (don't fabricate results, don't poll, results arrive as a `[subagent-result]` notification) is embedded in the `subagent` tool's `description` / `promptGuidelines`; the receipt itself stays a single line.
 - **The receipt is not the result.** Do not fabricate results.
 - **taskId = sessionId.** The `taskId` in the receipt is the session ID; reuse it directly.
-- **Do not poll.** Results arrive automatically as `[subagent-result]` notifications; to confirm which tasks are still in flight (e.g. after a `/tree` rewind), use the `subagent_status` tool.
+- **Do not poll.** Results arrive automatically as `[subagent-result]` notifications; to confirm which tasks are still in flight (e.g. after a `/tree` rewind), use the `subagent` tool with `action="status"`.
 
 ### [subagent-result] envelope format
 
@@ -139,12 +139,12 @@ Status enumeration: **成功** (success, exit=0) / **失败** (failure, exit≠0
 
 "Cancelled" has three sub-cases with different envelope bodies:
 - User cancelled via `/subagent-cancel` (cancelledBy: user) → body states this is a deliberate user action; the main agent must NOT auto-retry and must ask the user before re-dispatching.
-- Main agent cancelled via `subagent_cancel` tool (cancelledBy: agent) → body states the task was cancelled by the main agent via the subagent_cancel tool.
+- Main agent cancelled via the `subagent` tool with `action="cancel"` (cancelledBy: agent) → body states the task was cancelled by the main agent via the subagent tool (action=cancel).
 - Session shutdown killed the task (cancelledBy: none) → body states the task was terminated by session_shutdown.
 
 When the main agent receives a "已取消" notification, it should distinguish the origin: a user cancel must never be auto-retried (ask the user first); an agent cancel is its own decision — do not re-dispatch without new information; a session-shutdown cancel can be re-dispatched after the session resumes, at the agent's discretion.
 
-**In-flight block**: the "在途任务" list in the envelope's metadata section lists the **other** background tasks still running (this task is removed from the registry before the envelope is built, so it never appears in its own list). Its format matches the `subagent_status` tool — `在途任务: N` followed by one `- taskId (agent): task description` line per task, or `当前无在途任务。` when none remain. It deliberately carries **no elapsed time** (it answers "what is still running", not "how long has it run"). The main agent uses it to know how many tasks are still outstanding — while the count is non-zero, do not report "all done" to the user.
+**In-flight block**: the "在途任务" list in the envelope's metadata section lists the **other** background tasks still running (this task is removed from the registry before the envelope is built, so it never appears in its own list). Its format matches the `subagent` tool's `action="status"` — `在途任务: N` followed by one `- taskId (agent): task description` line per task, or `当前无在途任务。` when none remain. It deliberately carries **no elapsed time** (it answers "what is still running", not "how long has it run"). The main agent uses it to know how many tasks are still outstanding — while the count is non-zero, do not report "all done" to the user.
 
 The full output enters the LLM context (not truncated). The `details` carries structured data (taskId, agent, status, exitCode, stopReason, usage, sessionId, full output) for programmatic consumption; it does not enter the LLM context.
 
@@ -166,9 +166,9 @@ While subagents run, a progress widget appears above the TUI editor, listing all
 
 The taskId in the widget row can be copied for `/subagent-result` (view full result) or `/subagent-cancel` (cancel the task).
 
-### subagent_status (in-flight query)
+### `action="status"` (in-flight query)
 
-The main agent can actively query still-running background tasks via the `subagent_status` tool (no parameters), which returns:
+The main agent can actively query still-running background tasks via the `subagent` tool with `action="status"` (no agent/task parameters needed), which returns:
 
 ```
 在途任务: 2
@@ -181,7 +181,7 @@ With no in-flight tasks it returns `当前无在途任务。`. Each line carries
 Use cases:
 
 - After a `/tree` rewind loses the receipts, confirm which tasks are still in flight.
-- When unsure how many tasks remain, or to pick a taskId for `subagent_cancel`.
+- When unsure how many tasks remain, or to pick a taskId for `action="cancel"`.
 
 **Do not use it to poll for completion**: results arrive automatically as `[subagent-result]` notifications. This tool only confirms "what is still running" — it should not be called frequently.
 
@@ -207,11 +207,11 @@ To cancel all running tasks at once:
 
 Takes no arguments. Unlike `/subagent-cancel`, which cancels a single task by taskId, this cancels every running task. Each cancelled task still emits its own "已取消" `[subagent-result]` notification (the main agent receives N cancelled envelopes). On success it notifies "已取消全部 N 个运行中任务"; with no running tasks it notifies "无运行中任务可取消". The cancel source is likewise recorded as `cancelledBy: "user"`.
 
-**Path 2: Main agent `subagent_cancel` tool**
+**Path 2: Main agent `subagent` tool with `action="cancel"`**
 
-The main agent can call the `subagent_cancel` tool (parameter `taskId`) to cancel a dispatched background task. The cancel source is recorded as `cancelledBy: "agent"`. On success, the tool returns the remaining in-flight task list (same format as `subagent_status`); the cancelled task's final result arrives later as a `[subagent-result]` notification.
+The main agent can call the `subagent` tool with `action="cancel"` (parameter `taskId`) to cancel a dispatched background task. The cancel source is recorded as `cancelledBy: "agent"`. On success, the tool returns the remaining in-flight task list (same format as `action="status"`); the cancelled task's final result arrives later as a `[subagent-result]` notification.
 
-**Usage discipline:** The main agent should only use `subagent_cancel` when:
+**Usage discipline:** The main agent should only use `action="cancel"` when:
 - The task is clearly wrong (wrong agent, incorrect task description, etc.).
 - The task is no longer needed (requirement change, later discovery that this step is unnecessary).
 
@@ -292,7 +292,7 @@ These variables are propagated into every subagent process automatically:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PI_SUBAGENT_DEPTH` | `0` | Current recursion depth. Auto-incremented per nested call. **Depth limit is 1** — a subagent (depth ≥ 1) cannot dispatch `subagent`; recursive delegation is blocked entirely. |
+| `PI_SUBAGENT_DEPTH` | `0` | Current recursion depth. Auto-incremented per nested call. **Depth limit is 1** — a subagent (depth ≥ 1) cannot call any `subagent` action (including `action="status"` / `action="cancel"`). |
 | `PI_CURRENT_AGENT_NAME` | — | Name of the current agent, injected into every subagent process. |
 | `PI_SUBAGENT_ACTIVITY_TIMEOUT_MS` | `600000` (10 min) | Max idle time with no output on either stdout or stderr before the subagent is killed. |
 | `PI_SUBAGENT_HARD_TIMEOUT_MS` | `0` (disabled) | Absolute maximum runtime for a single call. Set a positive value (ms) to enable. |
