@@ -71,6 +71,18 @@ Plain subagents split work. async-subagent-isolation splits everything.
 
 ---
 
+## Uniqueness and significance
+
+This project is built on two design decisions that support each other, and its significance comes from the two together.
+
+**Async by default.** Dispatching is not handing over control — it's delivering a task: the call returns a receipt immediately, the task runs in an independent process in the background, and the result is pushed back as a `[subagent-result]` system notification. Async is the default semantics, not an optional switch — the main agent never blocks, can dispatch in parallel and keep planning, and the user always faces the dispatcher alone.
+
+**Exclusive skill isolation.** A subagent's skills load from a whitelist: everything is off by default, and only individually listed skills can enter its context. Isolation happens at the process level, not the prompt level — each subagent is its own `pi` process, and none of the main agent's skills can get in. Isolation is therefore not an instruction but a structural fact: a subagent knows only what it is allowed to know, and its domain of focus is precisely controllable.
+
+**Why it matters: context partitioning.** The main agent keeps only "what to do" and "what came back"; the subagent's long execution trail stays in its own process and session, never flowing back to the main agent. Context is cut into small slices, each handled by its own agent — the main agent stays clear-headed over the long run, and planning and review are never drowned in detail. Reliable division of labor is thus structure, not discipline: async and isolation are both defaults.
+
+---
+
 ## Async workflow
 
 This is the biggest difference from the sync version, and the primary way to use it (TUI mode).
