@@ -1,6 +1,6 @@
 {
   "name": "@wolido/async-subagent-isolation",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A pi extension that asynchronously delegates tasks to specialized subagents running in isolated pi processes.",
   "license": "MIT",
   "author": "Wolido",
