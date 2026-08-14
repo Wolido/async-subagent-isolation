@@ -94,7 +94,7 @@ function parseListField(value: unknown): string[] | undefined {
 	return undefined;
 }
 
-function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig[] {
+export function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig[] {
 	const agents: AgentConfig[] = [];
 	if (!fs.existsSync(dir)) return agents;
 	let entries: fs.Dirent[];
@@ -113,8 +113,23 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
 		} catch {
 			continue;
 		}
-		const { frontmatter, body } = parseFrontmatter<Record<string, unknown>>(content);
-		if (!frontmatter.name || !frontmatter.description) continue;
+		let frontmatter: Record<string, unknown>;
+		let body: string;
+		try {
+			({ frontmatter, body } = parseFrontmatter<Record<string, unknown>>(content));
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			console.warn(`[async-subagent-isolation] failed to parse frontmatter in ${entry.name}: ${msg.slice(0, 200)}`);
+			continue;
+		}
+		if (typeof frontmatter.name !== "string" || frontmatter.name.trim() === "") {
+			console.warn(`[async-subagent-isolation] ${entry.name}: name must be a non-empty string, skipping.`);
+			continue;
+		}
+		if (typeof frontmatter.description !== "string" || frontmatter.description.trim() === "") {
+			console.warn(`[async-subagent-isolation] ${entry.name}: description must be a string (watch YAML flow objects like {foo:bar} or null/~), skipping.`);
+			continue;
+		}
 		const tools = parseListField(frontmatter.tools);
 		const hasSkills = "skills" in frontmatter;
 		const skills = hasSkills ? parseListField(frontmatter.skills) ?? [] : undefined;
@@ -242,7 +257,7 @@ export function loadModelOverrides(cwd: string): Record<string, ModelOverride> {
 	}
 }
 
-function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryResult {
+export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryResult {
 	const userDir = path.join(getAgentDir(), "agents");
 	const projectAgentsDir = findNearestProjectAgentsDir(cwd);
 	const userAgents = scope === "project" ? [] : loadAgentsFromDir(userDir, "user");
