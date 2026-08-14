@@ -98,7 +98,7 @@ describe("Technical debt: race conditions and boundary bugs", () => {
 
 		const pi = {
 			registerTool: (tool: { name: string; execute: ExecuteFn }) => {
-				// The extension registers a single subagent tool; status/cancel are dispatched via its action parameter. These tests exercise subagent.
+				// The extension registers a single subagent tool; cancel is dispatched via its action parameter. These tests exercise subagent.
 				if (tool.name === "subagent") executeTool = tool.execute;
 			},
 		};

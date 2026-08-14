@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-08-15
+
+### Removed
+
+- Removed the `status` action from the `subagent` tool. In-flight task information is now provided only by the `[subagent-result]` notification envelope's in-flight block. This is a breaking change for any prompts or workflows that relied on `action="status"`.
+
+### Changed
+
+- Updated tool schema, prompts, and documentation to reflect the `dispatch` / `cancel` action surface only.
+
 ## [1.1.1] - 2026-08-14
 
 ### Fixed

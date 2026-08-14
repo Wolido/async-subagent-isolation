@@ -5,6 +5,8 @@
 `examples/pi/` mirrors `~/.pi/agent/`. Copy it to your user directory so `pi` can discover these agents and skills.
 
 > Install the extension first with `pi install npm:@wolido/async-subagent-isolation`.
+>
+> **v2.0.0 breaking change**: the `subagent` tool's `action="status"` has been removed. In-flight task information is now provided by the `[subagent-result]` notification envelope's in-flight block.
 
 ## Directory structure
 

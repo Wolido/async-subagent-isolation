@@ -1504,10 +1504,10 @@ export function truncateTaskDescription(task: string, maxLen = 200): string {
 }
 
 /**
- * Format the in-flight task list (status === "running") shared by the
- * action="status" branch, the result envelope's 在途 block, and the
- * action="cancel" receipt. Deliberately carries no elapsed time: the list
- * answers "what is still running", not "how long has it run".
+ * Format the in-flight task list (status === "running") shared by the result
+ * envelope's 在途 block and the action="cancel" receipt. Deliberately carries
+ * no elapsed time: the list answers "what is still running", not "how long has
+ * it run".
  */
 export function formatActiveTasks(): string {
 	const running = [...taskRegistry.values()].filter((t) => t.status === "running");
@@ -1686,10 +1686,10 @@ const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
 // Union-of-literals (anyOf + const) rather than StringEnum so the emitted
 // JSON Schema enumerates each action as its own const branch.
 const SubagentActionSchema = Type.Union(
-	[Type.Literal("dispatch"), Type.Literal("status"), Type.Literal("cancel")],
+	[Type.Literal("dispatch"), Type.Literal("cancel")],
 	{
 		description:
-			'Action to perform. "dispatch" (default): delegate the task to a subagent. "status": list in-flight background tasks. "cancel": cancel a running background task by taskId.',
+			'Action to perform. "dispatch" (default): delegate the task to a subagent. "cancel": cancel a running background task by taskId.',
 		default: "dispatch",
 	},
 );
@@ -1721,15 +1721,13 @@ export default function (pi: ExtensionAPI) {
 			"",
 			"ACTIONS (action parameter, default \"dispatch\"):",
 			"- dispatch: delegate the task (async in TUI mode, blocking otherwise).",
-			"- status: list in-flight background tasks (taskId, agent, task description).",
 			"- cancel: cancel a running background task by taskId.",
 			"",
 			"ASYNC (TUI mode): returns immediately with a dispatch receipt (taskId + session id).",
 			"The result arrives later as a system notification message prefixed with",
 			"[subagent-result] — that is a system notification, NOT a user request.",
 			"- Do NOT treat the receipt as the result. Do NOT fabricate results.",
-			"- Do NOT poll for results; they arrive automatically. To confirm which",
-			"  tasks are still in flight (e.g. after a /tree rewind), use action=\"status\".",
+			"- Do NOT poll for results; they arrive automatically.",
 			"- Continue with independent work, or end the turn. Process the result when",
 			"  the [subagent-result] notification arrives. Reuse the session id from the",
 			"  receipt to continue the same task later.",
@@ -1748,7 +1746,7 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet:
 			"Delegate a task to a specialized subagent in an isolated process (async dispatch in TUI mode, blocking otherwise).",
 		promptGuidelines: [
-			"subagent: In TUI mode this tool is asynchronous — it returns a dispatch receipt, not the result; the real result arrives later as a [subagent-result] system notification, so never fabricate results and never poll for status.",
+			"subagent: In TUI mode this tool is asynchronous — it returns a dispatch receipt, not the result; the real result arrives later as a [subagent-result] system notification, so never fabricate results and never poll.",
 			"subagent: A message prefixed with [subagent-result] is a system notification carrying a finished subagent result, not a user request; process it in the context of the task that dispatched it.",
 			"subagent: Dispatch subagents driven by task dependencies — delegate only work whose result you actually need, prefer reusing the session id from the receipt to continue a previous subagent task, and keep independent work in the main context.",
 			"subagent: A [subagent-result] notification with status 已取消 (cancelled) can come from the user (/subagent-cancel) or from you (action=\"cancel\"); the envelope body states the source. A user-initiated cancel is a deliberate user action, so do NOT automatically retry or re-dispatch it; ask the user before re-dispatching.",
@@ -1762,15 +1760,15 @@ export default function (pi: ExtensionAPI) {
 
 			// Depth gate runs BEFORE any action dispatch: a subagent (depth >= 1)
 			// is blocked from every action — dispatch spawns a nested subagent, and
-			// status/cancel would let it observe or kill the parent's in-flight
-			// tasks. The tool surface simply does not exist inside a subagent.
+			// cancel would let it kill the parent's in-flight tasks. The tool surface
+			// simply does not exist inside a subagent.
 			const currentDepth = parseEnvInt(process.env.PI_SUBAGENT_DEPTH, 0);
 			if (currentDepth >= MAX_SUBAGENT_DEPTH) {
 				const agentName = process.env.PI_CURRENT_AGENT_NAME || "current agent";
 				return {
 					content: [{
 						type: "text",
-						text: `Subagent tool is blocked: depth limit reached (depth: ${currentDepth}, max: ${MAX_SUBAGENT_DEPTH}). Agent \`${agentName}\` runs inside a subagent and cannot invoke subagent actions (dispatch/status/cancel).`,
+						text: `Subagent tool is blocked: depth limit reached (depth: ${currentDepth}, max: ${MAX_SUBAGENT_DEPTH}). Agent \`${agentName}\` runs inside a subagent and cannot invoke subagent actions (dispatch/cancel).`,
 					}],
 					details: {
 						mode: "single",
@@ -1779,13 +1777,6 @@ export default function (pi: ExtensionAPI) {
 						results: [],
 					} as SubagentDetails,
 					isError: true,
-				};
-			}
-
-			if (action === "status") {
-				return {
-					content: [{ type: "text", text: formatActiveTasks() }],
-					details: { activeTasks: [...taskRegistry.values()].filter((t) => t.status === "running").map((t) => t.taskId) },
 				};
 			}
 
@@ -1815,7 +1806,7 @@ export default function (pi: ExtensionAPI) {
 
 			if (action !== "dispatch") {
 				return {
-					content: [{ type: "text", text: `Invalid action: "${action}". Must be one of "dispatch" (default), "status", "cancel".` }],
+					content: [{ type: "text", text: `Invalid action: "${action}". Must be one of "dispatch" (default), "cancel".` }],
 					details: {
 						mode: "single",
 						agentScope: (params.agentScope ?? "both") as AgentScope,
@@ -2046,9 +2037,9 @@ export default function (pi: ExtensionAPI) {
 
 		renderResult(result, { expanded }, theme, context) {
 			const details = result.details as SubagentDetails | undefined;
-			// status/cancel receipts carry no `results` array (activeTasks /
-			// taskId+cancelled instead) — fall back to the plain-text content
-			// instead of throwing on details.results.length.
+			// cancel receipts carry no `results` array (taskId+cancelled instead)
+			// — fall back to the plain-text content instead of throwing on
+			// details.results.length.
 			if (!details || !Array.isArray(details.results) || details.results.length === 0) {
 				return new Text(result.content?.[0]?.type === "text" ? result.content[0].text : "(no output)", 0, 0);
 			}

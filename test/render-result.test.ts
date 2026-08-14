@@ -1,18 +1,13 @@
 /**
- * TDD 红阶段测试：renderResult 对 status/cancel 的 details（无 results 字段）不得抛异常
+ * renderResult 对 cancel 回执的 details（无 results 字段）不得抛异常
  *
- * 背景（reviewer 审查 #1）：单入口 action 模式下，action=status 返回
- * details.activeTasks、action=cancel 返回 details.taskId/cancelled，均无
- * SubagentDetails.results 数组。当前 renderResult 直接访问 details.results.length，
- * 对无 results 字段的 details 抛 TypeError，导致渲染管线中断。
+ * 背景（reviewer 审查 #1）：单入口 action 模式下，action=cancel 返回
+ * details.taskId/cancelled，无 SubagentDetails.results 数组。renderResult
+ * 直接访问 details.results.length 会抛 TypeError，导致渲染管线中断。
  *
- * 契约（本文件 RED 部分）：
- * - action=status 的 result 渲染不抛 TypeError，且有文本输出（走文本回退）
- * - action=cancel 的 result 渲染不抛 TypeError，且有文本输出
- * - cancel 失败回执（details 亦无 results）同样不抛 TypeError
- *
- * 修复方向（交给 coder）：renderResult 守卫 details.results 非数组时走文本回退，
- * 例如 `!Array.isArray(details.results) || details.results.length === 0`。
+ * Breaking change（v2.0.0）：action="status" 已从工具面移除，
+ * details.activeTasks 形状不再可能产生 —— 原 status 渲染回退用例已删除，
+ * 文本回退契约由下列 cancel 回执用例锁定（实现已满足，保持绿）。
  */
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
@@ -51,7 +46,7 @@ function createMockTheme() {
 	} as any;
 }
 
-describe("renderResult — status/cancel 无 results 字段（#1 修复，RED）", () => {
+describe("renderResult — cancel 回执无 results 字段（#1 修复，契约锁定）", () => {
 	let renderResult: any;
 	let mockTheme: ReturnType<typeof createMockTheme>;
 	const context = { lastComponent: undefined };
@@ -65,25 +60,7 @@ describe("renderResult — status/cancel 无 results 字段（#1 修复，RED）
 		mockTheme = createMockTheme();
 	});
 
-	it("action=status 的 result 渲染不抛 TypeError 且有文本输出（RED：当前 details.results.length 抛错）", () => {
-		// Arrange: action=status 的真实返回形状 —— details 只有 activeTasks，无 results 字段
-		const statusResult = {
-			content: [{ type: "text", text: "在途任务: 1\n- task-1 (tester): 调研 XX 方案" }],
-			details: { activeTasks: ["task-1"] },
-		};
-
-		// Act + Assert: 不得抛异常（当前实现访问 details.results.length 抛 TypeError）
-		const render = () => renderResult(statusResult, { expanded: false }, mockTheme, context);
-		expect(render).not.toThrow();
-
-		// Assert: 有文本输出（走文本回退，而非进入 results 渲染分支）
-		const lines = render().render(80);
-		const text = lines.join("\n");
-		expect(text.length).toBeGreaterThan(0);
-		expect(text).toContain("在途任务");
-	});
-
-	it("action=cancel 的 result 渲染不抛 TypeError 且有文本输出（RED）", () => {
+	it("action=cancel 的 result 渲染不抛 TypeError 且有文本输出（契约锁定：实现已满足）", () => {
 		// Arrange: action=cancel 成功回执的真实返回形状 —— details 只有 taskId/cancelled
 		const cancelResult = {
 			content: [{ type: "text", text: "已发送取消请求: task-1 (cancel request sent); 结果稍后以 [subagent-result] 通知返回。" }],
