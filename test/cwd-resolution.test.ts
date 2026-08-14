@@ -40,7 +40,7 @@ vi.mock("node:child_process", () => ({
 	spawn: vi.fn(),
 }));
 
-const SESSION_ID = "test-session-id";
+const SESSION_ID = "019ffdd3-3eb5-733d-b481-a53e5292bd04";
 const ENV_KEYS = [
 	"PI_SUBAGENT_DEPTH",
 	"PI_SUBAGENT_HARD_TIMEOUT_MS",

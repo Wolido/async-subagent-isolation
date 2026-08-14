@@ -249,7 +249,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 
 			const executePromise = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "default-dispatch" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd60" },
 				undefined,
 				undefined,
 				ctx,
@@ -259,7 +259,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 			expect(timedOut).toBe(false);
 			expect(result!.isError).toBeFalsy();
 			expect(result!.content[0].text).toMatch(/^已派出/);
-			expect(result!.content[0].text).toContain("default-dispatch");
+			expect(result!.content[0].text).toContain("019ffdd3-3eb5-733d-b481-a53e5292bd60");
 		});
 
 		it("显式 action=dispatch 与缺省行为一致（兼容现有调用形态）", async () => {
@@ -268,7 +268,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 
 			const executePromise = executeSubagentTool!(
 				"call-1",
-				{ action: "dispatch", agent: "tester", task: "test task", sessionId: "explicit-dispatch" },
+				{ action: "dispatch", agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd61" },
 				undefined,
 				undefined,
 				ctx,
@@ -278,7 +278,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 			expect(timedOut).toBe(false);
 			expect(result!.isError).toBeFalsy();
 			expect(result!.content[0].text).toMatch(/^已派出/);
-			expect(result!.content[0].text).toContain("explicit-dispatch");
+			expect(result!.content[0].text).toContain("019ffdd3-3eb5-733d-b481-a53e5292bd61");
 		});
 
 		it("action=dispatch 缺 agent → 报错（与现有校验一致）", async () => {
@@ -341,7 +341,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 			// Arrange: dispatch 2 tasks
 			const p1 = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "调研 XX 方案", sessionId: "status-reject-1" },
+				{ agent: "tester", task: "调研 XX 方案", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd62" },
 				undefined,
 				undefined,
 				ctx,
@@ -350,7 +350,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 
 			const p2 = executeSubagentTool!(
 				"call-2",
-				{ agent: "tester", task: "重构认证中间件", sessionId: "status-reject-2" },
+				{ agent: "tester", task: "重构认证中间件", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd63" },
 				undefined,
 				undefined,
 				ctx,
@@ -366,8 +366,8 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 			expect(result.isError).toBe(true);
 			const text = result.content.map((c: any) => c.text).join("");
 			expect(text).not.toMatch(/在途任务|当前无在途任务/);
-			expect(text).not.toContain("status-reject-1");
-			expect(text).not.toContain("status-reject-2");
+			expect(text).not.toContain("019ffdd3-3eb5-733d-b481-a53e5292bd62");
+			expect(text).not.toContain("019ffdd3-3eb5-733d-b481-a53e5292bd63");
 			expect(text).not.toMatch(/调研 XX 方案/);
 			expect(text).not.toMatch(/重构认证中间件/);
 		});
@@ -391,7 +391,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 
 			const p1 = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "任务", sessionId: "status-reject-details" },
+				{ agent: "tester", task: "任务", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd64" },
 				undefined,
 				undefined,
 				ctx,
@@ -427,20 +427,20 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 			// Arrange: dispatch a task
 			const executePromise = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "action-cancel-kill" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd65" },
 				undefined,
 				undefined,
 				ctx,
 			);
 			await raceWithTimeout(executePromise, 200);
 
-			expect(taskRegistry.has("action-cancel-kill")).toBe(true);
+			expect(taskRegistry.has("019ffdd3-3eb5-733d-b481-a53e5292bd65")).toBe(true);
 			const proc = allProcs[0];
 
 			// Act: action=cancel（不携带 agent/task）
 			const result = await executeSubagentTool!(
 				"call-2",
-				{ action: "cancel", taskId: "action-cancel-kill" },
+				{ action: "cancel", taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd65" },
 				undefined,
 				undefined,
 				ctx,
@@ -448,7 +448,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 
 			// Assert: 任务被取消且 SIGTERM 已发送
 			expect(result.isError).toBeFalsy();
-			expect(taskRegistry.get("action-cancel-kill")?.status).toBe("cancelled");
+			expect(taskRegistry.get("019ffdd3-3eb5-733d-b481-a53e5292bd65")?.status).toBe("cancelled");
 			expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
 		});
 
@@ -458,7 +458,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 
 			const executePromise = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "action-cancel-envelope" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd66" },
 				undefined,
 				undefined,
 				ctx,
@@ -467,7 +467,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 
 			await executeSubagentTool!(
 				"call-2",
-				{ action: "cancel", taskId: "action-cancel-envelope" },
+				{ action: "cancel", taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd66" },
 				undefined,
 				undefined,
 				ctx,
@@ -489,7 +489,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 
 			const executePromise = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "action-cancel-body" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd67" },
 				undefined,
 				undefined,
 				ctx,
@@ -498,7 +498,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 
 			await executeSubagentTool!(
 				"call-2",
-				{ action: "cancel", taskId: "action-cancel-body" },
+				{ action: "cancel", taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd67" },
 				undefined,
 				undefined,
 				ctx,
@@ -523,7 +523,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 
 			const executePromise = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "action-cancel-receipt" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd68" },
 				undefined,
 				undefined,
 				ctx,
@@ -532,7 +532,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 
 			const result = await executeSubagentTool!(
 				"call-2",
-				{ action: "cancel", taskId: "action-cancel-receipt" },
+				{ action: "cancel", taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd68" },
 				undefined,
 				undefined,
 				ctx,
@@ -540,9 +540,9 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 
 			expect(result.isError).toBeFalsy();
 			const text = result.content.map((c: any) => c.text).join("");
-			expect(text).toMatch(/action-cancel-receipt/);
+			expect(text).toMatch(/019ffdd3-3eb5-733d-b481-a53e5292bd68/);
 			expect(text).toMatch(/cancel|取消/);
-			expect(result.details).toMatchObject({ taskId: "action-cancel-receipt", cancelled: true });
+			expect(result.details).toMatchObject({ taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd68", cancelled: true });
 		});
 
 		it("action=cancel 不存在 taskId → 错误提示「无此运行中任务」（RED）", async () => {
@@ -628,7 +628,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 
 			const executePromise = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "回归测试任务", sessionId: "regression-envelope" },
+				{ agent: "tester", task: "回归测试任务", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd69" },
 				undefined,
 				undefined,
 				ctx,
@@ -659,7 +659,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 
 			const executePromise = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "user-cancel-regression" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd6a" },
 				undefined,
 				undefined,
 				ctx,
@@ -668,7 +668,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 
 			const cancelCommand = pi._commandDefs.get("subagent-cancel");
 			expect(cancelCommand).toBeDefined();
-			await cancelCommand.handler("user-cancel-regression", { ui: { notify: vi.fn() } });
+			await cancelCommand.handler("019ffdd3-3eb5-733d-b481-a53e5292bd6a", { ui: { notify: vi.fn() } });
 
 			endProcess(allProcs[0], null, "SIGTERM");
 			await vi.advanceTimersByTimeAsync(1000);

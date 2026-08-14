@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.2.0] - 2026-08-15
+## [1.2.0] - 2026-08-14
 
 ### Removed
 
@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Updated tool schema, prompts, and documentation to reflect the `dispatch` / `cancel` action surface only.
+- The `subagent` tool's `sessionId` parameter now strictly requires a lowercase UUID v7. The plugin previously accepted any string matching `^[A-Za-z0-9_.-]+$`, which let slug values like `"tester-status-remove"` slip through and render as opaque taskIds in the progress widget. The parameter is reserved for resuming a previously dispatched task, so it must be the UUID v7 returned in the dispatch receipt. Any other input (slug, UUID v4, uppercase, etc.) is rejected with an error message explaining the constraint. Omit `sessionId` to start a new task — the system auto-generates a UUID v7.
 
 ## [1.1.1] - 2026-08-14
 

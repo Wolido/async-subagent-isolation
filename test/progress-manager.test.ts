@@ -257,7 +257,7 @@ describe("SubagentProgressManager — taskId visibility in widget rows", () => {
 	});
 
 	it("should include the taskId (sessionId) in the rendered row for a registered agent", () => {
-		const taskId = "019f3a2b-4c5d-6e7f-8a9b-0c1d2e3f4a5b";
+		const taskId = "019ffdd3-3eb5-733d-b481-a53e5292bd40";
 		const manager = new SubagentProgressManager();
 		const ctx = createMockCtx();
 
@@ -275,8 +275,8 @@ describe("SubagentProgressManager — taskId visibility in widget rows", () => {
 	});
 
 	it("should display each agent's own taskId when multiple agents are registered", () => {
-		const taskId1 = "019f3a2b-aaaa-bbbb-cccc-111111111111";
-		const taskId2 = "019f3a2b-dddd-eeee-ffff-222222222222";
+		const taskId1 = "019ffdd3-3eb5-733d-b481-a53e5292bd41";
+		const taskId2 = "019ffdd3-3eb5-733d-b481-a53e5292bd42";
 		const manager = new SubagentProgressManager();
 		const ctx = createMockCtx();
 
@@ -302,8 +302,8 @@ describe("SubagentProgressManager — taskId visibility in widget rows", () => {
 		manager.unregister(taskId2);
 	});
 
-	it("should display short non-uuid taskIds (e.g. 'task-1') in the rendered row", () => {
-		const taskId = "task-1";
+	it("should still render a valid UUID v7 taskId in the rendered row", () => {
+		const taskId = "019ffdd3-3eb5-733d-b481-a53e5292bd43";
 		const manager = new SubagentProgressManager();
 		const ctx = createMockCtx();
 
@@ -338,7 +338,7 @@ describe("SubagentProgressManager — full agent name display (red phase)", () =
 		const ctx = createMockCtx();
 		const longName = "diagrammer"; // 10 chars, exceeds 8-char limit
 
-		manager.register(ctx, "task-1", longName);
+		manager.register(ctx, "019ffdd3-3eb5-733d-b481-a53e5292bd50", longName);
 
 		vi.advanceTimersByTime(1000);
 
@@ -349,7 +349,7 @@ describe("SubagentProgressManager — full agent name display (red phase)", () =
 		// Currently FAILS because name is truncated to 8 chars
 		expect(dataLines[0]).toContain(longName);
 
-		manager.unregister("task-1");
+		manager.unregister("019ffdd3-3eb5-733d-b481-a53e5292bd50");
 	});
 
 	it("should display full agent name for very-long-agent-name (currently truncated)", () => {
@@ -357,7 +357,7 @@ describe("SubagentProgressManager — full agent name display (red phase)", () =
 		const ctx = createMockCtx();
 		const longName = "very-long-agent-name"; // 20 chars
 
-		manager.register(ctx, "task-2", longName);
+		manager.register(ctx, "019ffdd3-3eb5-733d-b481-a53e5292bd51", longName);
 
 		vi.advanceTimersByTime(1000);
 
@@ -368,11 +368,11 @@ describe("SubagentProgressManager — full agent name display (red phase)", () =
 		// Currently FAILS because name is truncated to 8 chars
 		expect(dataLines[0]).toContain(longName);
 
-		manager.unregister("task-2");
+		manager.unregister("019ffdd3-3eb5-733d-b481-a53e5292bd51");
 	});
 
 	it("should keep taskId fully visible alongside full agent name (regression lock)", () => {
-		const taskId = "019f3a2b-4c5d-6e7f-8a9b-0c1d2e3f4a5b";
+		const taskId = "019ffdd3-3eb5-733d-b481-a53e5292bd52";
 		const longName = "diagrammer";
 		const manager = new SubagentProgressManager();
 		const ctx = createMockCtx();
@@ -394,7 +394,7 @@ describe("SubagentProgressManager — full agent name display (red phase)", () =
 		const manager = new SubagentProgressManager();
 		const ctx = createMockCtx();
 		const longName = "very-long-agent-name";
-		const taskId = "019f3a2b-4c5d-6e7f-8a9b-0c1d2e3f4a5b";
+		const taskId = "019ffdd3-3eb5-733d-b481-a53e5292bd52";
 
 		manager.register(ctx, taskId, longName);
 
@@ -416,9 +416,9 @@ describe("SubagentProgressManager — aligned columns in widget rows", () => {
 
 	// Same-length (36-char) UUID-like taskIds so only the name length varies
 	// between rows and cannot skew the column-position assertions below.
-	const TASK_1 = "019f3a2b-aaaa-bbbb-cccc-111111111111";
-	const TASK_2 = "019f3a2b-aaaa-bbbb-cccc-222222222222";
-	const TASK_3 = "019f3a2b-aaaa-bbbb-cccc-333333333333";
+	const TASK_1 = "019ffdd3-3eb5-733d-b481-a53e5292bd53";
+	const TASK_2 = "019ffdd3-3eb5-733d-b481-a53e5292bd54";
+	const TASK_3 = "019ffdd3-3eb5-733d-b481-a53e5292bd55";
 
 	beforeEach(() => {
 		vi.useFakeTimers();

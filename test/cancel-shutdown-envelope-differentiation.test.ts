@@ -217,7 +217,7 @@ describe("取消/关闭信封正文区分 & /subagent-result 无输出提示 —
 			// Dispatch a task
 			const executePromise = executeTool(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "user-cancel-test" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd80" },
 				undefined,
 				undefined,
 				ctx,
@@ -227,7 +227,7 @@ describe("取消/关闭信封正文区分 & /subagent-result 无输出提示 —
 			// Cancel the task via /subagent-cancel
 			const cancelCommand = pi._commandDefs.get("subagent-cancel");
 			expect(cancelCommand).toBeDefined();
-			await cancelCommand.handler("user-cancel-test", { ui: { notify: vi.fn() } });
+			await cancelCommand.handler("019ffdd3-3eb5-733d-b481-a53e5292bd80", { ui: { notify: vi.fn() } });
 
 			// End the process
 			endProcess(allProcs[0], null, "SIGTERM");
@@ -250,7 +250,7 @@ describe("取消/关闭信封正文区分 & /subagent-result 无输出提示 —
 
 			const executePromise = executeTool(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "user-cancel-no-generic" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd81" },
 				undefined,
 				undefined,
 				ctx,
@@ -259,7 +259,7 @@ describe("取消/关闭信封正文区分 & /subagent-result 无输出提示 —
 
 			// Cancel the task
 			const cancelCommand = pi._commandDefs.get("subagent-cancel");
-			await cancelCommand.handler("user-cancel-no-generic", { ui: { notify: vi.fn() } });
+			await cancelCommand.handler("019ffdd3-3eb5-733d-b481-a53e5292bd81", { ui: { notify: vi.fn() } });
 
 			endProcess(allProcs[0], null, "SIGTERM");
 			await vi.advanceTimersByTimeAsync(1000);
@@ -292,7 +292,7 @@ describe("取消/关闭信封正文区分 & /subagent-result 无输出提示 —
 			// Dispatch a task
 			const executePromise = executeTool(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "shutdown-envelope-body" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd82" },
 				undefined,
 				undefined,
 				ctx,
@@ -345,7 +345,7 @@ describe("取消/关闭信封正文区分 & /subagent-result 无输出提示 —
 			// First: user cancel scenario
 			const cancelPromise = executeTool(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "cancel-body" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd83" },
 				undefined,
 				undefined,
 				ctx,
@@ -353,7 +353,7 @@ describe("取消/关闭信封正文区分 & /subagent-result 无输出提示 —
 			await raceWithTimeout(cancelPromise, 200);
 
 			const cancelCommand = pi._commandDefs.get("subagent-cancel");
-			await cancelCommand.handler("cancel-body", { ui: { notify: vi.fn() } });
+			await cancelCommand.handler("019ffdd3-3eb5-733d-b481-a53e5292bd83", { ui: { notify: vi.fn() } });
 			endProcess(allProcs[0], null, "SIGTERM");
 			await vi.advanceTimersByTimeAsync(1000);
 
@@ -374,7 +374,7 @@ describe("取消/关闭信封正文区分 & /subagent-result 无输出提示 —
 			// Second: shutdown scenario
 			const shutdownPromise = executeTool(
 				"call-2",
-				{ agent: "tester", task: "test task", sessionId: "shutdown-body" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd84" },
 				undefined,
 				undefined,
 				ctx,

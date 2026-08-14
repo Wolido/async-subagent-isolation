@@ -232,7 +232,7 @@ describe("在途任务台账", () => {
 			// Arrange: dispatch 2 tasks
 			const executePromise1 = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "调研 XX 方案", sessionId: "task-1" },
+				{ agent: "tester", task: "调研 XX 方案", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd11" },
 				undefined,
 				undefined,
 				ctx,
@@ -241,7 +241,7 @@ describe("在途任务台账", () => {
 
 			const executePromise2 = executeSubagentTool!(
 				"call-2",
-				{ agent: "tester", task: "重构认证中间件", sessionId: "task-2" },
+				{ agent: "tester", task: "重构认证中间件", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd12" },
 				undefined,
 				undefined,
 				ctx,
@@ -258,8 +258,8 @@ describe("在途任务台账", () => {
 			const text = result.content.map((c: any) => c.text).join("");
 			expect(text).toMatch(/Invalid action/);
 			expect(text).not.toMatch(/在途任务|当前无在途任务/);
-			expect(text).not.toContain("task-1");
-			expect(text).not.toContain("task-2");
+			expect(text).not.toContain("019ffdd3-3eb5-733d-b481-a53e5292bd11");
+			expect(text).not.toContain("019ffdd3-3eb5-733d-b481-a53e5292bd12");
 			expect(text).not.toMatch(/调研 XX 方案/);
 			expect(text).not.toMatch(/重构认证中间件/);
 		});
@@ -292,7 +292,7 @@ describe("在途任务台账", () => {
 			// Arrange: dispatch 2 tasks, cancel one —— 注册表同时含 running 与 cancelled
 			const executePromise1 = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "任务1", sessionId: "running-task" },
+				{ agent: "tester", task: "任务1", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd13" },
 				undefined,
 				undefined,
 				ctx,
@@ -301,14 +301,14 @@ describe("在途任务台账", () => {
 
 			const executePromise2 = executeSubagentTool!(
 				"call-2",
-				{ agent: "tester", task: "任务2", sessionId: "to-cancel" },
+				{ agent: "tester", task: "任务2", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd14" },
 				undefined,
 				undefined,
 				ctx,
 			);
 			await raceWithTimeout(executePromise2, 200);
 
-			await executeCancelTool!("call-3", { taskId: "to-cancel" }, undefined, undefined, ctx);
+			await executeCancelTool!("call-3", { taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd14" }, undefined, undefined, ctx);
 
 			// Act
 			const result = await executeSubagentTool!("call-4", { action: "status" }, undefined, undefined, ctx);
@@ -317,8 +317,8 @@ describe("在途任务台账", () => {
 			expect(result.isError).toBe(true);
 			const text = result.content.map((c: any) => c.text).join("");
 			expect(text).toMatch(/Invalid action/);
-			expect(text).not.toContain("running-task");
-			expect(text).not.toContain("to-cancel");
+			expect(text).not.toContain("019ffdd3-3eb5-733d-b481-a53e5292bd13");
+			expect(text).not.toContain("019ffdd3-3eb5-733d-b481-a53e5292bd14");
 		});
 	});
 
@@ -354,7 +354,7 @@ describe("在途任务台账", () => {
 			// Arrange: dispatch 2 tasks
 			const executePromise1 = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "任务1", sessionId: "completing-task" },
+				{ agent: "tester", task: "任务1", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd15" },
 				undefined,
 				undefined,
 				ctx,
@@ -363,7 +363,7 @@ describe("在途任务台账", () => {
 
 			const executePromise2 = executeSubagentTool!(
 				"call-2",
-				{ agent: "tester", task: "任务2", sessionId: "remaining-task" },
+				{ agent: "tester", task: "任务2", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd16" },
 				undefined,
 				undefined,
 				ctx,
@@ -382,7 +382,7 @@ describe("在途任务台账", () => {
 			const content: string = message.content;
 			
 			expect(content).toMatch(/在途任务:\s*1/);
-			expect(content).toContain("remaining-task");
+			expect(content).toContain("019ffdd3-3eb5-733d-b481-a53e5292bd16");
 			expect(content).toContain("tester");
 			expect(content).toMatch(/任务2/);
 		});
@@ -394,7 +394,7 @@ describe("在途任务台账", () => {
 			// Arrange: dispatch a task
 			const executePromise = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "测试任务", sessionId: "self-exclude" },
+				{ agent: "tester", task: "测试任务", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd17" },
 				undefined,
 				undefined,
 				ctx,
@@ -416,13 +416,13 @@ describe("在途任务台账", () => {
 			expect(content).toMatch(/在途任务:\s*0|当前无在途任务/);
 			
 			// The header contains the completed task's ID, but the active tasks list should not
-			// Check that "self-exclude" appears in header but not in active tasks section
+			// Check that the self-excluded task id appears in header but not in active tasks section
 			const lines = content.split("\n");
 			const activeTasksSection = lines.filter(l => l.match(/^- .* \(.*\):/)); // Lines like "- taskId (agent): task"
 			
 			// Active tasks section should not contain the completed task's ID
 			for (const line of activeTasksSection) {
-				expect(line).not.toContain("self-exclude");
+				expect(line).not.toContain("019ffdd3-3eb5-733d-b481-a53e5292bd17");
 			}
 		});
 	});
@@ -439,7 +439,7 @@ describe("在途任务台账", () => {
 			// Arrange: dispatch 2 tasks
 			const executePromise1 = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "任务1", sessionId: "to-cancel" },
+				{ agent: "tester", task: "任务1", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd14" },
 				undefined,
 				undefined,
 				ctx,
@@ -448,7 +448,7 @@ describe("在途任务台账", () => {
 
 			const executePromise2 = executeSubagentTool!(
 				"call-2",
-				{ agent: "tester", task: "任务2", sessionId: "remaining" },
+				{ agent: "tester", task: "任务2", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd18" },
 				undefined,
 				undefined,
 				ctx,
@@ -458,12 +458,12 @@ describe("在途任务台账", () => {
 			expect(taskRegistry.size).toBe(2);
 
 			// Act: cancel the first task
-			const result = await executeCancelTool!("call-3", { taskId: "to-cancel" }, undefined, undefined, ctx);
+			const result = await executeCancelTool!("call-3", { taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd14" }, undefined, undefined, ctx);
 
 			// Assert: return value should contain remaining active tasks
 			const text = result.content.map((c: any) => c.text).join("");
 			expect(text).toMatch(/在途任务/);
-			expect(text).toContain("remaining");
+			expect(text).toContain("019ffdd3-3eb5-733d-b481-a53e5292bd18");
 			expect(text).toContain("tester");
 			expect(text).toMatch(/任务2/);
 		});
@@ -476,7 +476,7 @@ describe("在途任务台账", () => {
 			// Arrange: dispatch 2 tasks
 			const executePromise1 = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "任务1", sessionId: "cancel-me" },
+				{ agent: "tester", task: "任务1", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd19" },
 				undefined,
 				undefined,
 				ctx,
@@ -485,7 +485,7 @@ describe("在途任务台账", () => {
 
 			const executePromise2 = executeSubagentTool!(
 				"call-2",
-				{ agent: "tester", task: "任务2", sessionId: "keep-me" },
+				{ agent: "tester", task: "任务2", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd1a" },
 				undefined,
 				undefined,
 				ctx,
@@ -493,17 +493,17 @@ describe("在途任务台账", () => {
 			await raceWithTimeout(executePromise2, 200);
 
 			// Act: cancel the first task
-			const result = await executeCancelTool!("call-3", { taskId: "cancel-me" }, undefined, undefined, ctx);
+			const result = await executeCancelTool!("call-3", { taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd19" }, undefined, undefined, ctx);
 
 			// Assert: should contain "keep-me" but not "cancel-me" in active tasks
 			const text = result.content.map((c: any) => c.text).join("");
-			expect(text).toContain("keep-me");
+			expect(text).toContain("019ffdd3-3eb5-733d-b481-a53e5292bd1a");
 			
 			// Check that "cancel-me" is not in the active tasks section
 			const lines = text.split("\n");
 			const activeTasksSection = lines.filter(l => l.match(/^- .* \(.*\):/));
 			for (const line of activeTasksSection) {
-				expect(line).not.toContain("cancel-me");
+				expect(line).not.toContain("019ffdd3-3eb5-733d-b481-a53e5292bd19");
 			}
 		});
 	});
@@ -519,7 +519,7 @@ describe("在途任务台账", () => {
 			// Arrange: dispatch a task
 			const executePromise = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "回归测试任务", sessionId: "regression-envelope" },
+				{ agent: "tester", task: "回归测试任务", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd1b" },
 				undefined,
 				undefined,
 				ctx,
@@ -537,7 +537,7 @@ describe("在途任务台账", () => {
 			
 			// Existing envelope structure should be preserved
 			expect(content).toContain("[subagent-result]");
-			expect(content).toContain("regression-envelope"); // taskId
+			expect(content).toContain("019ffdd3-3eb5-733d-b481-a53e5292bd1b"); // taskId
 			expect(content).toContain("tester"); // agent name
 			expect(content).toContain("状态:"); // status field
 			expect(content).toContain("任务:"); // task field
@@ -555,7 +555,7 @@ describe("在途任务台账", () => {
 			// Arrange: dispatch a task
 			const executePromise = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "取消测试", sessionId: "regression-cancel" },
+				{ agent: "tester", task: "取消测试", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd1c" },
 				undefined,
 				undefined,
 				ctx,
@@ -563,7 +563,7 @@ describe("在途任务台账", () => {
 			await raceWithTimeout(executePromise, 200);
 
 			// Act: cancel via tool
-			await executeCancelTool!("call-2", { taskId: "regression-cancel" }, undefined, undefined, ctx);
+			await executeCancelTool!("call-2", { taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd1c" }, undefined, undefined, ctx);
 			endProcess(allProcs[0], null, "SIGTERM");
 			await vi.advanceTimersByTimeAsync(1000);
 

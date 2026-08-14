@@ -234,22 +234,22 @@ describe("action=cancel 单入口 — 红阶段测试", () => {
 			// Arrange: dispatch a task
 			const executePromise = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "tool-cancel-kill" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd70" },
 				undefined,
 				undefined,
 				ctx,
 			);
 			await raceWithTimeout(executePromise, 200);
 
-			expect(taskRegistry.has("tool-cancel-kill")).toBe(true);
+			expect(taskRegistry.has("019ffdd3-3eb5-733d-b481-a53e5292bd70")).toBe(true);
 			const proc = allProcs[0];
 			expect(proc).toBeDefined();
 
 			// Act: cancel via tool
-			await executeCancelTool!("call-2", { taskId: "tool-cancel-kill" }, undefined, undefined, ctx);
+			await executeCancelTool!("call-2", { taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd70" }, undefined, undefined, ctx);
 
 			// Assert: task status is cancelled and abort was triggered (SIGTERM sent)
-			expect(taskRegistry.get("tool-cancel-kill")?.status).toBe("cancelled");
+			expect(taskRegistry.get("019ffdd3-3eb5-733d-b481-a53e5292bd70")?.status).toBe("cancelled");
 			expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
 		});
 
@@ -261,7 +261,7 @@ describe("action=cancel 单入口 — 红阶段测试", () => {
 			// Arrange: dispatch a task
 			const executePromise = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "tool-cancel-envelope" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd71" },
 				undefined,
 				undefined,
 				ctx,
@@ -269,7 +269,7 @@ describe("action=cancel 单入口 — 红阶段测试", () => {
 			await raceWithTimeout(executePromise, 200);
 
 			// Act: cancel via tool
-			await executeCancelTool!("call-2", { taskId: "tool-cancel-envelope" }, undefined, undefined, ctx);
+			await executeCancelTool!("call-2", { taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd71" }, undefined, undefined, ctx);
 
 			// Drive the abort cascade → completeAsyncTask → sendMessage
 			endProcess(allProcs[0], null, "SIGTERM");
@@ -290,7 +290,7 @@ describe("action=cancel 单入口 — 红阶段测试", () => {
 			// Arrange
 			const executePromise = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "tool-cancel-body" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd72" },
 				undefined,
 				undefined,
 				ctx,
@@ -298,7 +298,7 @@ describe("action=cancel 单入口 — 红阶段测试", () => {
 			await raceWithTimeout(executePromise, 200);
 
 			// Act
-			await executeCancelTool!("call-2", { taskId: "tool-cancel-body" }, undefined, undefined, ctx);
+			await executeCancelTool!("call-2", { taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd72" }, undefined, undefined, ctx);
 
 			endProcess(allProcs[0], null, "SIGTERM");
 			await vi.advanceTimersByTimeAsync(1000);
@@ -320,7 +320,7 @@ describe("action=cancel 单入口 — 红阶段测试", () => {
 			// Arrange
 			const executePromise = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "tool-cancel-receipt" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd73" },
 				undefined,
 				undefined,
 				ctx,
@@ -328,12 +328,12 @@ describe("action=cancel 单入口 — 红阶段测试", () => {
 			await raceWithTimeout(executePromise, 200);
 
 			// Act
-			const result = await executeCancelTool!("call-2", { taskId: "tool-cancel-receipt" }, undefined, undefined, ctx);
+			const result = await executeCancelTool!("call-2", { taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd73" }, undefined, undefined, ctx);
 
 			// Assert: not an error, content mentions the taskId
 			expect(result.isError).toBeFalsy();
 			const text = result.content.map((c: any) => c.text).join("");
-			expect(text).toMatch(/tool-cancel-receipt/);
+			expect(text).toMatch(/019ffdd3-3eb5-733d-b481-a53e5292bd73/);
 			expect(text).toMatch(/cancel|取消/);
 		});
 	});
@@ -349,7 +349,7 @@ describe("action=cancel 单入口 — 红阶段测试", () => {
 			// Arrange: dispatch a task
 			const executePromise = executeTool!(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "user-cancel-cb" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd74" },
 				undefined,
 				undefined,
 				ctx,
@@ -359,7 +359,7 @@ describe("action=cancel 单入口 — 红阶段测试", () => {
 			// Act: cancel via command
 			const cancelCommand = pi._commandDefs.get("subagent-cancel");
 			expect(cancelCommand).toBeDefined();
-			await cancelCommand.handler("user-cancel-cb", { ui: { notify: vi.fn() } });
+			await cancelCommand.handler("019ffdd3-3eb5-733d-b481-a53e5292bd74", { ui: { notify: vi.fn() } });
 
 			endProcess(allProcs[0], null, "SIGTERM");
 			await vi.advanceTimersByTimeAsync(1000);
@@ -377,7 +377,7 @@ describe("action=cancel 单入口 — 红阶段测试", () => {
 			// Arrange
 			const executePromise = executeTool!(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "user-cancel-body-lock" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd75" },
 				undefined,
 				undefined,
 				ctx,
@@ -386,7 +386,7 @@ describe("action=cancel 单入口 — 红阶段测试", () => {
 
 			// Act
 			const cancelCommand = pi._commandDefs.get("subagent-cancel");
-			await cancelCommand.handler("user-cancel-body-lock", { ui: { notify: vi.fn() } });
+			await cancelCommand.handler("019ffdd3-3eb5-733d-b481-a53e5292bd75", { ui: { notify: vi.fn() } });
 
 			endProcess(allProcs[0], null, "SIGTERM");
 			await vi.advanceTimersByTimeAsync(1000);
@@ -481,7 +481,7 @@ describe("action=cancel 单入口 — 红阶段测试", () => {
 
 			const executePromise = executeTool!(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "regression-user-cancel" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd76" },
 				undefined,
 				undefined,
 				ctx,
@@ -489,7 +489,7 @@ describe("action=cancel 单入口 — 红阶段测试", () => {
 			await raceWithTimeout(executePromise, 200);
 
 			const cancelCommand = pi._commandDefs.get("subagent-cancel");
-			await cancelCommand.handler("regression-user-cancel", { ui: { notify: vi.fn() } });
+			await cancelCommand.handler("019ffdd3-3eb5-733d-b481-a53e5292bd76", { ui: { notify: vi.fn() } });
 
 			endProcess(allProcs[0], null, "SIGTERM");
 			await vi.advanceTimersByTimeAsync(1000);
@@ -507,7 +507,7 @@ describe("action=cancel 单入口 — 红阶段测试", () => {
 
 			const executePromise = executeTool!(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "regression-cmd-works" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd77" },
 				undefined,
 				undefined,
 				ctx,
@@ -518,13 +518,13 @@ describe("action=cancel 单入口 — 红阶段测试", () => {
 			expect(cancelCommand).toBeDefined();
 
 			const notifyMock = vi.fn();
-			await cancelCommand.handler("regression-cmd-works", { ui: { notify: notifyMock } });
+			await cancelCommand.handler("019ffdd3-3eb5-733d-b481-a53e5292bd77", { ui: { notify: notifyMock } });
 
 			// Task status should be cancelled
-			expect(taskRegistry.get("regression-cmd-works")?.status).toBe("cancelled");
+			expect(taskRegistry.get("019ffdd3-3eb5-733d-b481-a53e5292bd77")?.status).toBe("cancelled");
 			// Command should emit info notification
 			expect(notifyMock).toHaveBeenCalledWith(
-				expect.stringContaining("regression-cmd-works"),
+				expect.stringContaining("019ffdd3-3eb5-733d-b481-a53e5292bd77"),
 				"info",
 			);
 		});
