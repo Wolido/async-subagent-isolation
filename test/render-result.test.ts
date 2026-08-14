@@ -5,7 +5,7 @@
  * details.taskId/cancelled，无 SubagentDetails.results 数组。renderResult
  * 直接访问 details.results.length 会抛 TypeError，导致渲染管线中断。
  *
- * Breaking change（v2.0.0）：action="status" 已从工具面移除，
+ * 变更（v1.2.0）：action="status" 已从工具面移除，
  * details.activeTasks 形状不再可能产生 —— 原 status 渲染回退用例已删除，
  * 文本回退契约由下列 cancel 回执用例锁定（实现已满足，保持绿）。
  */

@@ -5,7 +5,7 @@
  * 契约：subagent_status / subagent_cancel 独立工具已移除，
  * cancel 由 subagent 工具 action 参数分派。
  *
- * Breaking change（v2.0.0）：action="status" 已从工具面移除。
+ * 变更（v1.2.0）：action="status" 已从工具面移除。
  * §2/§3 为负向契约（RED）：status 一律被拒绝，不得返回在途列表。
  * §4/5/6 为共享面（在途块仍由信封与 cancel 回执共享 formatActiveTasks()），不动。
  */

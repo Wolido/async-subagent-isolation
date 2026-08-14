@@ -13,7 +13,7 @@
  *   但保留不轮询指引与取消防滥用引导
  * - action=cancel：按 taskId 取消，信封 cancelledBy="agent"（区分取消来源）
  *
- * Breaking change（v2.0.0，本文件负向契约 RED 部分）：
+ * 变更（v1.2.0，本文件负向合约）：
  * - action="status" 从工具面移除：schema 不再枚举 "status"、execute 一律拒绝
  *   （Invalid action）、description / promptGuidelines / 错误文案枚举段 /
  *   深度拦截文案均不再出现 "status"
