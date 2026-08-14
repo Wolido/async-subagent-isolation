@@ -6,7 +6,7 @@
 
 > Install the extension first with `pi install npm:@wolido/async-subagent-isolation`.
 >
-> **v2.0.0 breaking change**: the `subagent` tool's `action="status"` has been removed. In-flight task information is now provided by the `[subagent-result]` notification envelope's in-flight block.
+> **v1.2.0 note**: the `subagent` tool's `action="status"` has been removed as a cleanup. In-flight task information is now provided by the `[subagent-result]` notification envelope's in-flight block.
 
 ## Directory structure
 

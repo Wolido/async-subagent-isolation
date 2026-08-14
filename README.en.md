@@ -116,7 +116,7 @@ When the subagent finishes, its result is pushed as a **`[subagent-result]` syst
 - If the main agent is **idle**, the notification triggers a new turn immediately.
 - If the main agent is **busy**, it is queued and triggers a turn after the current one finishes.
 
-Results arrive automatically — **no polling**. In-flight task information is provided directly by the `[subagent-result]` notification envelope; `action="status"` was removed in v2.0.0.
+Results arrive automatically — **no polling**. In-flight task information is provided directly by the `[subagent-result]` notification envelope; `action="status"` was removed as a cleanup in v1.2.0.
 
 ### 5. Read the full result (`/subagent-result`)
 
@@ -148,7 +148,7 @@ User runs /subagent-result <taskId> to read the full output
 | `subagent` | Single-entry tool (`action` parameter); `action="dispatch"` (default) dispatches asynchronously (TUI mode), falls back to sync in non-TUI | Receipt ≠ result; results arrive as notifications, don't poll |
 | `subagent` `action="cancel"` | Main agent cancels one in-flight task | Only when clearly wrong or no longer needed; never for being slow |
 
-> **v2.0.0 breaking change**: the `subagent` tool's `action="status"` has been removed. In-flight task information is now provided by the `[subagent-result]` notification envelope's in-flight block, with no active-query entry point.
+> **v1.2.0 note**: the `subagent` tool's `action="status"` has been removed as a cleanup. In-flight task information is now provided by the `[subagent-result]` notification envelope's in-flight block, with no active-query entry point.
 
 ### Commands (for the user)
 

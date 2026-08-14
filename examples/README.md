@@ -6,7 +6,7 @@
 
 > 使用前先用 `pi install npm:@wolido/async-subagent-isolation` 安装扩展。
 >
-> **v2.0.0 重大变更（breaking change）**：`subagent` 工具的 `action="status"` 已移除。在途任务信息改由 `[subagent-result]` 通知信封的“在途任务”块提供。
+> **v1.2.0 提示**：`subagent` 工具的 `action="status"` 已作为 cleanup 移除。在途任务信息改由 `[subagent-result]` 通知信封的“在途任务”块提供。
 
 ## 目录结构
 

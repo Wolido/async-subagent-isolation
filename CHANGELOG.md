@@ -5,11 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.0.0] - 2026-08-15
+## [1.2.0] - 2026-08-15
 
 ### Removed
 
-- Removed the `status` action from the `subagent` tool. In-flight task information is now provided only by the `[subagent-result]` notification envelope's in-flight block. This is a breaking change for any prompts or workflows that relied on `action="status"`.
+- Removed the `status` action from the `subagent` tool. In-flight task information is now provided only by the `[subagent-result]` notification envelope's in-flight block. Prompt/workflow authors who reference `action="status"` should remove those references; see README migration notes.
 
 ### Changed
 

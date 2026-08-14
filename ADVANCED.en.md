@@ -4,7 +4,7 @@
 
 This document covers low-level invocation, configuration fields, and environment variables for `async-subagent-isolation`. Most users can follow the natural-language Quick Start in the main README; refer to this file only when you need to construct `subagent` calls manually, reuse an isolated session, or tune runtime parameters.
 
-> **v2.0.0 breaking change**: the `subagent` tool's `action="status"` has been removed. In-flight task information is now provided by the `[subagent-result]` notification envelope's in-flight block, with no active-query entry point.
+> **v1.2.0 note**: the `subagent` tool's `action="status"` has been removed as a cleanup. In-flight task information is now provided by the `[subagent-result]` notification envelope's in-flight block, with no active-query entry point.
 
 ---
 
@@ -116,7 +116,7 @@ Key points:
 - **The receipt is a single line.** The async-semantics guidance (don't fabricate results, don't poll, results arrive as a `[subagent-result]` notification) is embedded in the `subagent` tool's `description` / `promptGuidelines`; the receipt itself stays a single line.
 - **The receipt is not the result.** Do not fabricate results.
 - **taskId = sessionId.** The `taskId` in the receipt is the session ID; reuse it directly.
-- **Do not poll.** Results arrive automatically as `[subagent-result]` notifications; in-flight task information is provided directly by the notification envelope's in-flight block. `action="status"` was removed in v2.0.0.
+- **Do not poll.** Results arrive automatically as `[subagent-result]` notifications; in-flight task information is provided directly by the notification envelope's in-flight block. `action="status"` was removed as a cleanup in v1.2.0.
 
 ### [subagent-result] envelope format
 

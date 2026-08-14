@@ -116,7 +116,7 @@ TUI 模式下 `subagent` **立即返回派发回执**，不阻塞：
 - 主 agent **空闲**时，通知直接触发新的对话回合，立即处理。
 - 主 agent **忙碌**时，通知进入队列，当前回合结束后再触发。
 
-结果自动到达，**无需轮询**。在途任务信息由 `[subagent-result]` 通知信封的“在途任务”块直接提供；`action="status"` 已在 v2.0.0 移除。
+结果自动到达，**无需轮询**。在途任务信息由 `[subagent-result]` 通知信封的“在途任务”块直接提供；`action="status"` 已在 v1.2.0 清理移除。
 
 ### 5. 查看全文（`/subagent-result`）
 
@@ -148,7 +148,7 @@ TUI 模式下 `subagent` **立即返回派发回执**，不阻塞：
 | `subagent` | 单入口工具（`action` 参数）；`action="dispatch"`（默认）异步派发任务（TUI 模式），非 TUI 自动降级同步 | 回执≠结果；结果以通知到达，勿轮询 |
 | `subagent` `action="cancel"` | 主 agent 取消单个在途任务 | 仅当任务明显错误或不再需要，勿因耗时久而取消 |
 
-> **v2.0.0 重大变更（breaking change）**：`subagent` 工具的 `action="status"` 已移除。在途任务信息改由 `[subagent-result]` 通知信封的“在途任务”块提供，不再提供主动查询入口。
+> **v1.2.0 提示**：`subagent` 工具的 `action="status"` 已作为 cleanup 移除。在途任务信息改由 `[subagent-result]` 通知信封的“在途任务”块提供，不再提供主动查询入口。
 
 ### 命令（用户使用）
 

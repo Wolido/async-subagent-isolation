@@ -2,7 +2,7 @@
 
 # async-subagent-isolation 进阶参考
 
-> **v2.0.0 重大变更（breaking change）**：`subagent` 工具的 `action="status"` 已移除。在途任务信息改由 `[subagent-result]` 通知信封的“在途任务”块提供，不再提供主动查询入口。
+> **v1.2.0 提示**：`subagent` 工具的 `action="status"` 已作为 cleanup 移除。在途任务信息改由 `[subagent-result]` 通知信封的“在途任务”块提供，不再提供主动查询入口。
 
 这里收录 `async-subagent-isolation` 的底层调用方式、配置字段和环境变量。普通用户按照主 README 的 Quick Start 用自然语言即可；只有当你需要手动构造 `subagent` 调用、复用隔离会话或调整运行参数时才需要查看本文档。
 
@@ -116,7 +116,7 @@ TUI 模式下 `subagent` 立即返回如下回执（不是结果！）：
 - **回执为单行。** 异步语义引导（不臆造结果、不轮询、结果以 `[subagent-result]` 通知到达）已内嵌于 `subagent` 工具的 `description` / `promptGuidelines`，回执本身保持单行。
 - **回执 ≠ 结果。** 不要臆造结果。
 - **taskId = sessionId。** 回执中的 `taskId` 就是 session ID，可直接复用。
-- **不要轮询。** 结果自动以 `[subagent-result]` 通知到达；在途任务信息由通知信封的“在途任务”块直接提供，`action="status"` 已在 v2.0.0 移除。
+- **不要轮询。** 结果自动以 `[subagent-result]` 通知到达；在途任务信息由通知信封的“在途任务”块直接提供，`action="status"` 已在 v1.2.0 清理移除。
 
 ### [subagent-result] 信封格式
 
