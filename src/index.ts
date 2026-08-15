@@ -426,6 +426,10 @@ interface SingleResult {
 	lastPhaseChange: number;
 	thinkingBuffer?: string;
 	sessionId: string;
+	/** Wall-clock start of this run (Date.now() at runSingleAgent entry). */
+	startedAt: number;
+	/** Wall-clock finish, set when the run resolves; absent while running. */
+	finishedAt?: number;
 }
 
 interface SubagentDetails {
@@ -601,6 +605,22 @@ export function formatElapsed(startedAt: number): string {
 	const mm = String(Math.floor(totalSec / 60)).padStart(2, "0");
 	const ss = String(totalSec % 60).padStart(2, "0");
 	return `${mm}:${ss}`;
+}
+
+/**
+ * Format a finished run's duration (milliseconds) for result notifications.
+ * Unlike formatElapsed (a live "alive since" clock for the progress widget,
+ * MM:SS only and overflowing past 99 minutes), this floors to whole seconds
+ * and supports hours: < 1h -> "MM:SS", >= 1h -> "H:MM:SS" (hours not
+ * zero-padded), 0/negative -> "00:00".
+ */
+export function formatDuration(ms: number): string {
+	if (!Number.isFinite(ms)) return "00:00";
+	const totalSec = Math.max(0, Math.floor(ms / 1000));
+	const hours = Math.floor(totalSec / 3600);
+	const mm = String(Math.floor((totalSec % 3600) / 60)).padStart(2, "0");
+	const ss = String(totalSec % 60).padStart(2, "0");
+	return hours > 0 ? `${hours}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 
 /**
@@ -892,13 +912,16 @@ function parseEnvInt(raw: string | undefined, fallback: number): number {
 	return Number.isNaN(parsed) ? fallback : parsed;
 }
 
+const UUID_V7_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
 /** Validate an explicit sessionId. Returns an error message, or null when valid. */
-function validateSessionId(sessionId: string): string | null {
+function validateSessionId(sessionId: unknown): string | null {
+	if (typeof sessionId !== "string") return `Invalid sessionId: must be a string, got ${typeof sessionId}`;
 	const trimmed = sessionId.trim();
 	if (trimmed === "") return "Invalid sessionId: must not be empty";
 	if (trimmed === "." || trimmed === "..") return `Invalid sessionId: "${trimmed}" is not allowed`;
-	if (!/^[A-Za-z0-9_.-]+$/.test(trimmed))
-	return `Invalid sessionId: "${trimmed}" contains disallowed characters. Only letters, digits, underscore, dot, and hyphen are allowed.`;
+	if (!UUID_V7_PATTERN.test(trimmed))
+		return "Invalid sessionId: expected a lowercase UUID v7 from a previous receipt. Only pass sessionId to resume (复用) an earlier taskId; omit it to generate a new one.";
 	return null;
 }
 
@@ -916,6 +939,7 @@ async function runSingleAgent(
 	modelOverrides?: Record<string, ModelOverride>,
 	onProcSpawn?: (proc: ChildProcess) => void,
 ): Promise<SingleResult> {
+	const startedAt = Date.now();
 	let effectiveSessionId: string;
 	if (sessionId !== undefined) {
 		const trimmed = sessionId.trim();
@@ -934,6 +958,8 @@ async function runSingleAgent(
 				phase: "idle",
 				lastPhaseChange: Date.now(),
 				sessionId: trimmed,
+				startedAt,
+				finishedAt: Date.now(),
 			};
 		}
 		effectiveSessionId = trimmed;
@@ -956,6 +982,8 @@ async function runSingleAgent(
 			phase: "idle",
 			lastPhaseChange: Date.now(),
 			sessionId: effectiveSessionId,
+			startedAt,
+			finishedAt: Date.now(),
 		};
 	}
 
@@ -1023,6 +1051,7 @@ async function runSingleAgent(
 		phase: "idle",
 		lastPhaseChange: Date.now(),
 		sessionId: effectiveSessionId,
+		startedAt,
 	};
 
 	const emitProgress = () => {
@@ -1095,6 +1124,7 @@ async function runSingleAgent(
 			const finalize = (code: number) => {
 				if (resolved) return;
 				resolved = true;
+				currentResult.finishedAt = Date.now();
 				if (postExitTimer) {
 					clearTimeout(postExitTimer);
 					postExitTimer = undefined;
@@ -1504,10 +1534,10 @@ export function truncateTaskDescription(task: string, maxLen = 200): string {
 }
 
 /**
- * Format the in-flight task list (status === "running") shared by the
- * action="status" branch, the result envelope's 在途 block, and the
- * action="cancel" receipt. Deliberately carries no elapsed time: the list
- * answers "what is still running", not "how long has it run".
+ * Format the in-flight task list (status === "running") shared by the result
+ * envelope's 在途 block and the action="cancel" receipt. Deliberately carries
+ * no elapsed time: the list answers "what is still running", not "how long has
+ * it run".
  */
 export function formatActiveTasks(): string {
 	const running = [...taskRegistry.values()].filter((t) => t.status === "running");
@@ -1534,6 +1564,13 @@ export interface SubagentResultDetails {
 	stopReason?: string;
 	/** Present only on cancelled tasks: who cancelled ("user" | "agent"). */
 	cancelledBy?: "user" | "agent";
+	/**
+	 * Run duration in milliseconds (>= 0): the real run time
+	 * (finishedAt - startedAt) when a result exists; measured from the
+	 * dispatch time (task.startedAt) when result is null (cancel/internal
+	 * error).
+	 */
+	durationMs: number;
 	usage: UsageStats;
 	sessionId: string;
 	output: string;
@@ -1574,6 +1611,12 @@ export function buildResultEnvelope(
 	const usage: UsageStats =
 		result?.usage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
 	const sessionId = result?.sessionId ?? task.taskId;
+	// Real run time when the subagent produced a result; for a null result
+	// (user/agent cancel, session shutdown, internal error) the run never
+	// reported back, so measure from the dispatch time instead.
+	const durationMs = result
+		? Math.max(0, (result.finishedAt ?? Date.now()) - result.startedAt)
+		: Math.max(0, Date.now() - task.startedAt);
 	let body = output;
 	if (!body && result) body = result.errorMessage || result.stderr.trim();
 	// Only genuine failures are labelled "内部错误"; a user cancel or session
@@ -1585,7 +1628,7 @@ export function buildResultEnvelope(
 		"",
 		`- 状态: ${statusWord}`,
 		`- 任务: ${truncateTaskDescription(task.task)}`,
-		`- 耗时: ${formatElapsed(task.startedAt)} · 用量: ${formatUsageStats(usage, result?.model) || "-"}`,
+		`- 耗时: ${formatDuration(durationMs)} · 用量: ${formatUsageStats(usage, result?.model) || "-"}`,
 		`- 会话: ${sessionId}`,
 		"",
 		// 在途 block: completeAsyncTask deletes this task from the registry
@@ -1604,6 +1647,7 @@ export function buildResultEnvelope(
 			exitCode: result?.exitCode ?? null,
 			stopReason,
 			cancelledBy: task.cancelledBy,
+			durationMs,
 			usage,
 			sessionId,
 			output:
@@ -1686,10 +1730,10 @@ const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
 // Union-of-literals (anyOf + const) rather than StringEnum so the emitted
 // JSON Schema enumerates each action as its own const branch.
 const SubagentActionSchema = Type.Union(
-	[Type.Literal("dispatch"), Type.Literal("status"), Type.Literal("cancel")],
+	[Type.Literal("dispatch"), Type.Literal("cancel")],
 	{
 		description:
-			'Action to perform. "dispatch" (default): delegate the task to a subagent. "status": list in-flight background tasks. "cancel": cancel a running background task by taskId.',
+			'Action to perform. "dispatch" (default): delegate the task to a subagent. "cancel": cancel a running background task by taskId.',
 		default: "dispatch",
 	},
 );
@@ -1702,8 +1746,8 @@ const SubagentParams = Type.Object({
 		description: "taskId of the running background subagent task to cancel (required for action=cancel; from the dispatch receipt).",
 	})),
 	sessionId: Type.Optional(Type.String({
-		pattern: "^[A-Za-z0-9_.-]+$",
-		description: "Optional session ID to reuse; a new UUID v7 is generated if omitted. Allowed characters: letters, digits, underscore, dot, and hyphen.",
+		pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+		description: "仅用于复用此前 dispatch 回执返回的 UUID v7；省略则自动生成",
 	})),
 	agentScope: Type.Optional(AgentScopeSchema),
 	confirmProjectAgents: Type.Optional(
@@ -1721,15 +1765,14 @@ export default function (pi: ExtensionAPI) {
 			"",
 			"ACTIONS (action parameter, default \"dispatch\"):",
 			"- dispatch: delegate the task (async in TUI mode, blocking otherwise).",
-			"- status: list in-flight background tasks (taskId, agent, task description).",
 			"- cancel: cancel a running background task by taskId.",
+			"- sessionId: only set when resuming (复用) a previously dispatched task. Must be the UUID v7 from a previous dispatch receipt. Omit otherwise; a new UUID v7 is generated automatically.",
 			"",
 			"ASYNC (TUI mode): returns immediately with a dispatch receipt (taskId + session id).",
 			"The result arrives later as a system notification message prefixed with",
 			"[subagent-result] — that is a system notification, NOT a user request.",
 			"- Do NOT treat the receipt as the result. Do NOT fabricate results.",
-			"- Do NOT poll for results; they arrive automatically. To confirm which",
-			"  tasks are still in flight (e.g. after a /tree rewind), use action=\"status\".",
+			"- Do NOT poll for results; they arrive automatically.",
 			"- Continue with independent work, or end the turn. Process the result when",
 			"  the [subagent-result] notification arrives. Reuse the session id from the",
 			"  receipt to continue the same task later.",
@@ -1748,9 +1791,10 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet:
 			"Delegate a task to a specialized subagent in an isolated process (async dispatch in TUI mode, blocking otherwise).",
 		promptGuidelines: [
-			"subagent: In TUI mode this tool is asynchronous — it returns a dispatch receipt, not the result; the real result arrives later as a [subagent-result] system notification, so never fabricate results and never poll for status.",
+			"subagent: In TUI mode this tool is asynchronous — it returns a dispatch receipt, not the result; the real result arrives later as a [subagent-result] system notification, so never fabricate results and never poll.",
 			"subagent: A message prefixed with [subagent-result] is a system notification carrying a finished subagent result, not a user request; process it in the context of the task that dispatched it.",
 			"subagent: Dispatch subagents driven by task dependencies — delegate only work whose result you actually need, prefer reusing the session id from the receipt to continue a previous subagent task, and keep independent work in the main context.",
+			"subagent: The session id is the lowercase UUID v7 returned in the dispatch receipt (e.g. `019ffdd3-3eb5-733d-b481-a53e5292bd00`). Passing any other string (slug, UUID v4, etc.) is rejected; only pass sessionId when resuming a previously dispatched task.",
 			"subagent: A [subagent-result] notification with status 已取消 (cancelled) can come from the user (/subagent-cancel) or from you (action=\"cancel\"); the envelope body states the source. A user-initiated cancel is a deliberate user action, so do NOT automatically retry or re-dispatch it; ask the user before re-dispatching.",
 			"subagent: Before dispatching multiple tasks in parallel, consider whether they touch the same files or code areas — parallel tasks modifying the same files can conflict. When in doubt, dispatch sequentially or ask the user.",
 		],
@@ -1762,15 +1806,15 @@ export default function (pi: ExtensionAPI) {
 
 			// Depth gate runs BEFORE any action dispatch: a subagent (depth >= 1)
 			// is blocked from every action — dispatch spawns a nested subagent, and
-			// status/cancel would let it observe or kill the parent's in-flight
-			// tasks. The tool surface simply does not exist inside a subagent.
+			// cancel would let it kill the parent's in-flight tasks. The tool surface
+			// simply does not exist inside a subagent.
 			const currentDepth = parseEnvInt(process.env.PI_SUBAGENT_DEPTH, 0);
 			if (currentDepth >= MAX_SUBAGENT_DEPTH) {
 				const agentName = process.env.PI_CURRENT_AGENT_NAME || "current agent";
 				return {
 					content: [{
 						type: "text",
-						text: `Subagent tool is blocked: depth limit reached (depth: ${currentDepth}, max: ${MAX_SUBAGENT_DEPTH}). Agent \`${agentName}\` runs inside a subagent and cannot invoke subagent actions (dispatch/status/cancel).`,
+						text: `Subagent tool is blocked: depth limit reached (depth: ${currentDepth}, max: ${MAX_SUBAGENT_DEPTH}). Agent \`${agentName}\` runs inside a subagent and cannot invoke subagent actions (dispatch/cancel).`,
 					}],
 					details: {
 						mode: "single",
@@ -1779,13 +1823,6 @@ export default function (pi: ExtensionAPI) {
 						results: [],
 					} as SubagentDetails,
 					isError: true,
-				};
-			}
-
-			if (action === "status") {
-				return {
-					content: [{ type: "text", text: formatActiveTasks() }],
-					details: { activeTasks: [...taskRegistry.values()].filter((t) => t.status === "running").map((t) => t.taskId) },
 				};
 			}
 
@@ -1815,7 +1852,7 @@ export default function (pi: ExtensionAPI) {
 
 			if (action !== "dispatch") {
 				return {
-					content: [{ type: "text", text: `Invalid action: "${action}". Must be one of "dispatch" (default), "status", "cancel".` }],
+					content: [{ type: "text", text: `Invalid action: "${action}". Must be one of "dispatch" (default), "cancel".` }],
 					details: {
 						mode: "single",
 						agentScope: (params.agentScope ?? "both") as AgentScope,
@@ -2046,9 +2083,9 @@ export default function (pi: ExtensionAPI) {
 
 		renderResult(result, { expanded }, theme, context) {
 			const details = result.details as SubagentDetails | undefined;
-			// status/cancel receipts carry no `results` array (activeTasks /
-			// taskId+cancelled instead) — fall back to the plain-text content
-			// instead of throwing on details.results.length.
+			// cancel receipts carry no `results` array (taskId+cancelled instead)
+			// — fall back to the plain-text content instead of throwing on
+			// details.results.length.
 			if (!details || !Array.isArray(details.results) || details.results.length === 0) {
 				return new Text(result.content?.[0]?.type === "text" ? result.content[0].text : "(no output)", 0, 0);
 			}
@@ -2077,6 +2114,14 @@ export default function (pi: ExtensionAPI) {
 				const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
 				const displayItems = getDisplayItems(r.messages);
 				const finalOutput = getFinalOutput(r.messages);
+				// Run duration, shown only when both timestamps are present (older
+				// results lack them); a typeof check keeps 0ms runs visible and
+				// missing fields from rendering "NaN".
+				const durationStr =
+					typeof r.startedAt === "number" && Number.isFinite(r.startedAt) &&
+					typeof r.finishedAt === "number" && Number.isFinite(r.finishedAt)
+						? formatDuration(r.finishedAt - r.startedAt)
+						: null;
 
 				if (expanded) {
 					const container = new Container();
@@ -2084,6 +2129,7 @@ export default function (pi: ExtensionAPI) {
 					if (isError && r.stopReason) header += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
 					if (r.phase !== "idle") header += ` ${theme.fg("warning", formatPhase(r.phase))}`;
 					header += ` ${theme.fg("muted", `[session: ${r.sessionId}]`)}`;
+					if (durationStr) header += ` ${theme.fg("dim", durationStr)}`;
 					container.addChild(new Text(header, 0, 0));
 					if (isError && r.errorMessage)
 						container.addChild(new Text(theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
@@ -2129,6 +2175,7 @@ export default function (pi: ExtensionAPI) {
 				if (isError && r.stopReason) text += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
 				if (r.phase !== "idle") text += ` ${theme.fg("warning", formatPhase(r.phase))}`;
 				text += ` ${theme.fg("muted", `[session: ${r.sessionId}]`)}`;
+				if (durationStr) text += ` ${theme.fg("dim", durationStr)}`;
 				if (isError && r.errorMessage) text += `\n${theme.fg("error", `Error: ${r.errorMessage}`)}`;
 				if (displayItems.length === 0) {
 					if (!isError || !r.errorMessage) text += `\n${theme.fg("muted", "(no output)")}`;
@@ -2323,6 +2370,11 @@ export default function (pi: ExtensionAPI) {
 			if (details?.taskId) text += ` ${theme.fg("muted", `(taskId: ${details.taskId})`)}`;
 			const usageStr = details ? formatUsageStats(details.usage) : "";
 			if (usageStr) text += ` ${theme.fg("dim", usageStr)}`;
+			// durationMs is typed as a number and 0 is a valid duration, so the
+			// presence check must not be falsy-based; old-shape details without
+			// it simply omit the duration.
+			if (typeof details?.durationMs === "number" && Number.isFinite(details.durationMs))
+				text += ` ${theme.fg("dim", `耗时 ${formatDuration(details.durationMs)}`)}`;
 			if (details?.taskId) text += `\n${theme.fg("muted", `查看全文: /subagent-result ${details.taskId}`)}`;
 			// Background tint mirrors the dispatch-receipt tool rows: success and
 			// failure reuse the tool-row colors; timeout, cancelled and unknown

@@ -36,7 +36,7 @@ vi.mock("node:child_process", () => ({
 	spawn: vi.fn(),
 }));
 
-const SESSION_ID = "test-session-id";
+const SESSION_ID = "019ffdd3-3eb5-733d-b481-a53e5292bd01";
 const ENV_KEYS = [
 	"PI_SUBAGENT_DEPTH",
 	"PI_SUBAGENT_HARD_TIMEOUT_MS",
@@ -657,7 +657,7 @@ describe("异步化改造 - TDD 红阶段", () => {
 			// 派发第一个任务
 			const executePromise1 = executeTool(
 				"call-1",
-				{ agent: "tester", task: "task 1", sessionId: "session-1" },
+				{ agent: "tester", task: "task 1", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd0f" },
 				undefined,
 				undefined,
 				ctx,
@@ -679,7 +679,7 @@ describe("异步化改造 - TDD 红阶段", () => {
 			// 派发第二个任务
 			const executePromise2 = executeTool(
 				"call-2",
-				{ agent: "tester", task: "task 2", sessionId: "session-2" },
+				{ agent: "tester", task: "task 2", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd10" },
 				undefined,
 				undefined,
 				ctx,

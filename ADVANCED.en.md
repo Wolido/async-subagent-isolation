@@ -4,6 +4,8 @@
 
 This document covers low-level invocation, configuration fields, and environment variables for `async-subagent-isolation`. Most users can follow the natural-language Quick Start in the main README; refer to this file only when you need to construct `subagent` calls manually, reuse an isolated session, or tune runtime parameters.
 
+> **v1.2.0 note**: the `subagent` tool's `action="status"` has been removed as a cleanup. In-flight task information is now provided by the `[subagent-result]` notification envelope's in-flight block, with no active-query entry point.
+
 ---
 
 ## Agent definition format
@@ -114,7 +116,7 @@ Key points:
 - **The receipt is a single line.** The async-semantics guidance (don't fabricate results, don't poll, results arrive as a `[subagent-result]` notification) is embedded in the `subagent` tool's `description` / `promptGuidelines`; the receipt itself stays a single line.
 - **The receipt is not the result.** Do not fabricate results.
 - **taskId = sessionId.** The `taskId` in the receipt is the session ID; reuse it directly.
-- **Do not poll.** Results arrive automatically as `[subagent-result]` notifications; to confirm which tasks are still in flight (e.g. after a `/tree` rewind), use the `subagent` tool with `action="status"`.
+- **Do not poll.** Results arrive automatically as `[subagent-result]` notifications; in-flight task information is provided directly by the notification envelope's in-flight block. `action="status"` was removed as a cleanup in v1.2.0.
 
 ### [subagent-result] envelope format
 
@@ -137,6 +139,8 @@ Once the subagent finishes, its result is pushed into the conversation:
 
 Status enumeration: **成功** (success, exit=0) / **失败** (failure, exit≠0 or stopReason=error) / **超时** (timeout, activity_timeout or hard_timeout) / **已取消** (cancelled, aborted or killed_on_shutdown).
 
+**Duration**: the `- 耗时:` line shows the subagent's real run time. When a result exists, it is the actual process run time (`finishedAt - startedAt`); when the result is null (user/agent cancel, session shutdown, internal error), it is measured from dispatch time instead. The format is `MM:SS`, or `H:MM:SS` at one hour and beyond (hours not zero-padded). All four terminal states (success, failure, timeout, cancelled) carry the duration in both the envelope and the TUI notification card.
+
 "Cancelled" has three sub-cases with different envelope bodies:
 - User cancelled via `/subagent-cancel` (cancelledBy: user) → body states this is a deliberate user action; the main agent must NOT auto-retry and must ask the user before re-dispatching.
 - Main agent cancelled via the `subagent` tool with `action="cancel"` (cancelledBy: agent) → body states the task was cancelled by the main agent via the subagent tool (action=cancel).
@@ -144,9 +148,9 @@ Status enumeration: **成功** (success, exit=0) / **失败** (failure, exit≠0
 
 When the main agent receives a "已取消" notification, it should distinguish the origin: a user cancel must never be auto-retried (ask the user first); an agent cancel is its own decision — do not re-dispatch without new information; a session-shutdown cancel can be re-dispatched after the session resumes, at the agent's discretion.
 
-**In-flight block**: the "在途任务" list in the envelope's metadata section lists the **other** background tasks still running (this task is removed from the registry before the envelope is built, so it never appears in its own list). Its format matches the `subagent` tool's `action="status"` — `在途任务: N` followed by one `- taskId (agent): task description` line per task, or `当前无在途任务。` when none remain. It deliberately carries **no elapsed time** (it answers "what is still running", not "how long has it run"). The main agent uses it to know how many tasks are still outstanding — while the count is non-zero, do not report "all done" to the user.
+**In-flight block**: the "在途任务" list in the envelope's metadata section lists the **other** background tasks still running (this task is removed from the registry before the envelope is built, so it never appears in its own list). Its format is `在途任务: N` followed by one `- taskId (agent): task description` line per task, or `当前无在途任务。` when none remain. It deliberately carries **no elapsed time** (it answers "what is still running", not "how long has it run"). The main agent uses it to know how many tasks are still outstanding — while the count is non-zero, do not report "all done" to the user.
 
-The full output enters the LLM context (not truncated). The `details` carries structured data (taskId, agent, status, exitCode, stopReason, usage, sessionId, full output) for programmatic consumption; it does not enter the LLM context.
+The full output enters the LLM context (not truncated). The `details` carries structured data (taskId, agent, status, exitCode, stopReason, durationMs (required, run time in milliseconds), usage, sessionId, full output) for programmatic consumption; it does not enter the LLM context.
 
 ### Notification delivery
 
@@ -164,26 +168,9 @@ While subagents run, a progress widget appears above the TUI editor, listing all
 ● 01912345-abcd... coder    ⚡ read...         01:23
 ```
 
+The widget's time is a live "alive since" clock (`formatElapsed`, `MM:SS` only, overflowing past 99 minutes); the envelope and notification card show the final run duration (`formatDuration`). The two coexist with different semantics.
+
 The taskId in the widget row can be copied for `/subagent-result` (view full result) or `/subagent-cancel` (cancel the task).
-
-### `action="status"` (in-flight query)
-
-The main agent can actively query still-running background tasks via the `subagent` tool with `action="status"` (no agent/task parameters needed), which returns:
-
-```
-在途任务: 2
-- 01912345-6789-7abc-8def-0123456789ab (coder): 将认证中间件重构为使用 async/await。
-- 01912345-aaaa-7bbb-8ccc-0123456789ab (writer): 更新 README。
-```
-
-With no in-flight tasks it returns `当前无在途任务。`. Each line carries the taskId, agent name, and task description, with **no elapsed time**.
-
-Use cases:
-
-- After a `/tree` rewind loses the receipts, confirm which tasks are still in flight.
-- When unsure how many tasks remain, or to pick a taskId for `action="cancel"`.
-
-**Do not use it to poll for completion**: results arrive automatically as `[subagent-result]` notifications. This tool only confirms "what is still running" — it should not be called frequently.
 
 ### Cancelling background tasks
 
@@ -209,7 +196,7 @@ Takes no arguments. Unlike `/subagent-cancel`, which cancels a single task by ta
 
 **Path 2: Main agent `subagent` tool with `action="cancel"`**
 
-The main agent can call the `subagent` tool with `action="cancel"` (parameter `taskId`) to cancel a dispatched background task. The cancel source is recorded as `cancelledBy: "agent"`. On success, the tool returns the remaining in-flight task list (same format as `action="status"`); the cancelled task's final result arrives later as a `[subagent-result]` notification.
+The main agent can call the `subagent` tool with `action="cancel"` (parameter `taskId`) to cancel a dispatched background task. The cancel source is recorded as `cancelledBy: "agent"`. On success, the tool returns the remaining in-flight task list (same format as the `[subagent-result]` envelope's in-flight block); the cancelled task's final result arrives later as a `[subagent-result]` notification.
 
 **Usage discipline:** The main agent should only use `action="cancel"` when:
 - The task is clearly wrong (wrong agent, incorrect task description, etc.).
@@ -292,7 +279,7 @@ These variables are propagated into every subagent process automatically:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PI_SUBAGENT_DEPTH` | `0` | Current recursion depth. Auto-incremented per nested call. **Depth limit is 1** — a subagent (depth ≥ 1) cannot call any `subagent` action (including `action="status"` / `action="cancel"`). |
+| `PI_SUBAGENT_DEPTH` | `0` | Current recursion depth. Auto-incremented per nested call. **Depth limit is 1** — a subagent (depth ≥ 1) cannot call any `subagent` action (including `action="cancel"`). |
 | `PI_CURRENT_AGENT_NAME` | — | Name of the current agent, injected into every subagent process. |
 | `PI_SUBAGENT_ACTIVITY_TIMEOUT_MS` | `600000` (10 min) | Max idle time with no output on either stdout or stderr before the subagent is killed. |
 | `PI_SUBAGENT_HARD_TIMEOUT_MS` | `0` (disabled) | Absolute maximum runtime for a single call. Set a positive value (ms) to enable. |

@@ -2,6 +2,8 @@
 
 # async-subagent-isolation 进阶参考
 
+> **v1.2.0 提示**：`subagent` 工具的 `action="status"` 已作为 cleanup 移除。在途任务信息改由 `[subagent-result]` 通知信封的“在途任务”块提供，不再提供主动查询入口。
+
 这里收录 `async-subagent-isolation` 的底层调用方式、配置字段和环境变量。普通用户按照主 README 的 Quick Start 用自然语言即可；只有当你需要手动构造 `subagent` 调用、复用隔离会话或调整运行参数时才需要查看本文档。
 
 ---
@@ -114,7 +116,7 @@ TUI 模式下 `subagent` 立即返回如下回执（不是结果！）：
 - **回执为单行。** 异步语义引导（不臆造结果、不轮询、结果以 `[subagent-result]` 通知到达）已内嵌于 `subagent` 工具的 `description` / `promptGuidelines`，回执本身保持单行。
 - **回执 ≠ 结果。** 不要臆造结果。
 - **taskId = sessionId。** 回执中的 `taskId` 就是 session ID，可直接复用。
-- **不要轮询。** 结果自动以 `[subagent-result]` 通知到达；如需确认还有哪些任务在途（如 `/tree` 回退后），用 `subagent` 工具（`action="status"`）查询。
+- **不要轮询。** 结果自动以 `[subagent-result]` 通知到达；在途任务信息由通知信封的“在途任务”块直接提供，`action="status"` 已在 v1.2.0 清理移除。
 
 ### [subagent-result] 信封格式
 
@@ -137,6 +139,8 @@ TUI 模式下 `subagent` 立即返回如下回执（不是结果！）：
 
 状态枚举：**成功**（exit=0）/ **失败**（exit≠0 或 stopReason=error）/ **超时**（activity_timeout 或 hard_timeout）/ **已取消**（aborted 或 killed_on_shutdown）。
 
+**耗时**：`- 耗时:` 行是子 agent 的真实运行时长。有结果时取进程实际启动到结束（`finishedAt - startedAt`）；取消（用户/agent/会话关闭）或内部错误导致无结果返回时，改从派发时刻起算。格式为 `MM:SS`，≥1 小时为 `H:MM:SS`（小时不补零）。四种状态（成功/失败/超时/已取消）的信封与 TUI 通知卡片都带耗时。
+
 "已取消"分三种情况，信封正文不同：
 - 用户通过 `/subagent-cancel` 取消（cancelledBy: user）→ 正文注明"属用户主动操作。请勿自动重新派发；如需重新派发，先询问用户。"
 - 主 agent 通过 `subagent` 工具（`action="cancel"`）取消（cancelledBy: agent）→ 正文注明"该任务已由主 agent 通过 subagent 工具（action=cancel）取消。"
@@ -144,9 +148,9 @@ TUI 模式下 `subagent` 立即返回如下回执（不是结果！）：
 
 主 agent 收到状态为"已取消"的通知时，应区分来源：用户主动取消**不得自动重试**，必须先询问用户；agent 取消是自身决策，不应在无新信息时重新派发；会话关闭终止可在会话恢复后视情况重新派发。
 
-**在途任务块**：信封元信息区的"在途任务"列表列出**其余**仍在运行的后台任务（本任务在构建信封前已从注册表移除，故不包含自身），格式与 `subagent` 工具 `action="status"` 一致——`在途任务: N` 加每行 `- taskId (agent名): 任务描述`，无在途任务时为"当前无在途任务。"。列表**不含耗时**（回答"还有什么在跑"，而非"跑了多久"）。主 agent 据此知道还有几个任务没回来：剩余不为 0 时，不要向用户汇报"全部完成"。
+**在途任务块**：信封元信息区的"在途任务"列表列出**其余**仍在运行的后台任务（本任务在构建信封前已从注册表移除，故不包含自身），格式为 `在途任务: N` 加每行 `- taskId (agent名): 任务描述`，无在途任务时为"当前无在途任务。"列表**不含耗时**（回答"还有什么在跑"，而非"跑了多久"）。主 agent 据此知道还有几个任务没回来：剩余不为 0 时，不要向用户汇报"全部完成"。
 
-结果全量进入 LLM 上下文（不截断）。`details` 携带结构化数据（taskId、agent、status、exitCode、stopReason、usage、sessionId、完整输出），不参与 LLM 上下文，供程序消费。
+结果全量进入 LLM 上下文（不截断）。`details` 携带结构化数据（taskId、agent、status、exitCode、stopReason、durationMs（耗时毫秒数，必填）、usage、sessionId、完整输出），不参与 LLM 上下文，供程序消费。
 
 ### 通知投递
 
@@ -164,26 +168,9 @@ TUI 模式下 `subagent` 立即返回如下回执（不是结果！）：
 ● 01912345-abcd... coder    ⚡ read...         01:23
 ```
 
+widget 行的耗时是"存活至今"的实时时钟（`formatElapsed`，仅 `MM:SS`，可溢出 99 分钟）；信封与通知卡片的耗时是终态运行时长（`formatDuration`）。两者并存，语义不同。
+
 widget 行中的 taskId 可直接复制，用于 `/subagent-result` 查看结果或 `/subagent-cancel` 取消任务。
-
-### `action="status"`（在途任务查询）
-
-主 agent 可主动查询仍在运行的后台任务，调用 `subagent` 工具（`action="status"`，无需 agent/task 参数），返回：
-
-```
-在途任务: 2
-- 01912345-6789-7abc-8def-0123456789ab (coder): 将认证中间件重构为使用 async/await。
-- 01912345-aaaa-7bbb-8ccc-0123456789ab (writer): 更新 README。
-```
-
-无在途任务时返回 `当前无在途任务。`。每行含 taskId、agent 名和任务描述，**不含耗时**。
-
-用途场景：
-
-- `/tree` 回退后回执丢失，确认还有哪些任务在途。
-- 不确定剩余任务时快速核对，或选取 taskId 用于 `action="cancel"`。
-
-**不要用它轮询完成状态**：结果会自动以 `[subagent-result]` 通知到达，本工具只用于确认"还有什么在跑"，不应频繁调用。
 
 ### 取消后台任务
 
@@ -209,7 +196,7 @@ widget 行中的 taskId 可直接复制，用于 `/subagent-result` 查看结果
 
 **路径二：主 agent `subagent` 工具（`action="cancel"`）**
 
-主 agent 可调用 `subagent` 工具（`action="cancel"`，参数 `taskId`）取消已派出的后台任务。取消来源标记为 `cancelledBy: "agent"`。取消成功后返回剩余在途任务列表（格式与 `action="status"` 一致），被取消任务的最终结果稍后以 `[subagent-result]` 通知返回。
+主 agent 可调用 `subagent` 工具（`action="cancel"`，参数 `taskId`）取消已派出的后台任务。取消来源标记为 `cancelledBy: "agent"`。取消成功后返回剩余在途任务列表（格式与信封的“在途任务”块一致），被取消任务的最终结果稍后以 `[subagent-result]` 通知返回。
 
 **使用纪律：** 主 agent 仅在以下情况使用 `action="cancel"`：
 - 任务明显错误（委派了错误的 agent、任务描述有误等）。
@@ -292,7 +279,7 @@ widget 行中的 taskId 可直接复制，用于 `/subagent-result` 查看结果
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `PI_SUBAGENT_DEPTH` | `0` | 当前递归深度。每次嵌套调用自动递增。**深度限制为 1**——子 agent（depth ≥ 1）不可调用任何 `subagent` action（含 `action="status"` / `action="cancel"`）。 |
+| `PI_SUBAGENT_DEPTH` | `0` | 当前递归深度。每次嵌套调用自动递增。**深度限制为 1**——子 agent（depth ≥ 1）不可调用任何 `subagent` action（含 `action="cancel"`）。 |
 | `PI_CURRENT_AGENT_NAME` | — | 当前 agent 名称，注入每个子 agent 进程。 |
 | `PI_SUBAGENT_ACTIVITY_TIMEOUT_MS` | `600000`（10 分钟） | stdout 和 stderr 均无输出（无活动）时的最大允许时间。 |
 | `PI_SUBAGENT_HARD_TIMEOUT_MS` | `0`（禁用） | 单次调用的绝对最大运行时长。设为正数（毫秒）启用。 |

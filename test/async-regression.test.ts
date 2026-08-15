@@ -202,7 +202,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			// First dispatch — should succeed with receipt
 			const first = await executeTool(
 				"call-1",
-				{ agent: "tester", task: "first task", sessionId: "same-session-id" },
+				{ agent: "tester", task: "first task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd20" },
 				undefined,
 				undefined,
 				ctx,
@@ -215,7 +215,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			// Second dispatch with same sessionId — MUST be rejected
 			const second = await executeTool(
 				"call-2",
-				{ agent: "tester", task: "second task", sessionId: "same-session-id" },
+				{ agent: "tester", task: "second task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd20" },
 				undefined,
 				undefined,
 				ctx,
@@ -229,7 +229,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 
 			// The first task's process should still be alive (not replaced)
 			expect(taskRegistry.size).toBe(1);
-			expect(taskRegistry.get("same-session-id")).toBeDefined();
+			expect(taskRegistry.get("019ffdd3-3eb5-733d-b481-a53e5292bd20")).toBeDefined();
 		});
 
 		it("should only spawn one child process when second dispatch is rejected", async () => {
@@ -238,7 +238,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 
 			await executeTool(
 				"call-1",
-				{ agent: "tester", task: "first task", sessionId: "same-session-id" },
+				{ agent: "tester", task: "first task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd20" },
 				undefined,
 				undefined,
 				ctx,
@@ -246,7 +246,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 
 			await executeTool(
 				"call-2",
-				{ agent: "tester", task: "second task", sessionId: "same-session-id" },
+				{ agent: "tester", task: "second task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd20" },
 				undefined,
 				undefined,
 				ctx,
@@ -267,7 +267,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 
 			const executePromise = executeTool(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "cleanup-success" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd21" },
 				undefined,
 				undefined,
 				ctx,
@@ -289,7 +289,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 
 			const executePromise = executeTool(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "cleanup-cancel" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd22" },
 				undefined,
 				undefined,
 				ctx,
@@ -300,7 +300,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 
 			// Cancel the task
 			const cancelCommand = pi._commandDefs.get("subagent-cancel");
-			await cancelCommand.handler("cleanup-cancel", { ui: { notify: vi.fn() } });
+			await cancelCommand.handler("019ffdd3-3eb5-733d-b481-a53e5292bd22", { ui: { notify: vi.fn() } });
 
 			// Advance through SIGTERM grace + SIGKILL + finalize
 			await vi.advanceTimersByTimeAsync(1000);
@@ -317,14 +317,14 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			// Dispatch two tasks
 			await executeTool(
 				"call-1",
-				{ agent: "tester", task: "task 1", sessionId: "shutdown-1" },
+				{ agent: "tester", task: "task 1", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd23" },
 				undefined,
 				undefined,
 				ctx,
 			);
 			await executeTool(
 				"call-2",
-				{ agent: "tester", task: "task 2", sessionId: "shutdown-2" },
+				{ agent: "tester", task: "task 2", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd24" },
 				undefined,
 				undefined,
 				ctx,
@@ -356,7 +356,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 
 			const executePromise = executeTool(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "sendmsg-throw" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd25" },
 				undefined,
 				undefined,
 				ctx,
@@ -384,7 +384,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 
 			const executePromise = executeTool(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "shutdown-throw" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd26" },
 				undefined,
 				undefined,
 				ctx,
@@ -427,7 +427,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			// execute resolves immediately with receipt in TUI mode
 			const result = await executeTool(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "hard-timeout" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd27" },
 				undefined,
 				undefined,
 				ctx,
@@ -453,7 +453,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 
 			await executeTool(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "hard-timeout-details" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd28" },
 				undefined,
 				undefined,
 				ctx,
@@ -477,7 +477,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 
 			const executePromise = executeTool(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "shutdown-envelope" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd29" },
 				undefined,
 				undefined,
 				ctx,
@@ -505,7 +505,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 
 			const executePromise = executeTool(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "shutdown-stopreason" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd2a" },
 				undefined,
 				undefined,
 				ctx,
@@ -530,14 +530,14 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			// Dispatch two tasks
 			await executeTool(
 				"call-1",
-				{ agent: "tester", task: "task 1", sessionId: "multi-shutdown-1" },
+				{ agent: "tester", task: "task 1", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd2b" },
 				undefined,
 				undefined,
 				ctx,
 			);
 			await executeTool(
 				"call-2",
-				{ agent: "tester", task: "task 2", sessionId: "multi-shutdown-2" },
+				{ agent: "tester", task: "task 2", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd2c" },
 				undefined,
 				undefined,
 				ctx,
@@ -664,7 +664,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			// Dispatch a task
 			const executePromise = executeTool(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "completed-task" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd2d" },
 				undefined,
 				undefined,
 				ctx,
@@ -678,10 +678,10 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			// Now try to cancel it — should warn since it's been removed from registry
 			const cancelCommand = pi._commandDefs.get("subagent-cancel");
 			const notifyMock = vi.fn();
-			await cancelCommand.handler("completed-task", { ui: { notify: notifyMock } });
+			await cancelCommand.handler("019ffdd3-3eb5-733d-b481-a53e5292bd2d", { ui: { notify: notifyMock } });
 
 			expect(notifyMock).toHaveBeenCalledWith(
-				expect.stringContaining("completed-task"),
+				expect.stringContaining("019ffdd3-3eb5-733d-b481-a53e5292bd2d"),
 				"warning",
 			);
 		});
@@ -821,14 +821,14 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			// Dispatch two real tasks
 			await executeTool(
 				"call-1",
-				{ agent: "tester", task: "task 1", sessionId: "full-cancel-all-1" },
+				{ agent: "tester", task: "task 1", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd2e" },
 				undefined,
 				undefined,
 				ctx,
 			);
 			await executeTool(
 				"call-2",
-				{ agent: "tester", task: "task 2", sessionId: "full-cancel-all-2" },
+				{ agent: "tester", task: "task 2", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd2f" },
 				undefined,
 				undefined,
 				ctx,
@@ -840,8 +840,8 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			await cancelAllCommand!.handler("", { ui: { notify: vi.fn() } });
 
 			// Both tasks marked cancelled
-			expect(taskRegistry.get("full-cancel-all-1")?.status).toBe("cancelled");
-			expect(taskRegistry.get("full-cancel-all-2")?.status).toBe("cancelled");
+			expect(taskRegistry.get("019ffdd3-3eb5-733d-b481-a53e5292bd2e")?.status).toBe("cancelled");
+			expect(taskRegistry.get("019ffdd3-3eb5-733d-b481-a53e5292bd2f")?.status).toBe("cancelled");
 
 			// End both procs → each completion sends a subagent-result envelope
 			for (const proc of allProcs) {
@@ -886,7 +886,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 
 			const executePromise = executeTool(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "grace-exit" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd30" },
 				undefined,
 				undefined,
 				ctx,
@@ -897,7 +897,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 
 			// Cancel the task → SIGTERM sent
 			const cancelCommand = pi._commandDefs.get("subagent-cancel");
-			await cancelCommand.handler("grace-exit", { ui: { notify: vi.fn() } });
+			await cancelCommand.handler("019ffdd3-3eb5-733d-b481-a53e5292bd30", { ui: { notify: vi.fn() } });
 
 			expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
 
@@ -919,7 +919,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 
 			const executePromise = executeTool(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "grace-timeout" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd31" },
 				undefined,
 				undefined,
 				ctx,
@@ -930,7 +930,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 
 			// Cancel → SIGTERM
 			const cancelCommand = pi._commandDefs.get("subagent-cancel");
-			await cancelCommand.handler("grace-timeout", { ui: { notify: vi.fn() } });
+			await cancelCommand.handler("019ffdd3-3eb5-733d-b481-a53e5292bd31", { ui: { notify: vi.fn() } });
 
 			expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
 
@@ -951,7 +951,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			// First dispatch
 			const first = await executeTool(
 				"call-1",
-				{ agent: "tester", task: "first task", sessionId: "reuse-session" },
+				{ agent: "tester", task: "first task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd32" },
 				undefined,
 				undefined,
 				ctx,
@@ -967,7 +967,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			// Second dispatch with same sessionId should succeed (no conflict)
 			const second = await executeTool(
 				"call-2",
-				{ agent: "tester", task: "second task", sessionId: "reuse-session" },
+				{ agent: "tester", task: "second task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd32" },
 				undefined,
 				undefined,
 				ctx,
@@ -989,7 +989,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			// 1. Dispatch a task — status "running", proc spawned
 			const executePromise = executeTool(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "n1-orphan" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd33" },
 				undefined,
 				undefined,
 				ctx,
@@ -998,13 +998,13 @@ describe("异步化回归测试 & B1 红阶段", () => {
 
 			const proc = allProcs[0];
 			expect(proc).toBeDefined();
-			expect(taskRegistry.get("n1-orphan")!.status).toBe("running");
+			expect(taskRegistry.get("019ffdd3-3eb5-733d-b481-a53e5292bd33")!.status).toBe("running");
 
 			// 2. Cancel the task → status becomes "cancelled", SIGTERM sent
 			const cancelCommand = pi._commandDefs.get("subagent-cancel");
-			await cancelCommand.handler("n1-orphan", { ui: { notify: vi.fn() } });
+			await cancelCommand.handler("019ffdd3-3eb5-733d-b481-a53e5292bd33", { ui: { notify: vi.fn() } });
 
-			expect(taskRegistry.get("n1-orphan")!.status).toBe("cancelled");
+			expect(taskRegistry.get("019ffdd3-3eb5-733d-b481-a53e5292bd33")!.status).toBe("cancelled");
 			expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
 
 			// Proc is still alive (mock doesn't auto-exit on kill)
@@ -1032,7 +1032,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 
 			const executePromise = executeTool(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "n2-sync-kill" },
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd34" },
 				undefined,
 				undefined,
 				ctx,
@@ -1099,7 +1099,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 				// hits writePromptToTempFile → mkdtemp is called and paused
 				const executePromise = executeTool(
 					"call-1",
-					{ agent: "prompter", task: "test task", sessionId: "n2-prespawn" },
+					{ agent: "prompter", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd35" },
 					undefined,
 					undefined,
 					ctx,
@@ -1111,15 +1111,15 @@ describe("异步化回归测试 & B1 红阶段", () => {
 
 				// No proc spawned yet (write is paused before spawn)
 				expect(allProcs.length).toBe(0);
-				expect(taskRegistry.get("n2-prespawn")).toBeDefined();
-				expect(taskRegistry.get("n2-prespawn")!.status).toBe("running");
+				expect(taskRegistry.get("019ffdd3-3eb5-733d-b481-a53e5292bd35")).toBeDefined();
+				expect(taskRegistry.get("019ffdd3-3eb5-733d-b481-a53e5292bd35")!.status).toBe("running");
 
 				// Trigger shutdown while in the pre-spawn window
 				const shutdownHandlers = pi._eventHandlers.get("session_shutdown");
 				await shutdownHandlers![0]({ type: "session_shutdown" });
 
 				// Task status should now be "killed_on_shutdown"
-				expect(taskRegistry.get("n2-prespawn")!.status).toBe("killed_on_shutdown");
+				expect(taskRegistry.get("019ffdd3-3eb5-733d-b481-a53e5292bd35")!.status).toBe("killed_on_shutdown");
 
 				// No proc yet — shutdown couldn't SIGKILL what doesn't exist
 				expect(allProcs.length).toBe(0);
@@ -1145,7 +1145,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 	// N5: validateSessionId 回归防护
 	// ================================================================
 	describe("N5: validateSessionId 回归防护", () => {
-		it("should reject sessionId with illegal characters", async () => {
+		it("should reject non-UUID sessionId with the UUID v7 contract", async () => {
 			const { executeTool } = setupExtension();
 			const ctx = createMockTuiCtx(defaultCwd);
 
@@ -1158,7 +1158,10 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			);
 
 			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toMatch(/disallowed|invalid|非法|不允许/i);
+			const text = result.content[0].text;
+			expect(text).toMatch(/sessionId/i);
+			expect(text).toMatch(/UUID\s?v7/i);
+			expect(text).toMatch(/receipt|resume|复用/i);
 		});
 
 		it('should reject sessionId "." and ".."', async () => {
@@ -1186,23 +1189,24 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			expect(dotDotResult.content[0].text).toMatch(/not allowed|不允许|invalid|非法/i);
 		});
 
-		it("should accept sessionId with leading/trailing whitespace after trim normalization", async () => {
+		it("should accept a UUID v7 sessionId with leading/trailing whitespace after trim normalization", async () => {
 			const { executeTool } = setupExtension();
 			const ctx = createMockTuiCtx(defaultCwd);
 
+			const validV7 = "019ffdd3-3eb5-733d-b481-a53e5292bd36";
 			const result = await executeTool(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "  valid-id  " },
+				{ agent: "tester", task: "test task", sessionId: `  ${validV7}  ` },
 				undefined,
 				undefined,
 				ctx,
 			);
 
-			// Should succeed — trim() normalizes to "valid-id"
+			// Should succeed — trim() normalizes to the UUID v7
 			expect(result.isError).toBeFalsy();
 			expect(result.content[0].text).toMatch(/已派出|dispatched/i);
 			// The trimmed sessionId should be used as the task key
-			expect(taskRegistry.has("valid-id")).toBe(true);
+			expect(taskRegistry.has(validV7)).toBe(true);
 		});
 	});
 });

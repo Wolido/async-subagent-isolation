@@ -1,9 +1,13 @@
 /**
- * Tests for active tasks tracking (单入口 action 模式: subagent action=status,
- * envelope active list, cancel return)
+ * Tests for active tasks tracking (单入口 action 模式: envelope active list,
+ * cancel return)
  *
  * 契约：subagent_status / subagent_cancel 独立工具已移除，
- * status/cancel 由 subagent 工具 action 参数分派。
+ * cancel 由 subagent 工具 action 参数分派。
+ *
+ * 变更（v1.2.0）：action="status" 已从工具面移除。
+ * §2/§3 为负向契约（RED）：status 一律被拒绝，不得返回在途列表。
+ * §4/5/6 为共享面（在途块仍由信封与 cancel 回执共享 formatActiveTasks()），不动。
  */
 
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
@@ -181,14 +185,8 @@ describe("在途任务台账", () => {
 		extension(pi as any);
 		const toolsByName = new Map(pi._toolDefs.map((t: any) => [t.name, t] as const));
 		const executeSubagentTool = toolsByName.get("subagent")?.execute as ExecuteFn | undefined;
-		// 新契约：status/cancel 通过 subagent 工具的 action 参数分派
-		const executeStatusTool = (
-			toolCallId: string,
-			params: Record<string, unknown>,
-			signal: AbortSignal | undefined,
-			onUpdate: unknown,
-			ctx: unknown,
-		) => executeSubagentTool!(toolCallId, { action: "status", ...params }, signal, onUpdate, ctx);
+		// 新契约：cancel 通过 subagent 工具的 action 参数分派
+		// （status 已从工具面移除 —— 负向契约测试直接以 { action: "status" } 调用 executeSubagentTool）
 		const executeCancelTool = (
 			toolCallId: string,
 			params: Record<string, unknown>,
@@ -196,7 +194,7 @@ describe("在途任务台账", () => {
 			onUpdate: unknown,
 			ctx: unknown,
 		) => executeSubagentTool!(toolCallId, { action: "cancel", ...params }, signal, onUpdate, ctx);
-		return { pi, executeSubagentTool, executeStatusTool, executeCancelTool, toolsByName };
+		return { pi, executeSubagentTool, executeCancelTool, toolsByName };
 	}
 
 	// ================================================================
@@ -224,18 +222,17 @@ describe("在途任务台账", () => {
 	});
 
 	// ================================================================
-	// 2. 查询在途列表（action=status）
+	// 2. 查询在途列表已移除：action=status 负向契约（RED）
 	// ================================================================
-	describe("2. 查询在途列表（action=status）", () => {
-		it("应返回在途任务的 taskId、agent 名、任务描述", async () => {
-			const { executeSubagentTool, executeStatusTool } = setupExtension();
-			expect(executeStatusTool, "subagent tool should be registered (status dispatched via action param)").toBeDefined();
+	describe("2. action=status 必须被拒绝（负向契约：status 已从工具面移除）", () => {
+		it("有在途任务时 action=status 必须拒绝，且回执不得返回任何 taskId/agent/任务描述（RED：当前返回在途列表）", async () => {
+			const { executeSubagentTool } = setupExtension();
 			const ctx = createMockTuiCtx(defaultCwd);
 
 			// Arrange: dispatch 2 tasks
 			const executePromise1 = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "调研 XX 方案", sessionId: "task-1" },
+				{ agent: "tester", task: "调研 XX 方案", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd11" },
 				undefined,
 				undefined,
 				ctx,
@@ -244,7 +241,7 @@ describe("在途任务台账", () => {
 
 			const executePromise2 = executeSubagentTool!(
 				"call-2",
-				{ agent: "tester", task: "重构认证中间件", sessionId: "task-2" },
+				{ agent: "tester", task: "重构认证中间件", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd12" },
 				undefined,
 				undefined,
 				ctx,
@@ -253,53 +250,49 @@ describe("在途任务台账", () => {
 
 			expect(taskRegistry.size).toBe(2);
 
-			// Act: query status
-			const result = await executeStatusTool!("call-3", {}, undefined, undefined, ctx);
+			// Act: status 已移除 —— 必须被拒绝
+			const result = await executeSubagentTool!("call-3", { action: "status" }, undefined, undefined, ctx);
 
-			// Assert: should contain both taskIds, agent names, and task descriptions
+			// Assert: 拒绝（isError + Invalid action），且回执不得暴露在途列表信息
+			expect(result.isError).toBe(true);
 			const text = result.content.map((c: any) => c.text).join("");
-			expect(text).toContain("task-1");
-			expect(text).toContain("task-2");
-			expect(text).toContain("tester");
-			expect(text).toMatch(/调研 XX 方案/);
-			expect(text).toMatch(/重构认证中间件/);
+			expect(text).toMatch(/Invalid action/);
+			expect(text).not.toMatch(/在途任务|当前无在途任务/);
+			expect(text).not.toContain("019ffdd3-3eb5-733d-b481-a53e5292bd11");
+			expect(text).not.toContain("019ffdd3-3eb5-733d-b481-a53e5292bd12");
+			expect(text).not.toMatch(/调研 XX 方案/);
+			expect(text).not.toMatch(/重构认证中间件/);
 		});
 
-		it("不应包含耗时格式（如 00: 或 已运行）", async () => {
-			const { executeSubagentTool, executeStatusTool } = setupExtension();
-			expect(executeStatusTool, "subagent tool should be registered (status dispatched via action param)").toBeDefined();
+		it("action=status 即使携带 agent/task 也必须拒绝（与未知 action 同等强度，不得分派，RED）", async () => {
+			const { executeSubagentTool } = setupExtension();
 			const ctx = createMockTuiCtx(defaultCwd);
 
-			// Arrange: dispatch a task
-			const executePromise = executeSubagentTool!(
+			// Act: status 不得被当作 dispatch 或任何有效 action 处理
+			const result = await executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "测试任务", sessionId: "no-elapsed" },
+				{ action: "status", agent: "tester", task: "x" },
 				undefined,
 				undefined,
 				ctx,
 			);
-			await raceWithTimeout(executePromise, 200);
 
-			// Act: query status
-			const result = await executeStatusTool!("call-2", {}, undefined, undefined, ctx);
-
-			// Assert: NOT an error response, and should NOT contain elapsed time format
-			expect(result.isError).toBeFalsy();
+			// Assert: 拒绝分支在分派之前返回 —— 不得 spawn 子进程，不得写入任务注册表
+			expect(result.isError).toBe(true);
 			const text = result.content.map((c: any) => c.text).join("");
-			expect(text).not.toMatch(/\d{2}:\d{2}/); // No MM:SS format
-			expect(text).not.toMatch(/已运行/);
+			expect(text).toMatch(/Invalid action/);
+			expect(spawn).not.toHaveBeenCalled();
+			expect(taskRegistry.size).toBe(0);
 		});
 
-		it("应只列 status === 'running' 的任务", async () => {
-			const { executeSubagentTool, executeStatusTool, executeCancelTool } = setupExtension();
-			expect(executeStatusTool, "subagent tool should be registered (status dispatched via action param)").toBeDefined();
-			expect(executeCancelTool, "subagent tool should be registered (cancel dispatched via action param)").toBeDefined();
+		it("任务处于 running 或 cancelled 状态时 action=status 一律拒绝（不再有「只列 running」语义，RED）", async () => {
+			const { executeSubagentTool, executeCancelTool } = setupExtension();
 			const ctx = createMockTuiCtx(defaultCwd);
 
-			// Arrange: dispatch 2 tasks
+			// Arrange: dispatch 2 tasks, cancel one —— 注册表同时含 running 与 cancelled
 			const executePromise1 = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "任务1", sessionId: "running-task" },
+				{ agent: "tester", task: "任务1", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd13" },
 				undefined,
 				undefined,
 				ctx,
@@ -308,43 +301,45 @@ describe("在途任务台账", () => {
 
 			const executePromise2 = executeSubagentTool!(
 				"call-2",
-				{ agent: "tester", task: "任务2", sessionId: "to-cancel" },
+				{ agent: "tester", task: "任务2", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd14" },
 				undefined,
 				undefined,
 				ctx,
 			);
 			await raceWithTimeout(executePromise2, 200);
 
-			// Cancel one task
-			await executeCancelTool!("call-3", { taskId: "to-cancel" }, undefined, undefined, ctx);
+			await executeCancelTool!("call-3", { taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd14" }, undefined, undefined, ctx);
 
-			// Act: query status
-			const result = await executeStatusTool!("call-4", {}, undefined, undefined, ctx);
+			// Act
+			const result = await executeSubagentTool!("call-4", { action: "status" }, undefined, undefined, ctx);
 
-			// Assert: should only contain the running task
+			// Assert: 无论任务状态如何，status 都被拒绝且不透出任何 taskId
+			expect(result.isError).toBe(true);
 			const text = result.content.map((c: any) => c.text).join("");
-			expect(text).toContain("running-task");
-			expect(text).not.toContain("to-cancel");
+			expect(text).toMatch(/Invalid action/);
+			expect(text).not.toContain("019ffdd3-3eb5-733d-b481-a53e5292bd13");
+			expect(text).not.toContain("019ffdd3-3eb5-733d-b481-a53e5292bd14");
 		});
 	});
 
 	// ================================================================
-	// 3. 空在途
+	// 3. 空在途：status 已移除，空注册表同样拒绝（负向契约）
 	// ================================================================
-	describe("3. 空在途", () => {
-		it("注册表为空时应返回'当前无在途任务'", async () => {
-			const { executeStatusTool } = setupExtension();
-			expect(executeStatusTool, "subagent tool should be registered (status dispatched via action param)").toBeDefined();
+	describe("3. 空在途 —— action=status 负向契约", () => {
+		it("注册表为空时 action=status 必须拒绝，而非返回「当前无在途任务」（RED）", async () => {
+			const { executeSubagentTool } = setupExtension();
 			const ctx = createMockTuiCtx(defaultCwd);
 
 			expect(taskRegistry.size).toBe(0);
 
 			// Act
-			const result = await executeStatusTool!("call-1", {}, undefined, undefined, ctx);
+			const result = await executeSubagentTool!("call-1", { action: "status" }, undefined, undefined, ctx);
 
-			// Assert
+			// Assert: 拒绝，且不得出现空在途文案
+			expect(result.isError).toBe(true);
 			const text = result.content.map((c: any) => c.text).join("");
-			expect(text).toMatch(/当前无在途任务/);
+			expect(text).toMatch(/Invalid action/);
+			expect(text).not.toMatch(/当前无在途任务/);
 		});
 	});
 
@@ -359,7 +354,7 @@ describe("在途任务台账", () => {
 			// Arrange: dispatch 2 tasks
 			const executePromise1 = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "任务1", sessionId: "completing-task" },
+				{ agent: "tester", task: "任务1", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd15" },
 				undefined,
 				undefined,
 				ctx,
@@ -368,7 +363,7 @@ describe("在途任务台账", () => {
 
 			const executePromise2 = executeSubagentTool!(
 				"call-2",
-				{ agent: "tester", task: "任务2", sessionId: "remaining-task" },
+				{ agent: "tester", task: "任务2", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd16" },
 				undefined,
 				undefined,
 				ctx,
@@ -387,7 +382,7 @@ describe("在途任务台账", () => {
 			const content: string = message.content;
 			
 			expect(content).toMatch(/在途任务:\s*1/);
-			expect(content).toContain("remaining-task");
+			expect(content).toContain("019ffdd3-3eb5-733d-b481-a53e5292bd16");
 			expect(content).toContain("tester");
 			expect(content).toMatch(/任务2/);
 		});
@@ -399,7 +394,7 @@ describe("在途任务台账", () => {
 			// Arrange: dispatch a task
 			const executePromise = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "测试任务", sessionId: "self-exclude" },
+				{ agent: "tester", task: "测试任务", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd17" },
 				undefined,
 				undefined,
 				ctx,
@@ -421,13 +416,13 @@ describe("在途任务台账", () => {
 			expect(content).toMatch(/在途任务:\s*0|当前无在途任务/);
 			
 			// The header contains the completed task's ID, but the active tasks list should not
-			// Check that "self-exclude" appears in header but not in active tasks section
+			// Check that the self-excluded task id appears in header but not in active tasks section
 			const lines = content.split("\n");
 			const activeTasksSection = lines.filter(l => l.match(/^- .* \(.*\):/)); // Lines like "- taskId (agent): task"
 			
 			// Active tasks section should not contain the completed task's ID
 			for (const line of activeTasksSection) {
-				expect(line).not.toContain("self-exclude");
+				expect(line).not.toContain("019ffdd3-3eb5-733d-b481-a53e5292bd17");
 			}
 		});
 	});
@@ -444,7 +439,7 @@ describe("在途任务台账", () => {
 			// Arrange: dispatch 2 tasks
 			const executePromise1 = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "任务1", sessionId: "to-cancel" },
+				{ agent: "tester", task: "任务1", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd14" },
 				undefined,
 				undefined,
 				ctx,
@@ -453,7 +448,7 @@ describe("在途任务台账", () => {
 
 			const executePromise2 = executeSubagentTool!(
 				"call-2",
-				{ agent: "tester", task: "任务2", sessionId: "remaining" },
+				{ agent: "tester", task: "任务2", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd18" },
 				undefined,
 				undefined,
 				ctx,
@@ -463,12 +458,12 @@ describe("在途任务台账", () => {
 			expect(taskRegistry.size).toBe(2);
 
 			// Act: cancel the first task
-			const result = await executeCancelTool!("call-3", { taskId: "to-cancel" }, undefined, undefined, ctx);
+			const result = await executeCancelTool!("call-3", { taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd14" }, undefined, undefined, ctx);
 
 			// Assert: return value should contain remaining active tasks
 			const text = result.content.map((c: any) => c.text).join("");
 			expect(text).toMatch(/在途任务/);
-			expect(text).toContain("remaining");
+			expect(text).toContain("019ffdd3-3eb5-733d-b481-a53e5292bd18");
 			expect(text).toContain("tester");
 			expect(text).toMatch(/任务2/);
 		});
@@ -481,7 +476,7 @@ describe("在途任务台账", () => {
 			// Arrange: dispatch 2 tasks
 			const executePromise1 = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "任务1", sessionId: "cancel-me" },
+				{ agent: "tester", task: "任务1", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd19" },
 				undefined,
 				undefined,
 				ctx,
@@ -490,7 +485,7 @@ describe("在途任务台账", () => {
 
 			const executePromise2 = executeSubagentTool!(
 				"call-2",
-				{ agent: "tester", task: "任务2", sessionId: "keep-me" },
+				{ agent: "tester", task: "任务2", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd1a" },
 				undefined,
 				undefined,
 				ctx,
@@ -498,17 +493,17 @@ describe("在途任务台账", () => {
 			await raceWithTimeout(executePromise2, 200);
 
 			// Act: cancel the first task
-			const result = await executeCancelTool!("call-3", { taskId: "cancel-me" }, undefined, undefined, ctx);
+			const result = await executeCancelTool!("call-3", { taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd19" }, undefined, undefined, ctx);
 
 			// Assert: should contain "keep-me" but not "cancel-me" in active tasks
 			const text = result.content.map((c: any) => c.text).join("");
-			expect(text).toContain("keep-me");
+			expect(text).toContain("019ffdd3-3eb5-733d-b481-a53e5292bd1a");
 			
 			// Check that "cancel-me" is not in the active tasks section
 			const lines = text.split("\n");
 			const activeTasksSection = lines.filter(l => l.match(/^- .* \(.*\):/));
 			for (const line of activeTasksSection) {
-				expect(line).not.toContain("cancel-me");
+				expect(line).not.toContain("019ffdd3-3eb5-733d-b481-a53e5292bd19");
 			}
 		});
 	});
@@ -524,7 +519,7 @@ describe("在途任务台账", () => {
 			// Arrange: dispatch a task
 			const executePromise = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "回归测试任务", sessionId: "regression-envelope" },
+				{ agent: "tester", task: "回归测试任务", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd1b" },
 				undefined,
 				undefined,
 				ctx,
@@ -542,7 +537,7 @@ describe("在途任务台账", () => {
 			
 			// Existing envelope structure should be preserved
 			expect(content).toContain("[subagent-result]");
-			expect(content).toContain("regression-envelope"); // taskId
+			expect(content).toContain("019ffdd3-3eb5-733d-b481-a53e5292bd1b"); // taskId
 			expect(content).toContain("tester"); // agent name
 			expect(content).toContain("状态:"); // status field
 			expect(content).toContain("任务:"); // task field
@@ -560,7 +555,7 @@ describe("在途任务台账", () => {
 			// Arrange: dispatch a task
 			const executePromise = executeSubagentTool!(
 				"call-1",
-				{ agent: "tester", task: "取消测试", sessionId: "regression-cancel" },
+				{ agent: "tester", task: "取消测试", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd1c" },
 				undefined,
 				undefined,
 				ctx,
@@ -568,7 +563,7 @@ describe("在途任务台账", () => {
 			await raceWithTimeout(executePromise, 200);
 
 			// Act: cancel via tool
-			await executeCancelTool!("call-2", { taskId: "regression-cancel" }, undefined, undefined, ctx);
+			await executeCancelTool!("call-2", { taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd1c" }, undefined, undefined, ctx);
 			endProcess(allProcs[0], null, "SIGTERM");
 			await vi.advanceTimersByTimeAsync(1000);
 

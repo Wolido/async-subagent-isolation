@@ -40,7 +40,7 @@ vi.mock("node:child_process", () => ({
 	spawn: vi.fn(),
 }));
 
-const SESSION_ID = "test-session-id";
+const SESSION_ID = "019ffdd3-3eb5-733d-b481-a53e5292bd04";
 const ENV_KEYS = [
 	"PI_SUBAGENT_DEPTH",
 	"PI_SUBAGENT_HARD_TIMEOUT_MS",
@@ -139,7 +139,7 @@ describe("runSingleAgent cwd resolution (characterization for issue #1)", () => 
 		// Capture the tool registered by the extension entry point.
 		const pi = {
 			registerTool: (tool: { name: string; execute: ExecuteFn }) => {
-				// The extension registers a single subagent tool; status/cancel are dispatched via its action parameter. These tests exercise subagent.
+				// The extension registers a single subagent tool; cancel is dispatched via its action parameter. These tests exercise subagent.
 				if (tool.name === "subagent") executeTool = tool.execute;
 			},
 		};
