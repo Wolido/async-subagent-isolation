@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-08-15
+
+### Added
+
+- Added `formatDuration` for finished runs: milliseconds → `MM:SS`, or `H:MM:SS` at one hour and beyond (hours not zero-padded); 0/negative input renders as `00:00`.
+- Added a required `durationMs` field (run time in milliseconds) to `SubagentResultDetails`: the real run time (`finishedAt - startedAt`) when a result exists, measured from dispatch time when the result is null (cancel or internal error).
+
+### Changed
+
+- The `[subagent-result]` envelope's `耗时` line now shows the real run duration (`formatDuration(durationMs)`) instead of the time since dispatch (`formatElapsed`). `formatElapsed` remains for the progress widget's live "alive since" clock; the two coexist with different semantics.
+- The TUI notification card and the sync-mode rich rendering now show the run duration for all terminal states: success, failure, timeout, and cancelled.
+
 ## [1.2.0] - 2026-08-14
 
 ### Removed

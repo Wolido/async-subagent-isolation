@@ -426,6 +426,10 @@ interface SingleResult {
 	lastPhaseChange: number;
 	thinkingBuffer?: string;
 	sessionId: string;
+	/** Wall-clock start of this run (Date.now() at runSingleAgent entry). */
+	startedAt: number;
+	/** Wall-clock finish, set when the run resolves; absent while running. */
+	finishedAt?: number;
 }
 
 interface SubagentDetails {
@@ -601,6 +605,22 @@ export function formatElapsed(startedAt: number): string {
 	const mm = String(Math.floor(totalSec / 60)).padStart(2, "0");
 	const ss = String(totalSec % 60).padStart(2, "0");
 	return `${mm}:${ss}`;
+}
+
+/**
+ * Format a finished run's duration (milliseconds) for result notifications.
+ * Unlike formatElapsed (a live "alive since" clock for the progress widget,
+ * MM:SS only and overflowing past 99 minutes), this floors to whole seconds
+ * and supports hours: < 1h -> "MM:SS", >= 1h -> "H:MM:SS" (hours not
+ * zero-padded), 0/negative -> "00:00".
+ */
+export function formatDuration(ms: number): string {
+	if (!Number.isFinite(ms)) return "00:00";
+	const totalSec = Math.max(0, Math.floor(ms / 1000));
+	const hours = Math.floor(totalSec / 3600);
+	const mm = String(Math.floor((totalSec % 3600) / 60)).padStart(2, "0");
+	const ss = String(totalSec % 60).padStart(2, "0");
+	return hours > 0 ? `${hours}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 
 /**
@@ -919,6 +939,7 @@ async function runSingleAgent(
 	modelOverrides?: Record<string, ModelOverride>,
 	onProcSpawn?: (proc: ChildProcess) => void,
 ): Promise<SingleResult> {
+	const startedAt = Date.now();
 	let effectiveSessionId: string;
 	if (sessionId !== undefined) {
 		const trimmed = sessionId.trim();
@@ -937,6 +958,8 @@ async function runSingleAgent(
 				phase: "idle",
 				lastPhaseChange: Date.now(),
 				sessionId: trimmed,
+				startedAt,
+				finishedAt: Date.now(),
 			};
 		}
 		effectiveSessionId = trimmed;
@@ -959,6 +982,8 @@ async function runSingleAgent(
 			phase: "idle",
 			lastPhaseChange: Date.now(),
 			sessionId: effectiveSessionId,
+			startedAt,
+			finishedAt: Date.now(),
 		};
 	}
 
@@ -1026,6 +1051,7 @@ async function runSingleAgent(
 		phase: "idle",
 		lastPhaseChange: Date.now(),
 		sessionId: effectiveSessionId,
+		startedAt,
 	};
 
 	const emitProgress = () => {
@@ -1098,6 +1124,7 @@ async function runSingleAgent(
 			const finalize = (code: number) => {
 				if (resolved) return;
 				resolved = true;
+				currentResult.finishedAt = Date.now();
 				if (postExitTimer) {
 					clearTimeout(postExitTimer);
 					postExitTimer = undefined;
@@ -1537,6 +1564,13 @@ export interface SubagentResultDetails {
 	stopReason?: string;
 	/** Present only on cancelled tasks: who cancelled ("user" | "agent"). */
 	cancelledBy?: "user" | "agent";
+	/**
+	 * Run duration in milliseconds (>= 0): the real run time
+	 * (finishedAt - startedAt) when a result exists; measured from the
+	 * dispatch time (task.startedAt) when result is null (cancel/internal
+	 * error).
+	 */
+	durationMs: number;
 	usage: UsageStats;
 	sessionId: string;
 	output: string;
@@ -1577,6 +1611,12 @@ export function buildResultEnvelope(
 	const usage: UsageStats =
 		result?.usage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
 	const sessionId = result?.sessionId ?? task.taskId;
+	// Real run time when the subagent produced a result; for a null result
+	// (user/agent cancel, session shutdown, internal error) the run never
+	// reported back, so measure from the dispatch time instead.
+	const durationMs = result
+		? Math.max(0, (result.finishedAt ?? Date.now()) - result.startedAt)
+		: Math.max(0, Date.now() - task.startedAt);
 	let body = output;
 	if (!body && result) body = result.errorMessage || result.stderr.trim();
 	// Only genuine failures are labelled "内部错误"; a user cancel or session
@@ -1588,7 +1628,7 @@ export function buildResultEnvelope(
 		"",
 		`- 状态: ${statusWord}`,
 		`- 任务: ${truncateTaskDescription(task.task)}`,
-		`- 耗时: ${formatElapsed(task.startedAt)} · 用量: ${formatUsageStats(usage, result?.model) || "-"}`,
+		`- 耗时: ${formatDuration(durationMs)} · 用量: ${formatUsageStats(usage, result?.model) || "-"}`,
 		`- 会话: ${sessionId}`,
 		"",
 		// 在途 block: completeAsyncTask deletes this task from the registry
@@ -1607,6 +1647,7 @@ export function buildResultEnvelope(
 			exitCode: result?.exitCode ?? null,
 			stopReason,
 			cancelledBy: task.cancelledBy,
+			durationMs,
 			usage,
 			sessionId,
 			output:
@@ -2073,6 +2114,14 @@ export default function (pi: ExtensionAPI) {
 				const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
 				const displayItems = getDisplayItems(r.messages);
 				const finalOutput = getFinalOutput(r.messages);
+				// Run duration, shown only when both timestamps are present (older
+				// results lack them); a typeof check keeps 0ms runs visible and
+				// missing fields from rendering "NaN".
+				const durationStr =
+					typeof r.startedAt === "number" && Number.isFinite(r.startedAt) &&
+					typeof r.finishedAt === "number" && Number.isFinite(r.finishedAt)
+						? formatDuration(r.finishedAt - r.startedAt)
+						: null;
 
 				if (expanded) {
 					const container = new Container();
@@ -2080,6 +2129,7 @@ export default function (pi: ExtensionAPI) {
 					if (isError && r.stopReason) header += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
 					if (r.phase !== "idle") header += ` ${theme.fg("warning", formatPhase(r.phase))}`;
 					header += ` ${theme.fg("muted", `[session: ${r.sessionId}]`)}`;
+					if (durationStr) header += ` ${theme.fg("dim", durationStr)}`;
 					container.addChild(new Text(header, 0, 0));
 					if (isError && r.errorMessage)
 						container.addChild(new Text(theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
@@ -2125,6 +2175,7 @@ export default function (pi: ExtensionAPI) {
 				if (isError && r.stopReason) text += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
 				if (r.phase !== "idle") text += ` ${theme.fg("warning", formatPhase(r.phase))}`;
 				text += ` ${theme.fg("muted", `[session: ${r.sessionId}]`)}`;
+				if (durationStr) text += ` ${theme.fg("dim", durationStr)}`;
 				if (isError && r.errorMessage) text += `\n${theme.fg("error", `Error: ${r.errorMessage}`)}`;
 				if (displayItems.length === 0) {
 					if (!isError || !r.errorMessage) text += `\n${theme.fg("muted", "(no output)")}`;
@@ -2319,6 +2370,11 @@ export default function (pi: ExtensionAPI) {
 			if (details?.taskId) text += ` ${theme.fg("muted", `(taskId: ${details.taskId})`)}`;
 			const usageStr = details ? formatUsageStats(details.usage) : "";
 			if (usageStr) text += ` ${theme.fg("dim", usageStr)}`;
+			// durationMs is typed as a number and 0 is a valid duration, so the
+			// presence check must not be falsy-based; old-shape details without
+			// it simply omit the duration.
+			if (typeof details?.durationMs === "number" && Number.isFinite(details.durationMs))
+				text += ` ${theme.fg("dim", `耗时 ${formatDuration(details.durationMs)}`)}`;
 			if (details?.taskId) text += `\n${theme.fg("muted", `查看全文: /subagent-result ${details.taskId}`)}`;
 			// Background tint mirrors the dispatch-receipt tool rows: success and
 			// failure reuse the tool-row colors; timeout, cancelled and unknown

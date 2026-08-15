@@ -180,10 +180,11 @@ The `[subagent-result]` notification is **self-contained** — it carries everyt
 ```
 
 - **Status**: `成功` (success) / `失败` (failure) / `超时` (timeout) / `已取消` (cancelled).
+- **Duration**: the subagent's real run time (process start to finish; `MM:SS`, or `H:MM:SS` at 1h+), shown for all four states. For cancellations or internal errors with no result, it is measured from dispatch time.
 - **In-flight block**: lists the other background tasks still running (not itself), so the main agent knows how many are outstanding — while the count is non-zero, do not report "all done" to the user.
 - **Full result**: the body enters the LLM context in full, untruncated.
 
-In the TUI, the user sees a **tinted summary card**, not the full result: success green (✓), failure red (✗), timeout/cancelled yellow. The card shows the agent, status, taskId, and usage summary, plus the hint `查看全文: /subagent-result <taskId>`; the full text lives in the task's session file.
+In the TUI, the user sees a **tinted summary card**, not the full result: success green (✓), failure red (✗), timeout/cancelled yellow. The card shows the agent, status, taskId, duration, and usage summary (duration included for all four states), plus the hint `查看全文: /subagent-result <taskId>`; the full text lives in the task's session file.
 
 See [ADVANCED.en.md](ADVANCED.en.md) for the complete envelope format, status semantics, and cancel-origin distinctions.
 

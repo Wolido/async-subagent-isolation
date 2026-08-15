@@ -139,6 +139,8 @@ Once the subagent finishes, its result is pushed into the conversation:
 
 Status enumeration: **成功** (success, exit=0) / **失败** (failure, exit≠0 or stopReason=error) / **超时** (timeout, activity_timeout or hard_timeout) / **已取消** (cancelled, aborted or killed_on_shutdown).
 
+**Duration**: the `- 耗时:` line shows the subagent's real run time. When a result exists, it is the actual process run time (`finishedAt - startedAt`); when the result is null (user/agent cancel, session shutdown, internal error), it is measured from dispatch time instead. The format is `MM:SS`, or `H:MM:SS` at one hour and beyond (hours not zero-padded). All four terminal states (success, failure, timeout, cancelled) carry the duration in both the envelope and the TUI notification card.
+
 "Cancelled" has three sub-cases with different envelope bodies:
 - User cancelled via `/subagent-cancel` (cancelledBy: user) → body states this is a deliberate user action; the main agent must NOT auto-retry and must ask the user before re-dispatching.
 - Main agent cancelled via the `subagent` tool with `action="cancel"` (cancelledBy: agent) → body states the task was cancelled by the main agent via the subagent tool (action=cancel).
@@ -148,7 +150,7 @@ When the main agent receives a "已取消" notification, it should distinguish t
 
 **In-flight block**: the "在途任务" list in the envelope's metadata section lists the **other** background tasks still running (this task is removed from the registry before the envelope is built, so it never appears in its own list). Its format is `在途任务: N` followed by one `- taskId (agent): task description` line per task, or `当前无在途任务。` when none remain. It deliberately carries **no elapsed time** (it answers "what is still running", not "how long has it run"). The main agent uses it to know how many tasks are still outstanding — while the count is non-zero, do not report "all done" to the user.
 
-The full output enters the LLM context (not truncated). The `details` carries structured data (taskId, agent, status, exitCode, stopReason, usage, sessionId, full output) for programmatic consumption; it does not enter the LLM context.
+The full output enters the LLM context (not truncated). The `details` carries structured data (taskId, agent, status, exitCode, stopReason, durationMs (required, run time in milliseconds), usage, sessionId, full output) for programmatic consumption; it does not enter the LLM context.
 
 ### Notification delivery
 
@@ -165,6 +167,8 @@ While subagents run, a progress widget appears above the TUI editor, listing all
 ```
 ● 01912345-abcd... coder    ⚡ read...         01:23
 ```
+
+The widget's time is a live "alive since" clock (`formatElapsed`, `MM:SS` only, overflowing past 99 minutes); the envelope and notification card show the final run duration (`formatDuration`). The two coexist with different semantics.
 
 The taskId in the widget row can be copied for `/subagent-result` (view full result) or `/subagent-cancel` (cancel the task).
 

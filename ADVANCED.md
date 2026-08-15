@@ -139,6 +139,8 @@ TUI 模式下 `subagent` 立即返回如下回执（不是结果！）：
 
 状态枚举：**成功**（exit=0）/ **失败**（exit≠0 或 stopReason=error）/ **超时**（activity_timeout 或 hard_timeout）/ **已取消**（aborted 或 killed_on_shutdown）。
 
+**耗时**：`- 耗时:` 行是子 agent 的真实运行时长。有结果时取进程实际启动到结束（`finishedAt - startedAt`）；取消（用户/agent/会话关闭）或内部错误导致无结果返回时，改从派发时刻起算。格式为 `MM:SS`，≥1 小时为 `H:MM:SS`（小时不补零）。四种状态（成功/失败/超时/已取消）的信封与 TUI 通知卡片都带耗时。
+
 "已取消"分三种情况，信封正文不同：
 - 用户通过 `/subagent-cancel` 取消（cancelledBy: user）→ 正文注明"属用户主动操作。请勿自动重新派发；如需重新派发，先询问用户。"
 - 主 agent 通过 `subagent` 工具（`action="cancel"`）取消（cancelledBy: agent）→ 正文注明"该任务已由主 agent 通过 subagent 工具（action=cancel）取消。"
@@ -148,7 +150,7 @@ TUI 模式下 `subagent` 立即返回如下回执（不是结果！）：
 
 **在途任务块**：信封元信息区的"在途任务"列表列出**其余**仍在运行的后台任务（本任务在构建信封前已从注册表移除，故不包含自身），格式为 `在途任务: N` 加每行 `- taskId (agent名): 任务描述`，无在途任务时为"当前无在途任务。"列表**不含耗时**（回答"还有什么在跑"，而非"跑了多久"）。主 agent 据此知道还有几个任务没回来：剩余不为 0 时，不要向用户汇报"全部完成"。
 
-结果全量进入 LLM 上下文（不截断）。`details` 携带结构化数据（taskId、agent、status、exitCode、stopReason、usage、sessionId、完整输出），不参与 LLM 上下文，供程序消费。
+结果全量进入 LLM 上下文（不截断）。`details` 携带结构化数据（taskId、agent、status、exitCode、stopReason、durationMs（耗时毫秒数，必填）、usage、sessionId、完整输出），不参与 LLM 上下文，供程序消费。
 
 ### 通知投递
 
@@ -165,6 +167,8 @@ TUI 模式下 `subagent` 立即返回如下回执（不是结果！）：
 ```
 ● 01912345-abcd... coder    ⚡ read...         01:23
 ```
+
+widget 行的耗时是"存活至今"的实时时钟（`formatElapsed`，仅 `MM:SS`，可溢出 99 分钟）；信封与通知卡片的耗时是终态运行时长（`formatDuration`）。两者并存，语义不同。
 
 widget 行中的 taskId 可直接复制，用于 `/subagent-result` 查看结果或 `/subagent-cancel` 取消任务。
 
