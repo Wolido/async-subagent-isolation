@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The `[subagent-result]` envelope's `耗时` line now shows the real run duration (`formatDuration(durationMs)`) instead of the time since dispatch (`formatElapsed`). `formatElapsed` remains for the progress widget's live "alive since" clock; the two coexist with different semantics.
 - The TUI notification card and the sync-mode rich rendering now show the run duration for all terminal states: success, failure, timeout, and cancelled.
+- The example master agent prompt (`examples/pi/agent/master.md`) has been rewritten in a "task commander" style: the role is upgraded to team lead and quality gatekeeper with full ownership of deliverable quality (substandard results are never delivered), and new general-purpose management sections cover task orchestration principles, context handoff conventions, leaving solution design to subagents, async work discipline, and quality review with iteration. All plugin mechanics (the agent table, tool surface, the 8 core rules, dispatch examples, and isolation notes) are preserved verbatim, and the additions are generic rather than tied to any personal environment.
 
 ## [1.2.0] - 2026-08-14
 
