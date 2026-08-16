@@ -120,7 +120,7 @@ TUI 模式下 `subagent` **立即返回派发回执**，不阻塞：
 
 ### 5. 查看全文（`/subagent-result`）
 
-通知卡片只显示摘要。用 `/subagent-result <taskId>` 在全屏查看器中阅读完整返回：`↑↓`/`jk` 滚动、`Space`/`b` 翻页、`g`/`G` 首尾、`Enter`/`Esc`/`q` 关闭。
+通知卡片只显示摘要。用 `/subagent-result <taskId>` 在全屏查看器中阅读完整返回：`↑↓`/`jk` 滚动、`Space`/`b` 翻页、`g`/`G` 首尾、`Enter`/`Esc`/`q` 关闭。不带参数时（TUI 模式）弹出选择列表，列出最近 5 个已结束的任务，`Enter` 打开所选任务。
 
 ### 完整流程一览
 
@@ -154,9 +154,9 @@ TUI 模式下 `subagent` **立即返回派发回执**，不阻塞：
 
 | 命令 | 作用 |
 |------|------|
-| `/subagent-cancel <taskId>` | 取消单个运行中的后台任务（不带参数时列出运行中任务） |
+| `/subagent-cancel <taskId>` | 取消单个运行中的后台任务（不带参数时弹出运行中任务的交互选择列表，Enter 取消所选） |
 | `/subagent-cancel-all` | 一键取消全部运行中的后台任务 |
-| `/subagent-result <taskId>` | 全屏查看某任务的完整返回 |
+| `/subagent-result <taskId>` | 全屏查看某任务的完整返回（不带参数时弹出最近 5 个已结束任务的交互选择列表） |
 
 ---
 

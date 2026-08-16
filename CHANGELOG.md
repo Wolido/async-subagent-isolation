@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-08-16
+
+### Added
+
+- `/subagent-result` without a taskId (TUI mode) now opens an interactive picker listing the 5 most recently finished subagent tasks, latest first: `↑↓` moves the selection and `Enter` opens the same full-screen result viewer as the with-argument path. The picker is backed by a new in-memory record of finished tasks (capped at 50 entries), so the list starts empty after a pi restart or a new session; looking up an explicit taskId is unaffected.
+- `/subagent-cancel` without a taskId (TUI mode) now opens an interactive picker listing all running tasks (no count limit): `Enter` cancels the selected task through the same cancel flow as the with-argument path.
+- Both pickers dismiss on `Esc` / `q` / `Q` / `Ctrl+C` without taking any action or emitting a notification. (The selector is built on `ctx.ui.custom()` with a SelectList because the built-in `ctx.ui.select` cannot exit on `q`.) The with-taskId usage, `/subagent-cancel-all`, and the non-TUI fallbacks are unchanged.
+
+### Fixed
+
+- When a reused sessionId makes the same taskId finish more than once, the finished-task record is now deduplicated by taskId (the newest record replaces the older one), so a single task can no longer occupy multiple slots of the 50-entry history.
+
 ## [1.3.0] - 2026-08-15
 
 ### Added

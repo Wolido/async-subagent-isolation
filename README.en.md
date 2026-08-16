@@ -120,7 +120,7 @@ Results arrive automatically — **no polling**. In-flight task information is p
 
 ### 5. Read the full result (`/subagent-result`)
 
-The notification card shows only a summary. Use `/subagent-result <taskId>` to read the full output in a full-screen viewer: `↑↓`/`jk` scroll, `Space`/`b` page, `g`/`G` top/bottom, `Enter`/`Esc`/`q` close.
+The notification card shows only a summary. Use `/subagent-result <taskId>` to read the full output in a full-screen viewer: `↑↓`/`jk` scroll, `Space`/`b` page, `g`/`G` top/bottom, `Enter`/`Esc`/`q` close. With no argument (TUI mode), an interactive picker lists the 5 most recently finished tasks and `Enter` opens the selected one.
 
 ### The flow at a glance
 
@@ -154,9 +154,9 @@ User runs /subagent-result <taskId> to read the full output
 
 | Command | Purpose |
 |---------|---------|
-| `/subagent-cancel <taskId>` | Cancel one running background task (lists running tasks with no argument) |
+| `/subagent-cancel <taskId>` | Cancel one running background task (no argument opens an interactive picker of running tasks; Enter cancels the selection) |
 | `/subagent-cancel-all` | Cancel all running background tasks at once |
-| `/subagent-result <taskId>` | Read a task's full result in a full-screen viewer |
+| `/subagent-result <taskId>` | Read a task's full result in a full-screen viewer (no argument opens an interactive picker of the 5 most recent finished tasks) |
 
 ---
 

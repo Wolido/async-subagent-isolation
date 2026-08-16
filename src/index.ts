@@ -27,7 +27,7 @@ import {
 	getAgentDir,
 	parseFrontmatter,
 } from "@earendil-works/pi-coding-agent";
-import { Box, Container, Key, Markdown, matchesKey, Spacer, Text, truncateToWidth, visibleWidth, sliceByColumn } from "@earendil-works/pi-tui";
+import { Box, Container, Key, Markdown, matchesKey, SelectList, type SelectItem, Spacer, Text, truncateToWidth, visibleWidth, sliceByColumn } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 // ===== UUID v7 helper =====
@@ -1546,6 +1546,109 @@ export function formatActiveTasks(): string {
 	return `在途任务: ${running.length}\n${lines.join("\n")}`;
 }
 
+/** A finished async task, recorded when completeAsyncTask removes it from the registry. */
+interface CompletedTaskRecord {
+	taskId: string;
+	agentName: string;
+	status: SubagentTaskStatus;
+	finishedAt: number;
+}
+
+/**
+ * Recently finished async tasks in completion order (latest last), backing the
+ * no-argument /subagent-result picker. Bounded so a long session cannot grow
+ * it without limit; entries whose session file is gone are filtered at read
+ * time by listViewableFinishedTasks.
+ */
+const completedTasks: CompletedTaskRecord[] = [];
+const COMPLETED_TASKS_KEEP = 50;
+
+/** Record a finished task (called once per task from completeAsyncTask). */
+function recordCompletedTask(task: AsyncSubagentTask, status: SubagentTaskStatus): void {
+	// A reused sessionId finishes repeatedly: drop its older record first so
+	// the latest finish wins and one task cannot occupy multiple slots.
+	for (let i = completedTasks.length - 1; i >= 0; i--) {
+		if (completedTasks[i].taskId === task.taskId) completedTasks.splice(i, 1);
+	}
+	completedTasks.push({ taskId: task.taskId, agentName: task.agentName, status, finishedAt: Date.now() });
+	if (completedTasks.length > COMPLETED_TASKS_KEEP) {
+		completedTasks.splice(0, completedTasks.length - COMPLETED_TASKS_KEEP);
+	}
+}
+
+/**
+ * Latest-first finished tasks whose session transcript still exists on disk
+ * (a task without a session file has nothing to show in the result viewer).
+ * completedTasks holds at most one record per taskId (recordCompletedTask
+ * dedupes), so no further deduplication is needed here.
+ */
+function listViewableFinishedTasks(limit: number): CompletedTaskRecord[] {
+	const result: CompletedTaskRecord[] = [];
+	for (let i = completedTasks.length - 1; i >= 0 && result.length < limit; i--) {
+		const record = completedTasks[i];
+		if (!findSessionFile(record.taskId)) continue;
+		result.push(record);
+	}
+	return result;
+}
+
+/** Build a picker item whose label carries the full taskId (a 36-char UUID). */
+function taskPickerItem(taskId: string, description: string): SelectItem {
+	return { value: taskId, label: taskId, description };
+}
+
+/**
+ * Interactive task picker (TUI only): a SelectList in a Container with
+ * DynamicBorder framing (tui.md Pattern 1). Resolves with the selected item's
+ * value (taskId), or undefined on Esc / q. Neither pi's select() nor
+ * SelectList handles "q", so the wrapper's handleInput intercepts it before
+ * delegating to the list.
+ */
+async function pickTaskInteractively(
+	ui: ExtensionContext["ui"],
+	title: string,
+	items: SelectItem[],
+): Promise<string | undefined> {
+	return ui.custom<string | undefined>((tui, theme, _kb, done) => {
+		const container = new Container();
+		container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+		container.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0));
+		const selectList = new SelectList(
+			items,
+			Math.min(items.length, 10),
+			{
+				selectedPrefix: (t) => theme.fg("accent", t),
+				selectedText: (t) => theme.fg("accent", t),
+				description: (t) => theme.fg("muted", t),
+				scrollInfo: (t) => theme.fg("dim", t),
+				noMatch: (t) => theme.fg("warning", t),
+			},
+			// The label is a 36-char UUID taskId; the default 32-char primary
+			// column would truncate it, so widen the column to fit.
+			{ minPrimaryColumnWidth: 40, maxPrimaryColumnWidth: 40 },
+		);
+		selectList.onSelect = (item) => done(item.value);
+		selectList.onCancel = () => done(undefined);
+		container.addChild(selectList);
+		container.addChild(new Text(theme.fg("dim", "↑↓ 选择 · Enter 确认 · Esc/q 退出"), 1, 0));
+		container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+		return {
+			render: (w) => container.render(w),
+			invalidate: () => container.invalidate(),
+			handleInput: (data) => {
+				// Key.shift("q") covers Shift+q / Caps Lock "Q"; matchesKey
+				// lowercases its keyId, so "Q" alone would be a no-op alias.
+				if (matchesKey(data, "q") || matchesKey(data, Key.shift("q"))) {
+					done(undefined);
+					return;
+				}
+				selectList.handleInput(data);
+				tui.requestRender();
+			},
+		};
+	});
+}
+
 /** Derive the envelope status from a finished SingleResult. */
 function getTaskStatus(result: SingleResult): SubagentTaskStatus {
 	const stopReason = result.stopReason;
@@ -1703,6 +1806,9 @@ function completeAsyncTask(pi: ExtensionAPI, task: AsyncSubagentTask, result: Si
 				: !result
 					? "internal_error"
 					: undefined);
+	// Record the finish for the no-argument /subagent-result picker before the
+	// notification goes out; failures of the picker list must not affect this.
+	recordCompletedTask(task, status);
 	// Carry the rejection reason into the envelope so internal failures
 	// (e.g. the prompt temp-file write failed) are diagnosable instead of
 	// showing a bare "(no output)".
@@ -2199,15 +2305,26 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand?.("subagent-cancel", {
 		description: "Cancel a running background subagent task (usage: /subagent-cancel <taskId>)",
 		handler: async (args, cmdCtx) => {
-			const taskId = (args ?? "").trim();
+			let taskId = (args ?? "").trim();
 			if (!taskId) {
-				// No argument: list the running tasks so the user knows what to cancel.
-				const running = [...taskRegistry.values()]
-					.filter((t) => t.status === "running")
-					.map((t) => t.taskId);
-				const hint = running.length > 0 ? ` Running tasks: ${running.join(", ")}.` : " No running tasks.";
-				cmdCtx.ui?.notify?.(`No running subagent task with id "(none)".${hint}`, "warning");
-				return;
+				const runningTasks = [...taskRegistry.values()].filter((t) => t.status === "running");
+				// TUI with running tasks: interactive picker (Enter cancels, Esc/q
+				// dismisses without doing anything). Non-TUI and the empty case keep
+				// the original notify fallback.
+				if (cmdCtx.hasUI && cmdCtx.mode === "tui" && runningTasks.length > 0) {
+					const items: SelectItem[] = runningTasks.map((t) =>
+						taskPickerItem(t.taskId, `${t.agentName}: ${truncateTaskDescription(t.task, 60)}`),
+					);
+					const picked = await pickTaskInteractively(cmdCtx.ui, "取消运行中任务 (cancel subagent task)", items);
+					if (picked === undefined) return;
+					taskId = picked;
+				} else {
+					// No argument: list the running tasks so the user knows what to cancel.
+					const running = runningTasks.map((t) => t.taskId);
+					const hint = running.length > 0 ? ` Running tasks: ${running.join(", ")}.` : " No running tasks.";
+					cmdCtx.ui?.notify?.(`No running subagent task with id "(none)".${hint}`, "warning");
+					return;
+				}
 			}
 			if (!cancelTask(taskId, "user")) {
 				cmdCtx.ui?.notify?.(`No running subagent task with id "${taskId}".`, "warning");
@@ -2244,10 +2361,25 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand?.("subagent-result", {
 		description: "Show the full final result of a background subagent task (usage: /subagent-result <taskId>)",
 		handler: async (args, cmdCtx) => {
-			const taskId = (args ?? "").trim();
+			let taskId = (args ?? "").trim();
 			if (!taskId) {
-				cmdCtx.ui?.notify?.("Usage: /subagent-result <taskId> — 查看某子 agent 的完整返回。", "warning");
-				return;
+				// TUI: interactive picker over the most recent finished tasks (Enter
+				// opens the same viewer as the with-argument path below, Esc/q
+				// dismisses without doing anything). Non-TUI keeps the usage hint.
+				if (cmdCtx.hasUI && cmdCtx.mode === "tui") {
+					const recent = listViewableFinishedTasks(5);
+					if (recent.length === 0) {
+						cmdCtx.ui?.notify?.("没有已运行结束的子 agent 任务记录 (no finished subagent tasks)。", "warning");
+						return;
+					}
+					const items: SelectItem[] = recent.map((r) => taskPickerItem(r.taskId, `${r.agentName} · ${STATUS_WORDS[r.status]}`));
+					const picked = await pickTaskInteractively(cmdCtx.ui, "查看已结束任务结果 (subagent result)", items);
+					if (picked === undefined) return;
+					taskId = picked;
+				} else {
+					cmdCtx.ui?.notify?.("Usage: /subagent-result <taskId> — 查看某子 agent 的完整返回。", "warning");
+					return;
+				}
 			}
 			// Refuse mid-flight reads: while the task is in the registry its
 			// session file only holds a partial snapshot.
@@ -2300,7 +2432,7 @@ export default function (pi: ExtensionAPI) {
 						},
 						invalidate: () => md.invalidate(),
 						handleInput: (data: string) => {
-							if (matchesKey(data, Key.enter) || matchesKey(data, Key.escape) || matchesKey(data, "q")) {
+							if (matchesKey(data, Key.enter) || matchesKey(data, Key.escape) || matchesKey(data, "q") || matchesKey(data, Key.shift("q"))) {
 								done(undefined);
 								return;
 							}
