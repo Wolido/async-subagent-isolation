@@ -630,6 +630,10 @@ export function formatDuration(ms: number): string {
  */
 export class SubagentProgressManager {
 	private agents = new Map<string, AgentProgress>();
+	// Last progress timestamp per session, fed by update(); backs the cancel
+	// challenge's "最近进度距今" line. Kept separate from AgentProgress so the
+	// challenge can read it without touching widget render state.
+	private lastActivityAt = new Map<string, number>();
 	private timer: ReturnType<typeof setInterval> | null = null;
 	private ctx: ExtensionContext | null = null;
 	private widgetSet = false;
@@ -653,9 +657,19 @@ export class SubagentProgressManager {
 		if (update.phase !== undefined) agent.phase = update.phase;
 		if (update.currentTool !== undefined) agent.currentTool = update.currentTool;
 		if (update.recentTools !== undefined) agent.recentTools = update.recentTools;
+		this.lastActivityAt.set(sessionId, Date.now());
+	}
+
+	/**
+	 * Last update() time for a session, or undefined when the task has never
+	 * reported progress (the cancel challenge renders that as "尚无进度上报").
+	 */
+	getLastActivityAt(sessionId: string): number | undefined {
+		return this.lastActivityAt.get(sessionId);
 	}
 
 	unregister(sessionId: string): void {
+		this.lastActivityAt.delete(sessionId);
 		if (!this.agents.has(sessionId)) return;
 		this.agents.delete(sessionId);
 		if (this.agents.size === 0) {
@@ -666,6 +680,18 @@ export class SubagentProgressManager {
 		} else {
 			this.refresh();
 		}
+	}
+
+	/**
+	 * Drop every registered task (widget state and last-activity timestamps)
+	 * and stop the refresh timer. Test-isolation hook only: the module-level
+	 * singleton outlives individual tests, so a case that dispatches without
+	 * finishing its tasks would otherwise leak state into later cases.
+	 * Production teardown always goes through per-task unregister.
+	 */
+	resetForTests(): void {
+		for (const id of [...this.agents.keys()]) this.unregister(id);
+		this.lastActivityAt.clear();
 	}
 
 	refresh(): void {
@@ -737,6 +763,14 @@ export class SubagentProgressManager {
 }
 
 const progressManager = new SubagentProgressManager();
+
+/**
+ * Test-isolation hook for the module-level progress singleton (see
+ * SubagentProgressManager.resetForTests). Production code never calls this.
+ */
+export function resetProgressManagerForTests(): void {
+	progressManager.resetForTests();
+}
 
 /**
  * Build the isolated session directory for a subagent.
@@ -1497,6 +1531,14 @@ export interface AsyncSubagentTask {
 	 */
 	cancelledBy?: "user" | "agent";
 	/**
+	 * Why the task was cancelled, supplied by the confirming cancel call
+	 * (action="cancel" + confirm:true requires a non-empty reason). Recorded
+	 * so the cancellation stays auditable: the [subagent-result] envelope body
+	 * quotes it (single-lined and capped at 200 chars). Undefined for user
+	 * cancels and non-cancelled endings.
+	 */
+	cancelReason?: string;
+	/**
 	 * Child process handle, set once runSingleAgent has spawned. Lets the
 	 * session_shutdown handler SIGKILL directly: on "quit" the main process
 	 * exits before the 5s SIGKILL-escalation timer inside runSingleAgent can
@@ -1518,11 +1560,12 @@ export const taskRegistry = new Map<string, AsyncSubagentTask>();
  * /subagent-cancel command and the subagent tool's action="cancel". Returns false when
  * no running task with that id exists.
  */
-function cancelTask(taskId: string, cancelledBy: "user" | "agent"): boolean {
+function cancelTask(taskId: string, cancelledBy: "user" | "agent", reason?: string): boolean {
 	const task = taskRegistry.get(taskId);
 	if (!task || task.status !== "running") return false;
 	task.status = "cancelled";
 	task.cancelledBy = cancelledBy;
+	if (reason) task.cancelReason = reason;
 	task.abortController.abort();
 	return true;
 }
@@ -1534,16 +1577,35 @@ export function truncateTaskDescription(task: string, maxLen = 200): string {
 }
 
 /**
- * Format the in-flight task list (status === "running") shared by the result
- * envelope's 在途 block and the action="cancel" receipt. Deliberately carries
- * no elapsed time: the list answers "what is still running", not "how long has
- * it run".
+ * Format the in-flight task list (status === "running") for the result
+ * envelope's 在途 block. The list is a build-time snapshot; since the
+ * notification may be delivered after the main agent has dispatched new
+ * tasks, the wording is anchored to this envelope's task-end event (an
+ * event the main agent can order against its own dispatch records) instead
+ * of an absolute "right now" claim. Deliberately carries no elapsed time
+ * or clock time: the list answers "what was still running when this task
+ * ended", not "how long has it run" or "what time is it".
  */
 export function formatActiveTasks(): string {
 	const running = [...taskRegistry.values()].filter((t) => t.status === "running");
-	if (running.length === 0) return "当前无在途任务。";
+	if (running.length === 0) return "本任务结束时无其他在途任务。";
 	const lines = running.map((t) => `- ${t.taskId} (${t.agentName}): ${truncateTaskDescription(t.task)}`);
-	return `在途任务: ${running.length}\n${lines.join("\n")}`;
+	return `本任务结束时，其他在途任务: ${running.length}\n${lines.join("\n")}`;
+}
+
+/**
+ * Remaining in-flight list for the action="cancel" confirmation receipt.
+ * NOT shared with the envelope block (formatActiveTasks): at this point no
+ * task has ended — the cancel was merely requested and the cancelled task's
+ * result arrives later — so a "本任务结束" anchor would be wrong here. The
+ * receipt is returned synchronously in the same turn, so anchoring the
+ * snapshot to the cancel request itself is accurate.
+ */
+function formatRemainingTasksAfterCancelRequest(): string {
+	const running = [...taskRegistry.values()].filter((t) => t.status === "running");
+	if (running.length === 0) return "取消请求发出后，已无其他在途任务。";
+	const lines = running.map((t) => `- ${t.taskId} (${t.agentName}): ${truncateTaskDescription(t.task)}`);
+	return `取消请求发出后，其余在途任务: ${running.length}\n${lines.join("\n")}`;
 }
 
 /** A finished async task, recorded when completeAsyncTask removes it from the registry. */
@@ -1696,9 +1758,14 @@ const DETAILS_OUTPUT_MAX_CHARS = 16 * 1024;
  * main agent can tell a deliberate user cancel, an agent-initiated cancel and
  * a session shutdown apart (and does not auto-retry a user cancel).
  */
-function abortedFallbackBody(stopReason?: string, cancelledBy?: "user" | "agent"): string {
+function abortedFallbackBody(stopReason?: string, cancelledBy?: "user" | "agent", cancelReason?: string): string {
 	if (stopReason === "killed_on_shutdown") return "任务因会话关闭被终止（session_shutdown）。";
-	if (cancelledBy === "agent") return "该任务已由主 agent 通过 subagent 工具（action=cancel）取消。";
+	if (cancelledBy === "agent") {
+		const base = "该任务已由主 agent 通过 subagent 工具（action=cancel）取消。";
+		// Single-line and cap the reason: it is model-controlled text inlined
+		// into a notification body. The full value stays on the task record.
+		return cancelReason ? `${base}取消理由: ${truncateTaskDescription(cancelReason, 200)}` : base;
+	}
 	return "该任务已由用户通过 /subagent-cancel 取消，属用户主动操作。请勿自动重新派发；如需重新派发，先询问用户。";
 }
 
@@ -1725,7 +1792,7 @@ export function buildResultEnvelope(
 	// Only genuine failures are labelled "内部错误"; a user cancel or session
 	// shutdown rejection is an expected abort, so it gets a note carrying the
 	// abort's origin (user cancel vs session shutdown).
-	if (!body && errorMessage) body = status === "failure" ? `内部错误: ${errorMessage}` : abortedFallbackBody(stopReason, task.cancelledBy);
+	if (!body && errorMessage) body = status === "failure" ? `内部错误: ${errorMessage}` : abortedFallbackBody(stopReason, task.cancelledBy, task.cancelReason);
 	const lines = [
 		`## [subagent-result] ${task.agentName} ${statusWord} (taskId: ${task.taskId})`,
 		"",
@@ -1739,7 +1806,7 @@ export function buildResultEnvelope(
 		formatActiveTasks(),
 		"",
 		"---",
-		body || (status === "cancelled" ? abortedFallbackBody(stopReason, task.cancelledBy) : "(no output)"),
+		body || (status === "cancelled" ? abortedFallbackBody(stopReason, task.cancelledBy, task.cancelReason) : "(no output)"),
 	];
 	return {
 		content: lines.join("\n"),
@@ -1767,6 +1834,42 @@ function buildDispatchReceipt(agentName: string, taskId: string): string {
 	// [subagent-result] notification) lives in the tool description /
 	// promptGuidelines; the receipt stays a single line.
 	return `已派出 ${agentName}. taskId: ${taskId}`;
+}
+
+/**
+ * Build the two-step-confirmation challenge for action="cancel" (first call,
+ * confirm !== true): a zero-side-effect receipt spelling out what a cancel
+ * would destroy — agent, task summary, elapsed time, last progress — plus the
+ * exact second-call shape. The main agent must confirm deliberately instead
+ * of reflexively cancelling a healthy in-flight task.
+ */
+function buildCancelChallenge(task: AsyncSubagentTask): string {
+	const lastActivityAt = progressManager.getLastActivityAt(task.taskId);
+	let progressLine: string;
+	if (lastActivityAt === undefined) {
+		progressLine = "- 最近进度: 尚无进度上报（no progress reported yet）。";
+	} else {
+		// Read the clock once and derive both language phrases from that single
+		// value — two Date.now() reads could straddle a second boundary and
+		// disagree ("5 秒前 (6s ago)").
+		const ageSec = Math.max(0, Math.floor((Date.now() - lastActivityAt) / 1000));
+		// Under an hour, plain seconds read best; past that, fold into
+		// formatDuration (H:MM:SS) instead of a huge second count.
+		progressLine =
+			ageSec < 3600
+				? `- 最近进度更新: ${ageSec} 秒前 (last activity ${ageSec}s ago)。`
+				: `- 最近进度更新: ${formatDuration(ageSec * 1000)} 前 (last activity ${formatDuration(ageSec * 1000)} ago)。`;
+	}
+	return [
+		`取消确认请求 (cancel confirmation required): 任务 ${task.taskId} 仍在运行；本次调用未取消任何东西。`,
+		`- agent: ${task.agentName}`,
+		`- 任务: ${truncateTaskDescription(task.task)}`,
+		`- 已运行: ${formatDuration(Date.now() - task.startedAt)} (elapsed since dispatch)`,
+		progressLine,
+		"",
+		"⚠️ 取消将丢弃该任务的全部在途进度，且不可撤销（cancelling discards all in-flight progress and cannot be undone）。",
+		`如确认取消，再次调用 subagent 工具: action="cancel" + taskId="${task.taskId}" + confirm:true + reason（reason 必填，说明取消理由）。`,
+	].join("\n");
 }
 
 /**
@@ -1820,7 +1923,7 @@ function completeAsyncTask(pi: ExtensionAPI, task: AsyncSubagentTask, result: Si
 		const envelope = buildResultEnvelope(task, result, status, stopReason, errorMessage);
 		pi.sendMessage(
 			{ customType: "subagent-result", content: envelope.content, display: true, details: envelope.details },
-			{ deliverAs: "followUp", triggerTurn: true },
+			{ deliverAs: "steer", triggerTurn: true },
 		);
 	} catch {
 		// The session may already be gone (e.g. after session_shutdown); the
@@ -1851,6 +1954,15 @@ const SubagentParams = Type.Object({
 	taskId: Type.Optional(Type.String({
 		description: "taskId of the running background subagent task to cancel (required for action=cancel; from the dispatch receipt).",
 	})),
+	confirm: Type.Optional(Type.Boolean({
+		description:
+			'Set true to actually execute an action=cancel after reviewing the challenge returned by the first call. Default: false — the first action=cancel call only returns a challenge (confirmRequired) and cancels nothing.',
+		default: false,
+	})),
+	reason: Type.Optional(Type.String({
+		description:
+			"Why the task is being cancelled (required and must be non-empty when confirm=true). Recorded on the task and quoted in the [subagent-result] envelope.",
+	})),
 	sessionId: Type.Optional(Type.String({
 		pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
 		description: "仅用于复用此前 dispatch 回执返回的 UUID v7；省略则自动生成",
@@ -1871,7 +1983,7 @@ export default function (pi: ExtensionAPI) {
 			"",
 			"ACTIONS (action parameter, default \"dispatch\"):",
 			"- dispatch: delegate the task (async in TUI mode, blocking otherwise).",
-			"- cancel: cancel a running background task by taskId.",
+			"- cancel: request cancellation of a running background task by taskId (two-step: the first call returns a challenge; confirm:true + reason executes).",
 			"- sessionId: only set when resuming (复用) a previously dispatched task. Must be the UUID v7 from a previous dispatch receipt. Omit otherwise; a new UUID v7 is generated automatically.",
 			"",
 			"ASYNC (TUI mode): returns immediately with a dispatch receipt (taskId + session id).",
@@ -1884,9 +1996,18 @@ export default function (pi: ExtensionAPI) {
 			"  receipt to continue the same task later.",
 			"",
 			"CANCEL DISCIPLINE: cancel a task (action=\"cancel\") only when it is clearly",
-			"wrong (错误) or no longer needed (不再需要). Do NOT cancel just because it is",
-			"taking a long time — background subagents are expected to run long; be patient",
-			"(耐心等待) and let the [subagent-result] notification arrive.",
+			"wrong (错误) or no longer needed (不再需要). Agent-initiated cancel is a",
+			"two-step confirmation: the first action=\"cancel\" call only returns a",
+			"challenge (confirmRequired) with elapsed time and last progress, and",
+			"cancels nothing; to actually cancel, call action=\"cancel\" again with the",
+			"same taskId + confirm:true + a non-empty reason (理由). Do NOT cancel just",
+			"because it is taking a long time — background subagents are expected to",
+			"run long; be patient (耐心等待) and let the [subagent-result]",
+			"notification arrive.",
+			"",
+			"WAITING: 对在途任务不存在查询/催办/状态确认类动作（no query, nag or status",
+			"action for in-flight tasks）——没有提供这类动作是刻意设计。等待 = 不发",
+			"起任何工具调用，直接结束回合（waiting means no tool call: end the turn）。",
 			"",
 			"SYNC (non-TUI modes): waits for the subagent to finish and returns the full",
 			"result directly (no notification follows).",
@@ -1902,7 +2023,10 @@ export default function (pi: ExtensionAPI) {
 			"subagent: Dispatch subagents driven by task dependencies — delegate only work whose result you actually need, prefer reusing the session id from the receipt to continue a previous subagent task, and keep independent work in the main context.",
 			"subagent: The session id is the lowercase UUID v7 returned in the dispatch receipt (e.g. `019ffdd3-3eb5-733d-b481-a53e5292bd00`). Passing any other string (slug, UUID v4, etc.) is rejected; only pass sessionId when resuming a previously dispatched task.",
 			"subagent: A [subagent-result] notification with status 已取消 (cancelled) can come from the user (/subagent-cancel) or from you (action=\"cancel\"); the envelope body states the source. A user-initiated cancel is a deliberate user action, so do NOT automatically retry or re-dispatch it; ask the user before re-dispatching.",
+			"subagent: Cancelling a background task is a two-step confirmation: the first action=\"cancel\" call only returns a challenge (confirmRequired) and cancels nothing; to actually cancel, call again with the same taskId + confirm:true + a non-empty reason explaining why. Never cancel just because a task runs long.",
+			"subagent: Waiting for a background task means making NO tool call at all and ending the turn (等待 = 不发起任何工具调用、直接结束回合); there is deliberately no query, nag or status action for in-flight tasks — results arrive on their own as [subagent-result] notifications.",
 			"subagent: Before dispatching multiple tasks in parallel, consider whether they touch the same files or code areas — parallel tasks modifying the same files can conflict. When in doubt, dispatch sequentially or ask the user.",
+			"subagent: The in-flight block in a [subagent-result] envelope is a build-time snapshot (构建时刻快照) anchored to that task's end event and may be stale (可能滞后) by the time you process the notification; if it conflicts with dispatch records you issued yourself this turn, trust your dispatch records (冲突时以派发记录为准).",
 		],
 		parameters: SubagentParams,
 
@@ -1942,16 +2066,41 @@ export default function (pi: ExtensionAPI) {
 					};
 				}
 				// Only registry (async/TUI) tasks are cancellable; sync-mode tasks are
-				// awaited inline and never enter the registry.
-				if (!cancelTask(taskId, "agent")) {
+				// awaited inline and never enter the registry. Existence is checked
+				// BEFORE the confirm/reason gates so a wrong id always fails the same
+				// way regardless of confirmation state.
+				const task = taskRegistry.get(taskId);
+				if (!task || task.status !== "running") {
 					return {
 						content: [{ type: "text", text: `无此运行中任务: ${taskId} (no running subagent task with this id).` }],
 						details: { taskId, cancelled: false },
 						isError: true,
 					};
 				}
+				// Two-step confirmation: the first call (confirm !== true) only
+				// returns a challenge spelling out what would be destroyed — zero
+				// side-effects (no status change, no abort, no notification). This
+				// structural friction exists because the main agent used to fire
+				// reflexive cancels at healthy in-flight tasks.
+				if (params.confirm !== true) {
+					return {
+						content: [{ type: "text", text: buildCancelChallenge(task) }],
+						details: { taskId, cancelled: false, confirmRequired: true },
+					};
+				}
+				// A confirmed cancel must justify itself: the reason is recorded on
+				// the task record and quoted in the [subagent-result] envelope body.
+				const reason = typeof params.reason === "string" ? params.reason.trim() : "";
+				if (!reason) {
+					return {
+						content: [{ type: "text", text: 'Missing or empty required parameter: "reason" (confirm:true 时 reason 必填，不能为空).' }],
+						details: { taskId, cancelled: false },
+						isError: true,
+					};
+				}
+				cancelTask(taskId, "agent", reason);
 				return {
-					content: [{ type: "text", text: `已发送取消请求: ${taskId} (cancel request sent); 结果稍后以 [subagent-result] 通知返回。\n${formatActiveTasks()}` }],
+					content: [{ type: "text", text: `已发送取消请求: ${taskId} (cancel request sent); 结果稍后以 [subagent-result] 通知返回。\n${formatRemainingTasksAfterCancelRequest()}` }],
 					details: { taskId, cancelled: true },
 				};
 			}

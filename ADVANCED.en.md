@@ -130,7 +130,7 @@ Once the subagent finishes, its result is pushed into the conversation:
 - 耗时: 02:34 · 用量: 5 turns/↑12.5k/↓3.2k/$0.0042
 - 会话: 01912345-6789-7abc-8def-0123456789ab
 
-在途任务: 1
+本任务结束时，其他在途任务: 1
 - 01912345-aaaa-7bbb-8ccc-0123456789ab (writer): 更新 README。
 
 ---
@@ -143,20 +143,20 @@ Status enumeration: **成功** (success, exit=0) / **失败** (failure, exit≠0
 
 "Cancelled" has three sub-cases with different envelope bodies:
 - User cancelled via `/subagent-cancel` (cancelledBy: user) → body states this is a deliberate user action; the main agent must NOT auto-retry and must ask the user before re-dispatching.
-- Main agent cancelled via the `subagent` tool with `action="cancel"` (cancelledBy: agent) → body states the task was cancelled by the main agent via the subagent tool (action=cancel).
+- Main agent cancelled via the `subagent` tool with `action="cancel"` (cancelledBy: agent) → body states the task was cancelled by the main agent via the subagent tool (action=cancel), followed by "取消理由: ..." (the reason given at the confirmation step).
 - Session shutdown killed the task (cancelledBy: none) → body states the task was terminated by session_shutdown.
 
 When the main agent receives a "已取消" notification, it should distinguish the origin: a user cancel must never be auto-retried (ask the user first); an agent cancel is its own decision — do not re-dispatch without new information; a session-shutdown cancel can be re-dispatched after the session resumes, at the agent's discretion.
 
-**In-flight block**: the "在途任务" list in the envelope's metadata section lists the **other** background tasks still running (this task is removed from the registry before the envelope is built, so it never appears in its own list). Its format is `在途任务: N` followed by one `- taskId (agent): task description` line per task, or `当前无在途任务。` when none remain. It deliberately carries **no elapsed time** (it answers "what is still running", not "how long has it run"). The main agent uses it to know how many tasks are still outstanding — while the count is non-zero, do not report "all done" to the user.
+**In-flight block**: the "在途任务" list in the envelope's metadata section lists the **other** background tasks still running (this task is removed from the registry before the envelope is built, so it never appears in its own list). Its format is `本任务结束时，其他在途任务: N` followed by one `- taskId (agent): task description` line per task, or `本任务结束时无其他在途任务。` when none remain. It deliberately carries **no elapsed time and no clock time** (it answers "what else was running when this task ended", not "how long has it run" or "what time is it"). The block is a **build-time snapshot** whose wording is anchored to this task's end event rather than an absolute "now" — between envelope construction and delivery the main agent may have dispatched new tasks, making the snapshot stale; on conflict with dispatch records the main agent issued itself this turn, the dispatch records prevail. The main agent uses it to know how many tasks are still outstanding — while the count is non-zero, do not report "all done" to the user.
 
 The full output enters the LLM context (not truncated). The `details` carries structured data (taskId, agent, status, exitCode, stopReason, durationMs (required, run time in milliseconds), usage, sessionId, full output) for programmatic consumption; it does not enter the LLM context.
 
 ### Notification delivery
 
-Notifications are sent via `pi.sendMessage` with `deliverAs: "followUp"` + `triggerTurn: true`:
+Notifications are sent via `pi.sendMessage` with `deliverAs: "steer"` + `triggerTurn: true`:
 - When the main agent is idle, it triggers a new conversation turn immediately.
-- When the main agent is busy, the notification is queued and triggers a turn after the current one finishes.
+- When the main agent is busy, the notification is queued and delivered after the current assistant turn's tool calls finish, before the next LLM call (steer semantics) — it is not held back until the whole turn ends, so it cannot lag behind tasks dispatched later in the same turn.
 
 The main agent is trained (via `promptGuidelines`) to recognize the `[subagent-result]` prefix as a system notification, not a user request.
 
@@ -194,9 +194,9 @@ To cancel all running tasks at once:
 
 Takes no arguments. Unlike `/subagent-cancel`, which cancels a single task by taskId, this cancels every running task. Each cancelled task still emits its own "已取消" `[subagent-result]` notification (the main agent receives N cancelled envelopes). On success it notifies "已取消全部 N 个运行中任务"; with no running tasks it notifies "无运行中任务可取消". The cancel source is likewise recorded as `cancelledBy: "user"`.
 
-**Path 2: Main agent `subagent` tool with `action="cancel"`**
+**Path 2: Main agent `subagent` tool with `action="cancel"` (two-step confirmation)**
 
-The main agent can call the `subagent` tool with `action="cancel"` (parameter `taskId`) to cancel a dispatched background task. The cancel source is recorded as `cancelledBy: "agent"`. On success, the tool returns the remaining in-flight task list (same format as the `[subagent-result]` envelope's in-flight block); the cancelled task's final result arrives later as a `[subagent-result]` notification.
+The main agent can call the `subagent` tool with `action="cancel"` (parameter `taskId`) to cancel a dispatched background task, but the first call does not execute: it returns a zero-side-effect challenge receipt (`details.confirmRequired: true`) listing the agent name, task summary, elapsed time and last progress age (or "尚无进度上报" when never reported), plus a warning that cancelling discards all in-flight progress and cannot be undone. To actually cancel, call again with `action="cancel"` + the same `taskId` + `confirm:true` + a non-empty `reason` (a missing or blank reason is an error with zero side-effects). On execution the reason is recorded on the task record and quoted in the cancelled envelope body ("取消理由: ..."). The cancel source is recorded as `cancelledBy: "agent"`. On success, the tool returns the remaining in-flight task list (same per-line format as the `[subagent-result]` envelope's in-flight block, but anchored to the moment the cancel request was issued — the task has not ended at that point, so the envelope's "本任务结束" anchor wording is not used); the cancelled task's final result arrives later as a `[subagent-result]` notification.
 
 **Usage discipline:** The main agent should only use `action="cancel"` when:
 - The task is clearly wrong (wrong agent, incorrect task description, etc.).

@@ -358,7 +358,11 @@ describe("异步化改造 - TDD 红阶段", () => {
 			expect(message.customType).toBe("subagent-result");
 
 			// deliverAs 和 triggerTurn
-			expect(options.deliverAs).toBe("followUp");
+			// 契约迁移（S1 通知滞后修复）：deliverAs 由 "followUp"（等整个 agent run 结束
+			// 才送达，导致 [subagent-result] 通知滞后）改为 "steer"（当前 assistant turn
+			// 的工具调用执行完后、下一次 LLM 调用前送达）；triggerTurn: true 保留。
+			// 当前实现仍为 "followUp"，本断言在实现完成前 RED。
+			expect(options.deliverAs).toBe("steer");
 			expect(options.triggerTurn).toBe(true);
 
 			// content 包含 [subagent-result] 前缀

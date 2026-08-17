@@ -95,6 +95,25 @@ describe("renderResult — cancel 回执无 results 字段（#1 修复，契约�
 		expect(text).toContain("ghost");
 		expect(text).not.toContain("(no subagent result)");
 	});
+
+	it("cancel 质询回执（confirmRequired:true，无 results）渲染不抛 TypeError 且透传质询正文（防御性锁定，预期保持绿）", () => {
+		// Arrange: 两步确认契约的质询回执形状 —— details 带 confirmRequired 标记、无 results。
+		// renderResult 的文本回退对任意无 results details 生效，本用例防御实现动渲染
+		// 管线时破窗（质询回执绝不能落入富渲染分支或 "(no subagent result)" 占位）。
+		const challengeResult = {
+			content: [{ type: "text", text: "取消确认请求: task-1 正在运行（tester）。取消将丢弃全部在途进度，不可撤销。如确认，请再次调用 action=\"cancel\" + 同一 taskId + confirm:true + reason。" }],
+			details: { taskId: "task-1", cancelled: false, confirmRequired: true },
+		};
+
+		const render = () => renderResult(challengeResult, { expanded: false }, mockTheme, context);
+		expect(render).not.toThrow();
+
+		const lines = render().render(80);
+		const text = lines.join("\n");
+		expect(text).toContain("task-1");
+		expect(text).toContain("取消确认请求");
+		expect(text).not.toContain("(no subagent result)");
+	});
 });
 
 describe("renderResult — results.length===1 富渲染（契约锁定：实现已满足）", () => {

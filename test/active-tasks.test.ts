@@ -138,6 +138,35 @@ async function raceWithTimeout<T>(
 	}
 }
 
+// ---------------------------------------------------------------------------
+// S2 事件锚定措辞断言助手（锁语义不锁字面；按行匹配防跨行假绿）
+// ---------------------------------------------------------------------------
+
+/** 时钟时间模式（H:MM:SS 或 MM:SS）——在途块刻意不含任何时间信息。 */
+const CLOCK_TIME = /\d{1,2}:\d{2}(:\d{2})?/;
+/** 旧绝对句式（S2 要求移除）。 */
+const ABSOLUTE_EMPTY_WORDING = /当前无在途任务/;
+
+/** 从信封正文提取在途块（"- 会话:" 行与 "---" 分隔线之间即 formatActiveTasks() 输出）。 */
+function extractInFlightBlock(content: string): string {
+	const m = content.match(/- 会话:[^\n]*\n+([\s\S]*?)\n+---/);
+	return m ? m[1] : "";
+}
+
+/**
+ * 在途块内是否存在"事件锚定"行：同一行同时含 (a) 对本信封所属任务的指代、
+ * (b) 结束事件词、(c) 在途语义。empty=true 时还要求同行含否定词；empty=false
+ * 时要求锚定行不含否定词（非空时不得谎称"无在途"）。
+ */
+function hasEventAnchoredLine(block: string, empty: boolean): boolean {
+	return block.split("\n").some((line) => {
+		const anchored = /本任务|该任务|此任务|本信封/.test(line) && /结束|完成/.test(line) && /在途/.test(line);
+		if (!anchored) return false;
+		const negated = /无|没有|再无/.test(line);
+		return empty ? negated : !negated;
+	});
+}
+
 describe("在途任务台账", () => {
 	let tmpBase: string;
 	let agentDir: string;
@@ -335,11 +364,12 @@ describe("在途任务台账", () => {
 			// Act
 			const result = await executeSubagentTool!("call-1", { action: "status" }, undefined, undefined, ctx);
 
-			// Assert: 拒绝，且不得出现空在途文案
+			// Assert: 拒绝，且不得出现在途块措辞（S2 迁移后本守卫仍需有效：旧绝对句
+			// "当前无在途任务"与新版事件锚定措辞（本任务结束/在途任务）均不得出现）
 			expect(result.isError).toBe(true);
 			const text = result.content.map((c: any) => c.text).join("");
 			expect(text).toMatch(/Invalid action/);
-			expect(text).not.toMatch(/当前无在途任务/);
+			expect(text).not.toMatch(/当前无在途任务|本任务结束|在途任务/);
 		});
 	});
 
@@ -380,11 +410,19 @@ describe("在途任务台账", () => {
 			expect(pi.sendMessage).toHaveBeenCalled();
 			const [message] = pi._sendMessageCalls[0];
 			const content: string = message.content;
-			
-			expect(content).toMatch(/在途任务:\s*1/);
-			expect(content).toContain("019ffdd3-3eb5-733d-b481-a53e5292bd16");
-			expect(content).toContain("tester");
-			expect(content).toMatch(/任务2/);
+
+			// 契约迁移（S2 事件锚定措辞）：在途块从绝对陈述改为锚定"本信封所属任务
+			// 结束事件"的限定陈述。锁语义不锁字面：块内须有事件锚定行（本任务+结束
+			// +在途 同行），其余在途任务的 taskId/agent/摘要 不丢失，且不含时钟时间。
+			// 当前实现仍为无锚定的"在途任务: N"→ 本断言在实现完成前 RED。
+			const block = extractInFlightBlock(content);
+			expect(block, "信封应包含在途块（- 会话: 行与 --- 分隔线之间）").not.toBe("");
+			expect(hasEventAnchoredLine(block, false), "非空在途块应有锚定本任务结束事件的限定陈述").toBe(true);
+			expect(block).not.toMatch(ABSOLUTE_EMPTY_WORDING);
+			expect(block).not.toMatch(CLOCK_TIME);
+			expect(block).toContain("019ffdd3-3eb5-733d-b481-a53e5292bd16");
+			expect(block).toContain("tester");
+			expect(block).toMatch(/任务2/);
 		});
 
 		it("信封在途列表应排除刚完成的任务自己", async () => {
@@ -407,13 +445,19 @@ describe("在途任务台账", () => {
 			endProcess(allProcs[0], 0);
 			await vi.advanceTimersByTimeAsync(1000);
 
-			// Assert: envelope should show 0 active tasks (self excluded)
+			// Assert: envelope should show empty in-flight block (self excluded)
 			expect(pi.sendMessage).toHaveBeenCalled();
 			const [message] = pi._sendMessageCalls[0];
 			const content: string = message.content;
-			
-			// Should contain "在途任务: 0" (or no active tasks section if 0)
-			expect(content).toMatch(/在途任务:\s*0|当前无在途任务/);
+
+			// 契约迁移（S2 事件锚定措辞）：空在途由绝对句"当前无在途任务"改为锚定
+			// 本任务结束事件的限定表述（如"本任务结束时无其他在途任务"）。当前实现
+			// 仍为旧绝对句 → 本断言在实现完成前 RED。
+			const block = extractInFlightBlock(content);
+			expect(block, "信封应包含在途块（- 会话: 行与 --- 分隔线之间）").not.toBe("");
+			expect(hasEventAnchoredLine(block, true), "空在途块应有锚定本任务结束事件的限定陈述").toBe(true);
+			expect(block).not.toMatch(ABSOLUTE_EMPTY_WORDING);
+			expect(block).not.toMatch(CLOCK_TIME);
 			
 			// The header contains the completed task's ID, but the active tasks list should not
 			// Check that the self-excluded task id appears in header but not in active tasks section
@@ -431,6 +475,9 @@ describe("在途任务台账", () => {
 	// 5. action=cancel 返回在途列表
 	// ================================================================
 	describe("5. action=cancel 返回在途列表", () => {
+		// 契约变更（destructive-action 两步确认）：agent 发起的 cancel 首次调用
+		// 只返回质询回执，confirm:true + 非空 reason 才执行。以下用例已迁移为
+		// 确认调用，钉住确认成功回执仍携带在途列表。
 		it("取消成功后应返回剩余在途任务信息", async () => {
 			const { executeSubagentTool, executeCancelTool } = setupExtension();
 			expect(executeCancelTool, "subagent tool should be registered (cancel dispatched via action param)").toBeDefined();
@@ -457,8 +504,8 @@ describe("在途任务台账", () => {
 
 			expect(taskRegistry.size).toBe(2);
 
-			// Act: cancel the first task
-			const result = await executeCancelTool!("call-3", { taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd14" }, undefined, undefined, ctx);
+			// Act: cancel the first task（confirm:true + reason，两步确认的第二步）
+			const result = await executeCancelTool!("call-3", { taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd14", confirm: true, reason: "任务目标已改变" }, undefined, undefined, ctx);
 
 			// Assert: return value should contain remaining active tasks
 			const text = result.content.map((c: any) => c.text).join("");
@@ -492,8 +539,8 @@ describe("在途任务台账", () => {
 			);
 			await raceWithTimeout(executePromise2, 200);
 
-			// Act: cancel the first task
-			const result = await executeCancelTool!("call-3", { taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd19" }, undefined, undefined, ctx);
+			// Act: cancel the first task（confirm:true + reason）
+			const result = await executeCancelTool!("call-3", { taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd19", confirm: true, reason: "任务目标已改变" }, undefined, undefined, ctx);
 
 			// Assert: should contain "keep-me" but not "cancel-me" in active tasks
 			const text = result.content.map((c: any) => c.text).join("");
@@ -543,8 +590,14 @@ describe("在途任务台账", () => {
 			expect(content).toContain("任务:"); // task field
 			expect(content).toMatch(/回归测试任务/); // task description
 			
-			// New active tasks section should be added (even if 0)
-			expect(content).toMatch(/在途任务|当前无在途任务/);
+			// 在途块仍存在，但措辞已迁移（S2 事件锚定）：空在途为锚定本任务结束
+			// 事件的限定表述，不再用绝对句"当前无在途任务"，不含时钟时间。
+			// 当前实现仍为旧绝对句 → 本断言在实现完成前 RED。
+			const block = extractInFlightBlock(content);
+			expect(block, "信封应包含在途块（- 会话: 行与 --- 分隔线之间）").not.toBe("");
+			expect(hasEventAnchoredLine(block, true), "空在途块应有锚定本任务结束事件的限定陈述").toBe(true);
+			expect(block).not.toMatch(ABSOLUTE_EMPTY_WORDING);
+			expect(block).not.toMatch(CLOCK_TIME);
 		});
 
 		it("取消信封应仍包含 cancelledBy 字段", async () => {
@@ -562,8 +615,9 @@ describe("在途任务台账", () => {
 			);
 			await raceWithTimeout(executePromise, 200);
 
-			// Act: cancel via tool
-			await executeCancelTool!("call-2", { taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd1c" }, undefined, undefined, ctx);
+			// Act: cancel via tool（confirm:true + reason，两步确认的第二步；
+			// 契约变更迁移：原为无 confirm 的单步调用）
+			await executeCancelTool!("call-2", { taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd1c", confirm: true, reason: "任务目标已改变" }, undefined, undefined, ctx);
 			endProcess(allProcs[0], null, "SIGTERM");
 			await vi.advanceTimersByTimeAsync(1000);
 
@@ -573,8 +627,15 @@ describe("在途任务台账", () => {
 			expect(message.details.cancelledBy).toBe("agent");
 			
 			// And should contain active tasks section
+			// 契约迁移（S2 事件锚定措辞）：取消唯一任务后在途为空，空在途块应为锚定
+			// 本任务结束事件的限定表述，不再用绝对句"当前无在途任务"。
+			// 当前实现仍为旧绝对句 → 本断言在实现完成前 RED。
 			const content: string = message.content;
-			expect(content).toMatch(/在途任务|当前无在途任务/);
+			const block = extractInFlightBlock(content);
+			expect(block, "信封应包含在途块（- 会话: 行与 --- 分隔线之间）").not.toBe("");
+			expect(hasEventAnchoredLine(block, true), "空在途块应有锚定本任务结束事件的限定陈述").toBe(true);
+			expect(block).not.toMatch(ABSOLUTE_EMPTY_WORDING);
+			expect(block).not.toMatch(CLOCK_TIME);
 		});
 	});
 });

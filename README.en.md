@@ -114,7 +114,7 @@ The subagent runs in a background process. A progress widget appears above the T
 When the subagent finishes, its result is pushed as a **`[subagent-result]` system notification** (a system message, not a user request):
 
 - If the main agent is **idle**, the notification triggers a new turn immediately.
-- If the main agent is **busy**, it is queued and triggers a turn after the current one finishes.
+- If the main agent is **busy**, it is queued and delivered with steer semantics — after the current assistant turn's tool calls finish, before the next LLM call — without waiting for the whole turn to end.
 
 Results arrive automatically — **no polling**. In-flight task information is provided directly by the `[subagent-result]` notification envelope; `action="status"` was removed as a cleanup in v1.2.0.
 
@@ -146,7 +146,7 @@ User runs /subagent-result <taskId> to read the full output
 | Tool | Purpose | Key constraint |
 |------|---------|----------------|
 | `subagent` | Single-entry tool (`action` parameter); `action="dispatch"` (default) dispatches asynchronously (TUI mode), falls back to sync in non-TUI | Receipt ≠ result; results arrive as notifications, don't poll |
-| `subagent` `action="cancel"` | Main agent cancels one in-flight task | Only when clearly wrong or no longer needed; never for being slow |
+| `subagent` `action="cancel"` | Main agent cancels one in-flight task (two-step confirmation: first call returns a challenge; `confirm:true` + a non-empty `reason` executes) | Only when clearly wrong or no longer needed; never for being slow |
 
 > **v1.2.0 note**: the `subagent` tool's `action="status"` has been removed as a cleanup. In-flight task information is now provided by the `[subagent-result]` notification envelope's in-flight block, with no active-query entry point.
 
@@ -172,7 +172,7 @@ The `[subagent-result]` notification is **self-contained** — it carries everyt
 - 耗时: 02:34 · 用量: 5 turns/↑12.5k/↓3.2k/$0.0042
 - 会话: 01912345-6789-7abc-8def-0123456789ab
 
-在途任务: 1
+本任务结束时，其他在途任务: 1
 - 01912345-aaaa-7bbb-8ccc-0123456789ab (writer): 更新 README。
 
 ---
@@ -181,7 +181,7 @@ The `[subagent-result]` notification is **self-contained** — it carries everyt
 
 - **Status**: `成功` (success) / `失败` (failure) / `超时` (timeout) / `已取消` (cancelled).
 - **Duration**: the subagent's real run time (process start to finish; `MM:SS`, or `H:MM:SS` at 1h+), shown for all four states. For cancellations or internal errors with no result, it is measured from dispatch time.
-- **In-flight block**: lists the other background tasks still running (not itself), so the main agent knows how many are outstanding — while the count is non-zero, do not report "all done" to the user.
+- **In-flight block**: a build-time snapshot anchored to this task's end event (excluding itself), listing the other background tasks still running when this task ended; it may be stale by delivery time — when it conflicts with dispatch records issued this turn, the dispatch records prevail. The main agent learns how many are outstanding — while the count is non-zero, do not report "all done" to the user.
 - **Full result**: the body enters the LLM context in full, untruncated.
 
 In the TUI, the user sees a **tinted summary card**, not the full result: success green (✓), failure red (✗), timeout/cancelled yellow. The card shows the agent, status, taskId, duration, and usage summary (duration included for all four states), plus the hint `查看全文: /subagent-result <taskId>`; the full text lives in the task's session file.
@@ -196,7 +196,7 @@ Async mode introduces a few rules, baked into the tool prompts and implementatio
 
 - **Cancel-origin distinction**: `已取消` (cancelled) has three origins — user (`/subagent-cancel`), main agent (`subagent` tool with `action="cancel"`), and session shutdown (`session_shutdown`). A user-initiated cancel must **never be auto-retried**; ask the user first.
 - **No polling**: results arrive automatically as notifications; in-flight task information is provided directly by the `[subagent-result]` notification envelope, with no active-query entry point.
-- **Anti-abuse cancellation**: `action="cancel"` ships with prompt guidance — cancel only when the task is clearly wrong or no longer needed, never just because it's slow (background subagents are expected to run long).
+- **Anti-abuse cancellation**: `action="cancel"` is a two-step confirmation (the first call only returns a zero-side-effect challenge with elapsed time and last progress; `confirm:true` + a non-empty `reason` executes, and the reason is recorded on the task and quoted in the cancelled envelope body), with prompt guidance — cancel only when the task is clearly wrong or no longer needed, never just because it's slow (background subagents are expected to run long). Waiting means making no tool call at all and ending the turn; there is deliberately no query, nag or status action for in-flight tasks.
 - **Resource-conflict discipline**: before dispatching multiple tasks in parallel, consider whether they touch the same files or code areas; when in doubt, dispatch sequentially or ask the user.
 - **Subagents cannot call the subagent tool**: a subagent (depth ≥ 1) can never call any `subagent` action (including `action="cancel"`); delegation depth is capped at 1.
 - **TUI async / non-TUI sync fallback**: only TUI mode takes the async path; print/json and other non-TUI modes fall back to synchronous blocking.

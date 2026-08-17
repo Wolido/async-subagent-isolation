@@ -717,3 +717,85 @@ describe("SubagentProgressManager — aligned columns in widget rows", () => {
 		[TASK_1, TASK_2, TASK_3].forEach((id) => manager.unregister(id));
 	});
 });
+
+describe("SubagentProgressManager — 最近进度时间（cancel 质询的 lastActivity 来源，红阶段契约 6）", () => {
+	// API 形状说明：契约只锁行为语义（update 后可查询到 lastActivity 类信息；
+	// 从未 update 的任务返回"无进度"语义），具体 API 由实现定。测试以
+	// getLastActivityAt(sessionId): number | undefined 为建议形状钉住语义；
+	// 若实现选用其他名字/形状，需同步改这些断言（行为语义不得变）。
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("update() 后应可查询到最近进度时间戳（≈ update 时刻，RED：当前无此查询能力）", () => {
+		const manager = new SubagentProgressManager();
+		const ctx = createMockCtx();
+		manager.register(ctx, "s1", "agent-a");
+
+		const before = Date.now();
+		manager.update("s1", { phase: "thinking" });
+		const after = Date.now();
+
+		const query = (manager as any).getLastActivityAt;
+		expect(typeof query, "进度管理器应暴露最近进度时间查询方法").toBe("function");
+		const ts = query.call(manager, "s1");
+		expect(typeof ts, "update 后应能查询到时间戳").toBe("number");
+		expect(ts).toBeGreaterThanOrEqual(before);
+		expect(ts).toBeLessThanOrEqual(after);
+
+		manager.unregister("s1");
+	});
+
+	it("从未 update 的已注册任务应返回「无进度」语义（undefined，RED）", () => {
+		const manager = new SubagentProgressManager();
+		const ctx = createMockCtx();
+		manager.register(ctx, "s1", "agent-a");
+
+		const query = (manager as any).getLastActivityAt;
+		expect(typeof query, "进度管理器应暴露最近进度时间查询方法").toBe("function");
+		expect(query.call(manager, "s1"), "从未 update 的任务不得有进度时间戳").toBeUndefined();
+
+		manager.unregister("s1");
+	});
+
+	it("再次 update 应推进最近进度时间戳（RED）", () => {
+		const manager = new SubagentProgressManager();
+		const ctx = createMockCtx();
+		manager.register(ctx, "s1", "agent-a");
+
+		const query = (manager as any).getLastActivityAt;
+		expect(typeof query, "进度管理器应暴露最近进度时间查询方法").toBe("function");
+
+		manager.update("s1", { phase: "thinking" });
+		const first = query.call(manager, "s1");
+
+		vi.advanceTimersByTime(5000);
+		manager.update("s1", { phase: "tooling:bash" });
+		const second = query.call(manager, "s1");
+
+		expect(typeof first).toBe("number");
+		expect(typeof second).toBe("number");
+		expect(second).toBeGreaterThan(first);
+
+		manager.unregister("s1");
+	});
+
+	it("unregister 后查询应回到「无进度」语义（不泄漏已注销任务的时间戳，RED）", () => {
+		const manager = new SubagentProgressManager();
+		const ctx = createMockCtx();
+		manager.register(ctx, "s1", "agent-a");
+
+		const query = (manager as any).getLastActivityAt;
+		expect(typeof query, "进度管理器应暴露最近进度时间查询方法").toBe("function");
+
+		manager.update("s1", { phase: "thinking" });
+		manager.unregister("s1");
+
+		expect(query.call(manager, "s1")).toBeUndefined();
+	});
+});

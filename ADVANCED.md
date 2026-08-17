@@ -130,7 +130,7 @@ TUI 模式下 `subagent` 立即返回如下回执（不是结果！）：
 - 耗时: 02:34 · 用量: 5 turns/↑12.5k/↓3.2k/$0.0042
 - 会话: 01912345-6789-7abc-8def-0123456789ab
 
-在途任务: 1
+本任务结束时，其他在途任务: 1
 - 01912345-aaaa-7bbb-8ccc-0123456789ab (writer): 更新 README。
 
 ---
@@ -143,20 +143,20 @@ TUI 模式下 `subagent` 立即返回如下回执（不是结果！）：
 
 "已取消"分三种情况，信封正文不同：
 - 用户通过 `/subagent-cancel` 取消（cancelledBy: user）→ 正文注明"属用户主动操作。请勿自动重新派发；如需重新派发，先询问用户。"
-- 主 agent 通过 `subagent` 工具（`action="cancel"`）取消（cancelledBy: agent）→ 正文注明"该任务已由主 agent 通过 subagent 工具（action=cancel）取消。"
+- 主 agent 通过 `subagent` 工具（`action="cancel"`）取消（cancelledBy: agent）→ 正文注明"该任务已由主 agent 通过 subagent 工具（action=cancel）取消。"，并附"取消理由: ..."（两步确认时填写的 reason）
 - 会话关闭（session_shutdown）终止（cancelledBy: 无）→ 正文注明"任务因会话关闭被终止（session_shutdown）。"
 
 主 agent 收到状态为"已取消"的通知时，应区分来源：用户主动取消**不得自动重试**，必须先询问用户；agent 取消是自身决策，不应在无新信息时重新派发；会话关闭终止可在会话恢复后视情况重新派发。
 
-**在途任务块**：信封元信息区的"在途任务"列表列出**其余**仍在运行的后台任务（本任务在构建信封前已从注册表移除，故不包含自身），格式为 `在途任务: N` 加每行 `- taskId (agent名): 任务描述`，无在途任务时为"当前无在途任务。"列表**不含耗时**（回答"还有什么在跑"，而非"跑了多久"）。主 agent 据此知道还有几个任务没回来：剩余不为 0 时，不要向用户汇报"全部完成"。
+**在途任务块**：信封元信息区的“在途任务”列表列出**其余**仍在运行的后台任务（本任务在构建信封前已从注册表移除，故不包含自身），格式为 `本任务结束时，其他在途任务: N` 加每行 `- taskId (agent名): 任务描述`，无在途任务时为“本任务结束时无其他在途任务。”列表**不含耗时或时钟时间**（回答“本任务结束时还有什么在跑”，而非“跑了多久”或“几点了”）。该列表是**构建时刻快照**，措辞锚定本任务结束事件而非绝对“此刻”——信封构建与送达之间主 agent 可能已派发新任务，快照随之滞后；与主 agent 本回合亲手发出的派发记录冲突时，以派发记录为准。主 agent 据此知道还有几个任务没回来：剩余不为 0 时，不要向用户汇报“全部完成”。
 
 结果全量进入 LLM 上下文（不截断）。`details` 携带结构化数据（taskId、agent、status、exitCode、stopReason、durationMs（耗时毫秒数，必填）、usage、sessionId、完整输出），不参与 LLM 上下文，供程序消费。
 
 ### 通知投递
 
-通知通过 `pi.sendMessage` 发送，`deliverAs: "followUp"` + `triggerTurn: true`：
+通知通过 `pi.sendMessage` 发送，`deliverAs: "steer"` + `triggerTurn: true`：
 - 主 agent 空闲时直接触发新的对话回合。
-- 主 agent 忙碌时进入消息队列，待当前回合结束后触发。
+- 主 agent 忙碌时进入消息队列，在当前 assistant turn 的工具调用执行完后、下一次 LLM 调用前送达（steer 语义），不憋到整个回合结束——避免通知滞后于回合内新派发的任务。
 
 主 agent 通过 promptGuidelines 被训练识别 `[subagent-result]` 前缀为系统通知（非用户请求）。
 
@@ -194,9 +194,9 @@ widget 行中的 taskId 可直接复制，用于 `/subagent-result` 查看结果
 
 无参数。与 `/subagent-cancel` 按 taskId 取消单个任务不同，`/subagent-cancel-all` 取消全部运行中的任务。每个被取消任务照常推送各自的"已取消" `[subagent-result]` 通知（主 agent 会收到 N 个已取消信封）。成功时提示"已取消全部 N 个运行中任务"，无运行中任务时提示"无运行中任务可取消"。取消来源同样标记为 `cancelledBy: "user"`。
 
-**路径二：主 agent `subagent` 工具（`action="cancel"`）**
+**路径二：主 agent `subagent` 工具（`action="cancel"`，两步确认）**
 
-主 agent 可调用 `subagent` 工具（`action="cancel"`，参数 `taskId`）取消已派出的后台任务。取消来源标记为 `cancelledBy: "agent"`。取消成功后返回剩余在途任务列表（格式与信封的“在途任务”块一致），被取消任务的最终结果稍后以 `[subagent-result]` 通知返回。
+主 agent 可调用 `subagent` 工具(`action="cancel"`,参数 `taskId`)取消已派出的后台任务,但首次调用不会直接执行:它返回零副作用的质询回执(`details.confirmRequired: true`),列出 agent 名、任务摘要、已运行时长、最近进度距今(从未上报则明示"尚无进度上报"),并警告取消将丢弃全部在途进度且不可撤销。确认取消需再次调用:`action="cancel"` + 同一 `taskId` + `confirm:true` + 非空 `reason`(缺失或空白报错,零副作用)。执行后 `reason` 记录在任务记录上,并随取消信封正文返回("取消理由: ...")。取消来源标记为 `cancelledBy: "agent"`。取消成功后返回其余在途任务列表（列表行格式与信封的“在途任务”块一致，但措辞锚定取消请求发出时刻——此时该任务并未结束，不用信封的“本任务结束”锚定语），被取消任务的最终结果稍后以 `[subagent-result]` 通知返回。
 
 **使用纪律：** 主 agent 仅在以下情况使用 `action="cancel"`：
 - 任务明显错误（委派了错误的 agent、任务描述有误等）。

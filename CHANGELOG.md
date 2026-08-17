@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Agent-initiated cancellation (`subagent` tool, `action="cancel"`) is now a two-step confirmation, adding structural friction against the main agent reflexively cancelling healthy in-flight tasks: the first `action="cancel"` call (no `confirm`, or `confirm` not `true`) has zero side-effects and only returns a challenge receipt (`details.confirmRequired: true`) spelling out the agent name, task summary, elapsed time and last progress age (or "尚无进度上报" when the task never reported), plus a warning that cancelling discards all in-flight progress and cannot be undone. To actually cancel, call again with the same `taskId` + `confirm: true` + a non-empty `reason`.
+  - New optional tool parameters: `confirm` (boolean, default `false`) and `reason` (string). With `confirm: true`, a missing or blank `reason` is an error with zero side-effects; the task-existence check still runs first, so an unknown taskId keeps returning the "无此运行中任务" error.
+  - A confirmed cancel records the reason on the task record (`cancelReason`, full value) and quotes it in the `[subagent-result]` envelope body ("取消理由: ...", single-lined and capped at 200 chars).
+  - `SubagentProgressManager` now tracks the last progress timestamp per task (`getLastActivityAt(sessionId)`), feeding the challenge's "最近进度距今" line.
+  - Tool description / promptGuidelines updated: two-step cancel guidance, plus explicit waiting semantics — waiting means making no tool call at all and ending the turn; there is deliberately no query/nag/status action for in-flight tasks.
+  - User paths (`/subagent-cancel`, `/subagent-cancel-all`, interactive picker) are unchanged: single-step, no confirmation required.
+
+### Fixed
+
+- `[subagent-result]` completion notifications could lag behind work dispatched later in the same turn, and the envelope's in-flight block used the absolute wording "当前无在途任务" for a build-time snapshot that may already be stale at delivery:
+  - Notifications are now sent with `deliverAs: "steer"` (previously `"followUp"`; `triggerTurn: true` unchanged): pi delivers them after the current assistant turn's tool calls finish, before the next LLM call, instead of waiting for the entire agent run to end.
+  - The in-flight block is now event-anchored to the envelope task's end event — "本任务结束时无其他在途任务。" / "本任务结束时，其他在途任务: N" — with no absolute "当前/此刻" claims and no clock times, so the main agent can order the snapshot against its own dispatch records.
+  - New `promptGuidelines` entry: the in-flight block is a build-time snapshot that may be stale by delivery; when it conflicts with dispatch records the main agent issued itself this turn, the dispatch records prevail.
+  - The `action="cancel"` confirmation receipt keeps its remaining-tasks list but with wording anchored to the cancel request (no task has ended at that point), no longer sharing the envelope's "本任务结束" anchor.
+
 ## [1.4.0] - 2026-08-16
 
 ### Added

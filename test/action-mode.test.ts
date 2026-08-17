@@ -145,6 +145,35 @@ async function raceWithTimeout<T>(
 	}
 }
 
+// ---------------------------------------------------------------------------
+// S2 事件锚定措辞断言助手（锁语义不锁字面；按行匹配防跨行假绿）
+// ---------------------------------------------------------------------------
+
+/** 时钟时间模式（H:MM:SS 或 MM:SS）——在途块刻意不含任何时间信息。 */
+const CLOCK_TIME = /\d{1,2}:\d{2}(:\d{2})?/;
+/** 旧绝对句式（S2 要求移除）。 */
+const ABSOLUTE_EMPTY_WORDING = /当前无在途任务/;
+
+/** 从信封正文提取在途块（"- 会话:" 行与 "---" 分隔线之间即 formatActiveTasks() 输出）。 */
+function extractInFlightBlock(content: string): string {
+	const m = content.match(/- 会话:[^\n]*\n+([\s\S]*?)\n+---/);
+	return m ? m[1] : "";
+}
+
+/**
+ * 在途块内是否存在"事件锚定"行：同一行同时含 (a) 对本信封所属任务的指代、
+ * (b) 结束事件词、(c) 在途语义。empty=true 时还要求同行含否定词；empty=false
+ * 时要求锚定行不含否定词（非空时不得谎称"无在途"）。
+ */
+function hasEventAnchoredLine(block: string, empty: boolean): boolean {
+	return block.split("\n").some((line) => {
+		const anchored = /本任务|该任务|此任务|本信封/.test(line) && /结束|完成/.test(line) && /在途/.test(line);
+		if (!anchored) return false;
+		const negated = /无|没有|再无/.test(line);
+		return empty ? negated : !negated;
+	});
+}
+
 describe("单入口 action 模式 — 新契约红阶段", () => {
 	let tmpBase: string;
 	let agentDir: string;
@@ -382,7 +411,8 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 
 			expect(result.isError).toBe(true);
 			const text = result.content.map((c: any) => c.text).join("");
-			expect(text).not.toMatch(/当前无在途任务/);
+			// S2 措辞迁移后本守卫仍需有效：旧绝对句与新版事件锚定措辞均不得出现
+			expect(text).not.toMatch(/当前无在途任务|本任务结束|在途任务/);
 		});
 
 		it("action=status 不得产生 details.activeTasks 字段（RED）", async () => {
@@ -419,8 +449,12 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 	// ================================================================
 	// 4. 新契约：action=cancel 按 taskId 取消
 	// ================================================================
-	describe("4. action=cancel 按 taskId 取消（新契约）", () => {
-		it("action=cancel 应 SIGTERM 子进程并标记任务 cancelled（RED）", async () => {
+	describe("4. action=cancel 按 taskId 取消（确认后执行路径）", () => {
+		// 契约变更（destructive-action 两步确认）：agent 发起的 cancel 首次调用
+		// 只返回质询回执（零副作用），confirm:true + 非空 reason 才执行取消。
+		// 本 describe 的 4 个执行类用例已迁移为确认调用（钉执行效果不变）；
+		// 质询行为由 subagent-cancel-tool.test.ts describe 3 钉住。
+		it("action=cancel（confirm:true + reason）应 SIGTERM 子进程并标记任务 cancelled", async () => {
 			const { executeSubagentTool } = setupExtension();
 			const ctx = createMockTuiCtx(defaultCwd);
 
@@ -437,10 +471,10 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 			expect(taskRegistry.has("019ffdd3-3eb5-733d-b481-a53e5292bd65")).toBe(true);
 			const proc = allProcs[0];
 
-			// Act: action=cancel（不携带 agent/task）
+			// Act: action=cancel 确认调用（confirm:true + reason，不携带 agent/task）
 			const result = await executeSubagentTool!(
 				"call-2",
-				{ action: "cancel", taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd65" },
+				{ action: "cancel", taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd65", confirm: true, reason: "任务目标已改变" },
 				undefined,
 				undefined,
 				ctx,
@@ -452,7 +486,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 			expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
 		});
 
-		it("action=cancel 信封 details.cancelledBy='agent'（区分取消来源，RED）", async () => {
+		it("action=cancel（confirm:true + reason）信封 details.cancelledBy='agent'（区分取消来源）", async () => {
 			const { executeSubagentTool, pi } = setupExtension();
 			const ctx = createMockTuiCtx(defaultCwd);
 
@@ -467,7 +501,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 
 			await executeSubagentTool!(
 				"call-2",
-				{ action: "cancel", taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd66" },
+				{ action: "cancel", taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd66", confirm: true, reason: "任务目标已改变" },
 				undefined,
 				undefined,
 				ctx,
@@ -483,7 +517,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 			expect(message.details.cancelledBy).toBe("agent");
 		});
 
-		it('action=cancel 信封正文应标明由主 agent 取消（RED）', async () => {
+		it('action=cancel（confirm:true + reason）信封正文应标明由主 agent 取消', async () => {
 			const { executeSubagentTool, pi } = setupExtension();
 			const ctx = createMockTuiCtx(defaultCwd);
 
@@ -498,7 +532,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 
 			await executeSubagentTool!(
 				"call-2",
-				{ action: "cancel", taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd67" },
+				{ action: "cancel", taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd67", confirm: true, reason: "任务目标已改变" },
 				undefined,
 				undefined,
 				ctx,
@@ -517,7 +551,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 			expect(content).not.toMatch(/请勿自动重新派发/);
 		});
 
-		it("action=cancel 成功应返回含 taskId 与取消确认的回执（RED）", async () => {
+		it("action=cancel（confirm:true + reason）成功应返回含 taskId 与取消确认的回执", async () => {
 			const { executeSubagentTool } = setupExtension();
 			const ctx = createMockTuiCtx(defaultCwd);
 
@@ -532,7 +566,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 
 			const result = await executeSubagentTool!(
 				"call-2",
-				{ action: "cancel", taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd68" },
+				{ action: "cancel", taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd68", confirm: true, reason: "任务目标已改变" },
 				undefined,
 				undefined,
 				ctx,
@@ -644,7 +678,14 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 			expect(content).toContain("[subagent-result]");
 			expect(content).toContain("状态:");
 			expect(content).toContain("任务:");
-			expect(content).toMatch(/在途任务|当前无在途任务/);
+			// 契约迁移（S2 事件锚定措辞）：本例完成唯一任务后在途为空，空在途块应为
+			// 锚定本任务结束事件的限定表述，不再用绝对句"当前无在途任务"，不含时钟
+			// 时间。当前实现仍为旧绝对句 → 本断言在实现完成前 RED。
+			const block = extractInFlightBlock(content);
+			expect(block, "信封应包含在途块（- 会话: 行与 --- 分隔线之间）").not.toBe("");
+			expect(hasEventAnchoredLine(block, true), "空在途块应有锚定本任务结束事件的限定陈述").toBe(true);
+			expect(block).not.toMatch(ABSOLUTE_EMPTY_WORDING);
+			expect(block).not.toMatch(CLOCK_TIME);
 		});
 
 		it("description 仍包含不轮询指引（Do NOT poll）", () => {
