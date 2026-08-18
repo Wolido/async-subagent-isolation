@@ -13,6 +13,7 @@
 ```
 examples/pi/agent/
 ├── master.md
+├── subagent-isolation.json
 ├── agents/
 │   ├── coder.md
 │   ├── reviewer.md
@@ -52,6 +53,27 @@ cp examples/pi/agent/master.md ~/.pi/agent/master.md
 ```
 
 You can also place them in a project-level `.pi/agents/` directory so they only apply to the current repository.
+
+## Per-subagent model configuration (`subagent-isolation.json`)
+
+[`subagent-isolation.json`](pi/agent/subagent-isolation.json) is a model-configuration example: all subagent `model`/`thinking` overrides live in one file. JSON has no comments, so the field semantics are explained in the table below.
+
+Copy it to `~/.pi/agent/subagent-isolation.json` (user level) or `.pi/subagent-isolation.json` (project level, which overrides user-level keys of the same name):
+
+```bash
+cp examples/pi/agent/subagent-isolation.json ~/.pi/agent/
+```
+
+| Field | Semantics |
+|-------|-----------|
+| `$models` | Optional. Available-model list; `/subagent-config` picks models from it when editing `model`, falling back to free-text input when empty or unconfigured. A valid project-level `$models` shadows the user-level list wholesale; `[]` blanks it explicitly |
+| `"coder": { "model": ..., "thinking": ... }` | Object format with both fields set. `thinking` takes one of pi's 7 official levels: `off` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` |
+| `"writer": "deepseek/deepseek-v4-flash"` | Legacy string format, equivalent to `{ "model": "deepseek/deepseek-v4-flash" }`, sets only the model |
+| `"reviewer": { "thinking": "low" }` | Object with only `thinking` set, demonstrating field-level fallback: unset fields inside an entry fall back to frontmatter |
+
+Priority chain, highest first: process memory (`/subagent-config` writing to `this process` — nothing on disk, gone when the process exits or on `/reload`) > project JSON > user JSON > frontmatter. A field set in JSON shadows the same frontmatter field; file levels merge by whole key — when a project entry exists it shadows the user entry of the same key entirely, while unset fields inside the entry still fall back to frontmatter.
+
+No hand-editing required: `/subagent-config` edits `model`/`thinking` and the `$models` list interactively and writes them back.
 
 ## Skills (`skills/`)
 

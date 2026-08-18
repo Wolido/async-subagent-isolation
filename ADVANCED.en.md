@@ -35,6 +35,28 @@ You are a senior TypeScript engineer. Prefer async/await and avoid callbacks.
 | `thinking` | `string` | Optional thinking level. One of `off \| minimal \| low \| medium \| high \| xhigh \| max`. |
 | `skills` | `string[]` (comma-separated) | Optional skill path list. If present, global skills are disabled and only these are loaded. Paths can be absolute or relative to the working directory. |
 
+## Subagent roster injection (system prompt)
+
+The extension registers a `before_agent_start` hook that appends the discovered subagent roster to the end of the main agent's system prompt, leaving the existing content in front. The main agent thus sees every subagent's role each turn, and `master.md` no longer needs a hand-written agent table. Injected block format:
+
+```
+## Available Subagents
+
+Delegate tasks to these specialized subagents via the `subagent` tool:
+
+- coder — Writes and refactors code (project)
+- writer — Writes docs and READMEs (user)
+```
+
+Behavior details:
+
+- Line format: one agent per line, `name — description (source)`; the separator is a U+2014 em dash; source is `user` or `project`. Discovery semantics match `discoverAgents(cwd, "both")`: a project-level agent shadows a user-level one with the same name.
+- Build and cache: the injection text is built on the first hook trigger (`ctx.cwd` is unavailable at factory time, so it cannot be built earlier) and then cached in the factory closure. Mid-session agent file edits do not change the injection; `/reload` re-executes the factory, producing a fresh closure that rebuilds the roster. An empty build is cached the same way: agent files added after an empty first build do not trigger a rebuild and only appear after `/reload`.
+- Depth guard: no injection when `PI_SUBAGENT_DEPTH >= 1` (inside a subagent process); a subagent has no `subagent` tool surface, so the roster would be pure pollution.
+- Silent skip: a missing `ctx.cwd` or a build failure settles the injection to empty silently (no throw, no injection), and later triggers within the same factory instance do not retry.
+- Multi-line descriptions flattened: newlines, tabs and whitespace runs in a description collapse to single spaces, including multi-line text produced by YAML block scalars (`description: |`), so name, description and source marker always stay on one line.
+- With no agents discovered, nothing is injected and the system prompt is returned unchanged.
+
 ## Per-subagent model & thinking level config (subagent-isolation.json)
 
 Use `subagent-isolation.json` to assign a model and thinking level to each subagent. The file name is retained from the sync original, so both projects can share one config.
@@ -55,8 +77,11 @@ Each key is an agent name; the value can be either:
 - **Plain string (legacy format)**: model only, equivalent to `{ "model": "..." }`.
 - **Object**: `{ "model": ..., "thinking": ... }` — both fields optional, but at least one must be present.
 
+The top-level `$models` array is a reserved field (the `$` prefix avoids collisions with agent names) recording the available-model list; see "The available-model list (`$models`)" below.
+
 ```json
 {
+  "$models": ["deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-flash"],
   "coder": { "model": "deepseek/deepseek-v4-pro", "thinking": "high" },
   "writer": "deepseek/deepseek-v4-flash"
 }
@@ -82,22 +107,88 @@ For a subagent such as `coder`, the model and thinking level each resolve to the
 
 **Model**:
 
-1. Config file (`model` for this agent in `subagent-isolation.json`)
-2. Agent frontmatter (`model:` in `coder.md`)
-3. Inherit the main agent's current model
+1. Process memory override (`this process` in the current process)
+2. Config file (`model` for this agent in `subagent-isolation.json`)
+3. Agent frontmatter (`model:` in `coder.md`)
+4. Inherit the main agent's current model
 
 **Thinking level**:
 
-1. Config file (`thinking` for this agent in `subagent-isolation.json`)
-2. Agent frontmatter (`thinking:` in `coder.md`)
+1. Process memory override (`this process` in the current process)
+2. Config file (`thinking` for this agent in `subagent-isolation.json`)
+3. Agent frontmatter (`thinking:` in `coder.md`)
 
 The thinking level is not inherited from the main agent.
+
+> **Recommendation**: the frontmatter `model:` / `thinking:` fields also work as a lower-priority source, but `subagent-isolation.json` is the recommended place: it keeps model settings in one file, `/subagent-config` edits it interactively, and JSON overrides take precedence over frontmatter — a field set in JSON shadows the same frontmatter field, so a frontmatter value stops applying silently once an override exists (fields not set in JSON still fall back to frontmatter).
 
 ### Merge rules
 
 Project-level and user-level configs merge **per key**: a project-level key overrides the same key in the user-level file; all other keys are kept. In other words, the nearest `.pi/subagent-isolation.json` overrides matching keys in `~/.pi/agent/subagent-isolation.json`.
 
+The process memory layer merges on top of the file layers per key (`{...user, ...project, ...process}`): when a process entry exists for a key, it shadows the lower layers' entries of the same key wholesale, with the same whole-key semantics as project shadowing user (see the next section).
+
 > **Note**: when the selected model's provider does not support reasoning, pi automatically clamps the thinking level to `off`.
+
+### Process memory-level temporary overrides (`this process`)
+
+When multiple pi windows share the same `subagent-isolation.json`, a window can temporarily write one subagent's `model`/`thinking` to `this process` (the process memory layer) — effective only in the current process, never written to disk:
+
+- **Semantics**: the override lives in a module-level in-memory singleton; no file is written or read. It disappears on process exit or `/reload`, and other windows are unaffected. It is meant for temporary adjustments — a different model for this task, without touching the shared config file.
+- **Write target**: editing `model`/`thinking` (clear options included) offers a three-way write target: `this process` (memory) / `user` / `project`, with the currently governing source marked `(current)`. The in-memory write notice reads `written to this process (memory only — no file written; disappears when the process exits)`.
+- **Priority chain**: process memory > project JSON > user JSON > frontmatter.
+- **Whole-key shadowing**: same as the file layers — the runtime merge is `{...user, ...project, ...process}`; when a process entry exists for a key, it shadows the lower layers' entries of the same key wholesale (the lower entry's other fields are invisible to dispatch).
+- **Source attribution**: the effective-value source in the field options shows the literal `process` enum (e.g. `model — deepseek/deepseek-v4-pro (process)`); the write-target option is labeled `this process`.
+- **Clear semantics**: clearing at the memory layer removes that agent's in-memory override (a last-field clear drops the whole key; a missing entry is a no-op) and the result notice recomputes the effective value under the whole-key merge — falling back to the file configs (project/user) or frontmatter.
+- **`$models` unaffected**: the memory layer only overrides an agent's `model`/`thinking`; the `$models` list stays file-level (read from the user/project files, with only `user`/`project` write targets).
+- **Extension-developer API**: `setProcessOverride(agentName, patch)` (same patch semantics as `writeModelOverride`: string sets, null clears, undefined leaves untouched; reserved keys rejected), `getProcessOverrides()` (returns a copy), `clearProcessOverride(agentName)`, and `resetProcessOverridesForTests()` (test-isolation hook that empties the layer, simulating process exit/reload).
+
+### The available-model list (`$models`)
+
+The top-level `$models` array records the models offered during interactive editing. The project never read an extensionless `subagent-models` plain-text file; the available-model list is carried solely by the `$models` field.
+
+- Read and shadowing: `loadAvailableModels` checks the project-level file first (the nearest `.pi/subagent-isolation.json` walking up from cwd). A valid project-level `$models` array shadows the user-level list wholesale — an explicit `"$models": []` counts as valid and blanks the user list; a non-array counts as absent and falls back to the user level. Unlike the per-key merge of agent overrides, `$models` is a wholesale replacement, never a union. Entries are cleaned on read: strings only, trimmed, blanks dropped, deduped (first occurrence wins).
+- Invisible to overrides: `loadModelOverridesFile` ignores `$models`, so it never produces an agent override named `$models`.
+- In edit flows: when `/subagent-config` edits a model, a non-empty list turns the value step into a select (the chosen ID itself is written); an empty or unconfigured list falls back to free-text input (`provider/model-id`, prefilled with the current effective value).
+- Management entry: the agent picker of `/subagent-config` ends with a `Manage available model list ($models)` entry — view the current list (with its user/project source) → add or remove → choose the write target (user/project) → write back. Add appends to the end of the list (idempotent dedupe; a non-array base is rewritten as a single-item list); remove is a no-op when the target is absent, and removing the last entry keeps `"$models": []` so a project level can explicitly shadow the user list. Write-back preserves every other top-level key (agent entries and unknown keys) verbatim and refuses to overwrite an invalid-JSON file.
+- Usable with zero agents: with no agents discovered, the `/subagent-config` picker degrades to just this entry and `$models` stays manageable.
+
+### Config write-back guarantees
+
+All interactive edits (`/subagent-config`) write to disk under the same guarantees:
+
+- Unknown fields preserved: write-back reads the raw JSON and changes only the target fields; other top-level keys (`$schema`, `$models`, ...) and unknown in-entry fields survive verbatim. Legacy plain-string entries (`"writer": "model-id"`) are upgraded to object form in place.
+- Validation before half-writes: all validation runs before any file IO; invalid values (empty model, invalid thinking level) or an invalid-JSON target file are rejected as a whole, with no half-written state.
+- Reserved keys rejected: agent names `__proto__` / `constructor` / `prototype` are refused outright (prototype-pollution vectors).
+- Clear semantics: after clearing a field via the clear option, if the agent has no other fields left, the whole key is removed from the JSON, leaving no empty objects behind.
+- BOM tolerance: config reads tolerate a UTF-8 BOM (the `\uFEFF` prefix is stripped before parsing).
+- The memory layer is exempt: overrides written to `this process` live only in process memory and never go through any disk-write path (see "Process memory-level temporary overrides" above).
+
+## Configuration commands (/subagent-config)
+
+### The /subagent-config edit flow
+
+One unified interactive entry. Main flow: pick an agent → pick a field → edit → write back → result notice. Cancelling at any step writes nothing.
+
+- Agent picker: entries are `<name> (<source>) — <model> (<thinking>)` — the source marker plus an effective model/thinking annotation, with `（未配置）` in unset slots; the annotation is appended text mapped back to the agent entry via indexOf and never enters a written value. Effective values come from `computeEffectiveModelConfigs`' whole-key merge, identical to dispatch: a process entry shadows the project/user entries of the same key, a project-level entry shadows the user-level entry of the same key (the lower entry's other fields are invisible to dispatch), and unset fields inside the entry fall back to frontmatter. The `$models` management entry is fixed at the end. `/subagent-config <name>` preselects and jumps straight in; an unknown name is an error. With zero agents the command does not exit early: the picker degrades to just the `$models` entry.
+- ESC walks back one level at a time: text-edit ESC → field select; field-select ESC → agent picker (skipped entirely with a preselect argument → full exit); agent-picker ESC → full exit. Body cancel (read undefined) → field select. The flow ends on a successful write; every back-off path writes nothing.
+- Field select: picking an agent goes straight to the field select, with no detail notification; information comes from the menu annotations — each field option carries its current value (description/tools/skills, body summary, effective model/thinking with sources).
+- description: single-line input prefilled with the current value (a custom prefilled input — `ui.custom` + pi-tui `Input` — in real TUI: Enter submits, an unchanged submit keeps the original value, Esc cancels); empty or whitespace-only input is rejected as a whole and the file stays byte-identical. A successful write asks for `/reload` to rebuild the injected roster.
+- tools / skills: comma-separated input; an empty input deletes the key line from the frontmatter.
+- body: the current body is written to a temp file and opened in an external editor (`$EDITOR`, falling back to `$VISUAL`, then `vi`), then read back and written to disk after the editor exits. Cancel, trailing-newline-only differences, and whitespace-only results all write nothing. Editor launch failures and non-zero exits each get their own error notice, clearly distinguishable from "unchanged".
+- model / thinking: enters the model/thinking editing subflow (`editAgentModelConfig`); the field-select options carry the current effective value (`model — <value> (<source>)` style, source being process/project/user/frontmatter), and the clear options are `clear model (reset to frontmatter)` / `clear thinking (reset to frontmatter)`. The write target is a three-way choice: `this process` (in-memory, nothing written to disk, gone on process exit or `/reload`) / `user` / `project`, with the currently governing source marked `(current)`. A clear re-reads the user/project override files and the memory layer and recomputes the effective value under the whole-key merge for the result notice: a memory-layer clear falls back to the file configs, with dual-level config the value falls back to the other level's JSON or stays unchanged, and "frontmatter" is only claimed when the recomputed source really is frontmatter (or the chain reached frontmatter with no value, i.e. unconfigured). ESC inside the subflow walks back one level: value-step ESC → field select; write-target ESC → value step (the clear branches have no value step → straight back to field select); field-select ESC → back to the parent flow's field select (no exit, no subflow restart).
+- Reload hint matrix: after description edits the result notice asks for `/reload` (the injected roster is cached; see "Subagent roster injection" above); tools/skills/body/model/thinking edits report immediate effect, because every dispatch re-discovers agents and re-reads the config.
+- name is read-only: `name` is the agent's identity and does not appear in the field select; any patch containing `name` is rejected outright (see "Agent file write-back (updateAgentFile)" below).
+- Non-TUI mode: usage notice (warning) only — no dialogs, no writes.
+
+### Agent file write-back (updateAgentFile)
+
+Agent file edits are surgical line-level operations, never a whole-file re-serialization: replace the value of the target `^key:` line, delete that key's line (when tools/skills is cleared), or append a new key at the end of the frontmatter block. Untouched frontmatter lines (unknown keys included) and the body stay byte-identical.
+
+- Multi-line value guard: when the patched key's current value is multi-line (a block scalar `key: |` / `key: >`, or indented continuation lines / YAML list items), line-level rewriting would orphan the continuation lines, so the whole patch is refused before any write with a hint to edit the file manually; multi-line keys that are not being patched do not affect other fields.
+- YAML scalar serialization: a value is emitted plain when it round-trips safely, otherwise double-quoted with escapes (covering colons, hashes, quotes, CJK, leading digits, true/false/null lookalikes, and similar cases).
+- Name patches rejected: any patch containing `name` is rejected outright (name is a read-only identity; rename support was removed) — even a valid new name is refused, a mixed patch is never half-written, files stay byte-identical, and no directory changes occur; the `name?` parameter remains in the signature only for type compatibility.
+- Validation atomicity: all checks run before any file write.
 
 ## Async mode (TUI)
 

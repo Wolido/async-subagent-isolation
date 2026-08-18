@@ -12,6 +12,8 @@
 
 每个子 agent 运行在独立的 pi 进程中，拥有自己的 system prompt 和 skills，上下文与主 agent 完全隔离。
 
+> 注：自 v1.6.0 起，扩展会在启动时把所有已发现子 agent 的清单（`name — description` 加 user/project 来源标记）自动注入本提示词尾部，本表可由注入清单替代；保留它是为了 tools 列与职责说明。修改 agent 文件的 name/description 后需 `/reload` 刷新注入清单（`/subagent-config` 中 name 为只读，手工编辑文件不受此限）。
+
 ## 你能做的事
 
 - `read` — 读文件

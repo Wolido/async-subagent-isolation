@@ -11,7 +11,7 @@
  * Modified: per-agent skill directory isolation via --no-skills --skill args.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -27,7 +27,7 @@ import {
 	getAgentDir,
 	parseFrontmatter,
 } from "@earendil-works/pi-coding-agent";
-import { Box, Container, Key, Markdown, matchesKey, SelectList, type SelectItem, Spacer, Text, truncateToWidth, visibleWidth, sliceByColumn } from "@earendil-works/pi-tui";
+import { Box, Container, Input, Key, Markdown, matchesKey, SelectList, type SelectItem, Spacer, Text, truncateToWidth, visibleWidth, sliceByColumn } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 // ===== UUID v7 helper =====
@@ -58,7 +58,7 @@ function uuidv7(): string {
 
 // ===== Inlined agents.ts with skills support =====
 
-type AgentScope = "user" | "project" | "both";
+export type AgentScope = "user" | "project" | "both";
 
 /** Minimal model info for passing current model to subagents */
 interface CurrentModel {
@@ -217,7 +217,7 @@ export function normalizeOverride(value: unknown): ModelOverride | undefined {
 export function loadModelOverridesFile(filePath: string): Record<string, ModelOverride> {
 	try {
 		const content = fs.readFileSync(filePath, "utf-8");
-		const parsed: unknown = JSON.parse(content);
+		const parsed: unknown = JSON.parse(content.replace(/^\uFEFF/, "")); // strip a BOM prefix before parsing
 		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
 			console.warn(`[async-subagent-isolation] ${filePath}: expected a JSON object, ignoring.`);
 			return {};
@@ -245,15 +245,926 @@ export function loadModelOverridesFile(filePath: string): Record<string, ModelOv
 export function loadModelOverrides(cwd: string): Record<string, ModelOverride> {
 	const userOverrides = loadModelOverridesFile(path.join(getAgentDir(), "subagent-isolation.json"));
 	let currentDir = cwd;
+	let projectOverrides: Record<string, ModelOverride> = {};
 	while (true) {
 		const candidate = path.join(currentDir, ".pi", "subagent-isolation.json");
 		if (fs.existsSync(candidate)) {
-			const projectOverrides = loadModelOverridesFile(candidate);
-			return { ...userOverrides, ...projectOverrides };
+			projectOverrides = loadModelOverridesFile(candidate);
+			break;
 		}
 		const parentDir = path.dirname(currentDir);
-		if (parentDir === currentDir) return userOverrides;
+		if (parentDir === currentDir) break;
 		currentDir = parentDir;
+	}
+	// 进程内存级临时覆盖并入派发读取处（最高优先级、整 key 语义、不落盘）。
+	return { ...userOverrides, ...projectOverrides, ...getProcessOverrides() };
+}
+
+// ===== Process memory-level overrides (进程内存级临时覆盖) =====
+// 多个 pi 窗口共享同一 subagent-isolation.json：某窗口工作过程中临时调整某
+// 个 subagent 的 model/thinking，只在该进程生效、不落盘、退出即消失。模块
+// 级单例（与 progressManager 同模式），测试经 resetProcessOverridesForTests
+// 隔离。
+let processOverrides: Record<string, ModelOverride> = {};
+
+/**
+ * 写内存层覆盖。patch 语义与 writeModelOverride 一致：string 设 / null 清
+ * 字段 / undefined 不动；末字段清空删整 key；保留字拒绝（原型污染防护）。
+ * 不落盘、不读文件。
+ */
+export function setProcessOverride(
+	agentName: string,
+	patch: { model?: string | null; thinking?: string | null },
+): { ok: true } | { ok: false; error: string } {
+	if (agentName === "__proto__" || agentName === "constructor" || agentName === "prototype") {
+		return { ok: false, error: `invalid agent name ${JSON.stringify(agentName)} (reserved key)` };
+	}
+	if (patch.model !== undefined && patch.model !== null) {
+		if (typeof patch.model !== "string" || patch.model.trim() === "") {
+			return { ok: false, error: `model must be a non-empty string, got ${JSON.stringify(patch.model)}` };
+		}
+	}
+	if (patch.thinking !== undefined && patch.thinking !== null) {
+		if (typeof patch.thinking !== "string" || !isThinkingLevel(patch.thinking)) {
+			return {
+				ok: false,
+				error: `invalid thinking level ${JSON.stringify(patch.thinking)} (must be one of: ${[...THINKING_LEVELS].join(", ")})`,
+			};
+		}
+	}
+
+	const entry = Object.prototype.hasOwnProperty.call(processOverrides, agentName)
+		? { ...processOverrides[agentName] }
+		: {};
+	if (patch.model === null) delete entry.model;
+	else if (patch.model !== undefined) entry.model = patch.model.trim();
+	if (patch.thinking === null) delete entry.thinking;
+	else if (patch.thinking !== undefined) entry.thinking = patch.thinking;
+	if (Object.keys(entry).length === 0) delete processOverrides[agentName];
+	else processOverrides[agentName] = entry;
+	return { ok: true };
+}
+
+/** 读内存层覆盖（返回副本：调用方修改不影响内存层）。 */
+export function getProcessOverrides(): Record<string, ModelOverride> {
+	const copy: Record<string, ModelOverride> = {};
+	for (const [name, entry] of Object.entries(processOverrides)) {
+		copy[name] = { ...entry };
+	}
+	return copy;
+}
+
+/** 删除指名 agent 的整条内存覆盖（无 entry 时 no-op）。 */
+export function clearProcessOverride(agentName: string): void {
+	delete processOverrides[agentName];
+}
+
+/**
+ * 测试隔离钩子（参照 resetProgressManagerForTests）：清空模块级内存覆盖层，
+ * 模拟进程退出/reload。生产代码不调用。
+ */
+export function resetProcessOverridesForTests(): void {
+	processOverrides = {};
+}
+
+/** One agent's effective model/thinking with the source each value comes from. */
+export interface EffectiveModelConfig {
+	name: string;
+	model?: string;
+	modelSource?: "process" | "project" | "user" | "frontmatter";
+	thinking?: string;
+	thinkingSource?: "process" | "project" | "user" | "frontmatter";
+}
+
+/**
+ * Merge the view of what model/thinking actually applies to each agent.
+ * Priority: process memory > project json > user json > frontmatter. Mirrors
+ * loadModelOverrides' runtime merge exactly: whole-key replacement
+ * ({...user, ...project, ...process}), NOT field-wise — when a higher layer's
+ * entry exists for a key, lower layers' other fields are invisible to
+ * dispatch, so they must be invisible here too.
+ */
+export function computeEffectiveModelConfigs(
+	agents: AgentConfig[],
+	userOverrides: Record<string, ModelOverride>,
+	projectOverrides: Record<string, ModelOverride>,
+	processOverrides?: Record<string, ModelOverride>,
+): EffectiveModelConfig[] {
+	const merged: Record<string, ModelOverride> = {
+		...userOverrides,
+		...projectOverrides,
+		...processOverrides,
+	};
+	return agents.map((agent) => {
+		const result: EffectiveModelConfig = { name: agent.name };
+		// hasOwnProperty guards: an agent named e.g. "constructor" must not pick
+		// up inherited Object.prototype members as if they were overrides.
+		const override = Object.prototype.hasOwnProperty.call(merged, agent.name) ? merged[agent.name] : undefined;
+		const jsonSource = Object.prototype.hasOwnProperty.call(processOverrides ?? {}, agent.name)
+			? "process"
+			: Object.prototype.hasOwnProperty.call(projectOverrides, agent.name)
+				? "project"
+				: "user";
+		if (override?.model !== undefined) {
+			result.model = override.model;
+			result.modelSource = jsonSource;
+		} else if (agent.model !== undefined) {
+			result.model = agent.model;
+			result.modelSource = "frontmatter";
+		}
+		if (override?.thinking !== undefined) {
+			result.thinking = override.thinking;
+			result.thinkingSource = jsonSource;
+		} else if (agent.thinking !== undefined) {
+			result.thinking = agent.thinking;
+			result.thinkingSource = "frontmatter";
+		}
+		return result;
+	});
+}
+
+/**
+ * Write one agent's model/thinking override into a subagent-isolation.json file.
+ * patch semantics: string sets, null clears, undefined leaves untouched.
+ * Clearing the last field removes the whole key (no empty objects left behind).
+ * Reads the raw JSON and writes it back with unknown top-level keys and unknown
+ * in-entry fields preserved verbatim — deliberately NOT via normalizeOverride,
+ * which would drop them. All validation happens before any write; invalid
+ * values or an unreadable/invalid target file are rejected as a whole
+ * ({ ok: false, error }) without producing a half-written state.
+ */
+export function writeModelOverride(
+	filePath: string,
+	agentName: string,
+	patch: { model?: string | null; thinking?: string | null },
+): { ok: true } | { ok: false; error: string } {
+	// Reserved keys (prototype-pollution vectors) are rejected outright,
+	// before any validation or IO.
+	if (agentName === "__proto__" || agentName === "constructor" || agentName === "prototype") {
+		return { ok: false, error: `invalid agent name ${JSON.stringify(agentName)} (reserved key)` };
+	}
+	if (patch.model !== undefined && patch.model !== null) {
+		if (typeof patch.model !== "string" || patch.model.trim() === "") {
+			return { ok: false, error: `model must be a non-empty string, got ${JSON.stringify(patch.model)}` };
+		}
+	}
+	if (patch.thinking !== undefined && patch.thinking !== null) {
+		if (typeof patch.thinking !== "string" || !isThinkingLevel(patch.thinking)) {
+			return {
+				ok: false,
+				error: `invalid thinking level ${JSON.stringify(patch.thinking)} (must be one of: ${[...THINKING_LEVELS].join(", ")})`,
+			};
+		}
+	}
+
+	const setsModel = typeof patch.model === "string";
+	const setsThinking = typeof patch.thinking === "string";
+
+	let raw: Record<string, unknown> = {};
+	if (fs.existsSync(filePath)) {
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+		} catch (err) {
+			return {
+				ok: false,
+				error: `${filePath}: invalid JSON (${err instanceof Error ? err.message : String(err)}), refusing to overwrite`,
+			};
+		}
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+			return { ok: false, error: `${filePath}: expected a JSON object, refusing to overwrite` };
+		}
+		raw = parsed as Record<string, unknown>;
+	}
+
+	const existing = Object.prototype.hasOwnProperty.call(raw, agentName) ? raw[agentName] : undefined;
+	// Clearing an agent with no entry is a no-op: create neither key nor file.
+	if (!setsModel && !setsThinking && existing === undefined) {
+		return { ok: true };
+	}
+
+	// Upgrade a legacy string entry ("name": "model-id") to object form in
+	// place; copy object entries so unknown fields survive verbatim. An entry
+	// of any other (invalid) type — number, array, null — is replaced wholesale
+	// by a normalized object rather than merged or preserved.
+	let entry: Record<string, unknown>;
+	if (typeof existing === "string") {
+		entry = { model: existing };
+	} else if (typeof existing === "object" && existing !== null && !Array.isArray(existing)) {
+		entry = { ...(existing as Record<string, unknown>) };
+	} else {
+		entry = {};
+	}
+	if (setsModel) entry.model = (patch.model as string).trim();
+	if (setsThinking) entry.thinking = patch.thinking;
+	if (patch.model === null) delete entry.model;
+	if (patch.thinking === null) delete entry.thinking;
+	if (Object.keys(entry).length === 0) delete raw[agentName];
+	else raw[agentName] = entry;
+
+	try {
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, `${JSON.stringify(raw, null, 2)}\n`, "utf-8");
+	} catch (err) {
+		return { ok: false, error: `failed to write ${filePath}: ${err instanceof Error ? err.message : String(err)}` };
+	}
+	return { ok: true };
+}
+
+/**
+ * Resolve which subagent-isolation.json a scope writes to. user → the file
+ * under getAgentDir(); project → the nearest .pi/subagent-isolation.json found
+ * walking up from cwd (the same file that governs reads for that cwd), falling
+ * back to cwd/.pi/subagent-isolation.json when none exists yet.
+ */
+export function resolveModelOverridePath(scope: "user" | "project", cwd: string): string {
+	if (scope === "user") return path.join(getAgentDir(), "subagent-isolation.json");
+	let currentDir = cwd;
+	while (true) {
+		const candidate = path.join(currentDir, ".pi", "subagent-isolation.json");
+		if (fs.existsSync(candidate)) return candidate;
+		const parentDir = path.dirname(currentDir);
+		if (parentDir === currentDir) break;
+		currentDir = parentDir;
+	}
+	return path.join(cwd, ".pi", "subagent-isolation.json");
+}
+
+// ===== $models: available-model list stored in subagent-isolation.json =====
+
+/** Clean a raw $models value: non-arrays count as absent; string items are trimmed, blanks dropped, deduped (first occurrence wins). */
+function cleanModelsList(raw: unknown): string[] | undefined {
+	if (!Array.isArray(raw)) return undefined;
+	const seen = new Set<string>();
+	const models: string[] = [];
+	for (const item of raw) {
+		if (typeof item !== "string") continue;
+		const trimmed = item.trim();
+		if (trimmed === "" || seen.has(trimmed)) continue;
+		seen.add(trimmed);
+		models.push(trimmed);
+	}
+	return models;
+}
+
+/** Read the raw $models list from a subagent-isolation.json file; undefined on any read/parse/shape error. */
+function readModelsListFromFile(filePath: string): string[] | undefined {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(fs.readFileSync(filePath, "utf-8").replace(/^\uFEFF/, "")); // strip a BOM prefix before parsing
+	} catch {
+		return undefined;
+	}
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+	return cleanModelsList((parsed as Record<string, unknown>).$models);
+}
+
+/**
+ * Load the effective available-model list ($models). Governance mirrors
+ * loadModelOverrides: the governing project file (nearest
+ * .pi/subagent-isolation.json walking up from cwd, same as
+ * resolveModelOverridePath's project branch) shadows the user-level file
+ * wholesale when its $models is a valid array — an explicit [] included, so a
+ * project can blank the user list. A non-array $models counts as absent.
+ */
+export function loadAvailableModels(cwd: string): {
+	models: string[];
+	source?: "user" | "project";
+	filePath?: string;
+} {
+	const projectFile = resolveModelOverridePath("project", cwd);
+	const projectModels = readModelsListFromFile(projectFile);
+	if (projectModels !== undefined) return { models: projectModels, source: "project", filePath: projectFile };
+	const userFile = path.join(getAgentDir(), "subagent-isolation.json");
+	const userModels = readModelsListFromFile(userFile);
+	if (userModels !== undefined) return { models: userModels, source: "user", filePath: userFile };
+	return { models: [] };
+}
+
+/**
+ * Add or remove one entry of the $models list in a subagent-isolation.json
+ * file. patch must contain exactly one of add/remove. All validation runs
+ * before any IO; result-object style mirrors writeModelOverride (never
+ * throws). add: trimmed, whitespace-free, deduped (existing → idempotent
+ * ok:true), appended in order; a non-array $models is rewritten as a fresh
+ * single-item list. remove: missing target (not in list / no $models / no
+ * file) is an ok:true no-op; emptying the list keeps "$models": [] so a
+ * project level can explicitly shadow the user list. Write-back preserves
+ * every other top-level key (agent entries, unknown keys) verbatim.
+ */
+export function updateAvailableModels(
+	filePath: string,
+	patch: { add?: string; remove?: string },
+): { ok: true } | { ok: false; error: string } {
+	const hasAdd = patch.add !== undefined;
+	const hasRemove = patch.remove !== undefined;
+	if (hasAdd === hasRemove) {
+		return { ok: false, error: 'patch must contain exactly one of "add" or "remove"' };
+	}
+	let addValue = "";
+	if (hasAdd) {
+		addValue = typeof patch.add === "string" ? patch.add.trim() : "";
+		if (addValue === "" || /\s/.test(addValue)) {
+			return {
+				ok: false,
+				error: `invalid model id ${JSON.stringify(patch.add)} (must be non-empty and contain no whitespace)`,
+			};
+		}
+	}
+
+	let raw: Record<string, unknown> = {};
+	if (fs.existsSync(filePath)) {
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+		} catch (err) {
+			return {
+				ok: false,
+				error: `${filePath}: invalid JSON (${err instanceof Error ? err.message : String(err)}), refusing to overwrite`,
+			};
+		}
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+			return { ok: false, error: `${filePath}: expected a JSON object, refusing to overwrite` };
+		}
+		raw = parsed as Record<string, unknown>;
+	}
+
+	const current = cleanModelsList(raw.$models);
+	if (hasRemove) {
+		const target = typeof patch.remove === "string" ? patch.remove.trim() : "";
+		if (current === undefined || !current.includes(target)) return { ok: true };
+		raw.$models = current.filter((m) => m !== target); // keeps "$models": [] when emptied
+	} else {
+		const list = current ?? [];
+		if (list.includes(addValue)) return { ok: true }; // idempotent: no duplicate append
+		raw.$models = [...list, addValue];
+	}
+
+	try {
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, `${JSON.stringify(raw, null, 2)}\n`, "utf-8");
+	} catch (err) {
+		return { ok: false, error: `failed to write ${filePath}: ${err instanceof Error ? err.message : String(err)}` };
+	}
+	return { ok: true };
+}
+
+/** Minimal UI surface the model-config editor flow needs (structurally compatible with pi's ctx.ui). */
+export interface ModelConfigEditorUI {
+	select(title: string, options: string[]): Promise<string | undefined>;
+	input(title: string, placeholder?: string, initial?: string): Promise<string | undefined>;
+	/** 确认对话框（如 $models 删除防误删）；返回 false/undefined = 拒绝/取消。 */
+	confirm(title: string, message?: string): Promise<boolean>;
+	notify(message: string, type?: "info" | "warning" | "error"): void;
+}
+
+/**
+ * model/thinking 覆盖编辑子流程（/subagent-config 的 model/thinking 字段进
+ * 入；agentName 由父流程预选，必传，不存在独立的 agent 选择步）。流程：
+ * 选择字段（model/thinking/clear model/clear thinking）→ 输入/选择新值
+ * （thinking 用官方 7 级别 select，写入级别值本身；model 在 $models 列表非
+ * 空时从列表 select、空/未配置回退自由 input 并预填生效值）→ 选择写入目标
+ * （user/project，标注当前生效来源）→ 写回 → 确认提示。
+ *
+ * ESC 逐级回退（统一，无调用方差异）：值步 ESC → 回字段选择；写入目标
+ * ESC → 回值步（clear 分支无值步 → 直接回字段选择）；字段选择 ESC → 返回
+ * undefined 交回调用方（父流程继续其字段选择循环；独立调用即结束）。成功
+ * 写入返回结果对象并结束流程；回退全程零写入。
+ */
+export async function editAgentModelConfig(deps: {
+	ui: ModelConfigEditorUI;
+	cwd: string;
+	agents: AgentConfig[];
+	/** 必传：父流程已选好 agent（子流程内无任何 agent picker）。 */
+	agentName: string;
+}): Promise<unknown> {
+	const { ui, cwd, agents, agentName } = deps;
+
+	// 运行时装甲（JS/any 调用绕过类型必传时）：未知/缺失 agentName → 报错并
+	// 直接返回，绝不退化为 agent picker。
+	const agent = agents.find((a) => a.name === agentName);
+	if (!agent) {
+		ui.notify(`Unknown agent "${agentName}" — not among the discovered subagents.`, "error");
+		return undefined;
+	}
+
+	// Effective values drive the field-option annotations, the current-source
+	// marker on the write-target select, and the prefilled input initial
+	// (user/project overrides read separately for correct source attribution).
+	const effective = computeEffectiveModelConfigs(
+		agents,
+		loadModelOverridesFile(resolveModelOverridePath("user", cwd)),
+		loadModelOverridesFile(resolveModelOverridePath("project", cwd)),
+		getProcessOverrides(),
+	).find((v) => v.name === agentName);
+
+	const fields = ["model", "thinking", "clear model", "clear thinking"];
+	// Annotate the model/thinking options with their current effective values
+	// (appended text only; the field key stays the leading word). clear 选项
+	// 附带 reset 说明（英文 key clear/model/thinking 保持子串可见）。
+	const fieldOptions = [
+		effective?.model !== undefined ? `model — ${effective.model} (${effective.modelSource})` : "model",
+		effective?.thinking !== undefined ? `thinking — ${effective.thinking} (${effective.thinkingSource})` : "thinking",
+		"clear model (reset to frontmatter)",
+		"clear thinking (reset to frontmatter)",
+	];
+
+	// Mark the write target that currently governs this field (frontmatter or
+	// unconfigured → no marker; annotation never names the other target).
+	const pickTarget = async (field: string): Promise<"process" | "user" | "project" | undefined> => {
+		const currentSource =
+			field === "thinking" || field === "clear thinking" ? effective?.thinkingSource : effective?.modelSource;
+		const targets: Array<"process" | "user" | "project"> = ["process", "user", "project"];
+		// process 选项带英文 key "this process"（与 user/project 裸 key 并列）；
+		// 经并行数组 indexOf 映射回 "process"。
+		const targetLabels = targets.map((t) => (t === "process" ? "this process" : t));
+		const targetOptions = targetLabels.map((label, i) => (targets[i] === currentSource ? `${label} (current)` : label));
+		const pickedTarget = await ui.select(`Agent "${agentName}" — write to which config level`, targetOptions);
+		if (pickedTarget === undefined) return undefined;
+		return targets[targetOptions.indexOf(pickedTarget)];
+	};
+
+	const writePatch = (
+		field: string,
+		patch: { model?: string | null; thinking?: string | null },
+		target: "process" | "user" | "project",
+	): unknown => {
+		let filePath: string | undefined;
+		let result: { ok: true } | { ok: false; error: string };
+		if (target === "process") {
+			// 内存层：string/null 直通 setProcessOverride，不落盘、不读文件。
+			result = setProcessOverride(agentName, patch);
+		} else {
+			filePath = resolveModelOverridePath(target, cwd);
+			result = writeModelOverride(filePath, agentName, patch);
+		}
+		if (!result.ok) {
+			ui.notify(`Agent "${agentName}": ${result.error}`, "error");
+			return undefined;
+		}
+		const isClear = field === "clear model" || field === "clear thinking";
+		if (isClear) {
+			// Clear 完成反馈 = 清除目标 entry 该字段后【重算】的生效值（含来源）：
+			// 写盘后重读 user/project 覆盖记录（内存层含 getProcessOverrides），
+			// 按运行时整 key 合并重算视图（process > project > user，未配字段回退
+			// frontmatter）。frontmatter 字样仅当重算来源确为 frontmatter（或回退
+			// 链已到 frontmatter 仍无值 → 未配置语义）。
+			const key = field === "clear model" ? "model" : "thinking";
+			const srcKey = field === "clear model" ? "modelSource" : "thinkingSource";
+			const recomputed = computeEffectiveModelConfigs(
+				agents,
+				loadModelOverridesFile(resolveModelOverridePath("user", cwd)),
+				loadModelOverridesFile(resolveModelOverridePath("project", cwd)),
+				getProcessOverrides(),
+			).find((v) => v.name === agentName);
+			const value = recomputed?.[key];
+			const source = recomputed?.[srcKey];
+			const fallbackText =
+				value !== undefined
+					? `${value} (${source})`
+					: "not configured (未配置)";
+			const sourceText =
+				value !== undefined ? (source === "frontmatter" ? "frontmatter" : source) : "frontmatter";
+			ui.notify(
+				target === "process"
+					? `Agent "${agentName}": ${key} override cleared from this process (memory only) — falls back to ${sourceText}: ${fallbackText}.`
+					: `Agent "${agentName}": ${key} override cleared from ${target}-level config (${filePath}) — falls back to ${sourceText}: ${fallbackText}.`,
+				"info",
+			);
+			return { agentName, field: key, value: null, scope: target, filePath };
+		}
+		ui.notify(
+			target === "process"
+				? `Agent "${agentName}": ${field} override written to this process (memory only — no file written; disappears when the process exits).`
+				: `Agent "${agentName}": ${field} override written to ${target}-level config (${filePath}).`,
+			"info",
+		);
+		return { agentName, field, value: patch.model ?? patch.thinking ?? null, scope: target, filePath };
+	};
+
+	// 字段选择层循环：值步/写入目标步的 ESC 回退到本层重新提问。
+	while (true) {
+		const pickedField = await ui.select(`Agent "${agentName}" — select field to edit`, fieldOptions);
+		if (pickedField === undefined) return undefined; // 字段选择 ESC → 交回调用方
+		const field: string | undefined = fields[fieldOptions.indexOf(pickedField)];
+		if (field === undefined) return undefined;
+
+		if (field === "clear model" || field === "clear thinking") {
+			// Clear 无值步：写入目标 ESC → 回字段选择（clear 未执行）。
+			const target = await pickTarget(field);
+			if (target === undefined) continue;
+			const patch = field === "clear model" ? { model: null } : { thinking: null };
+			const written = writePatch(field, patch, target);
+			if (written !== undefined) return written;
+			return undefined; // 写失败：错误已提示，结束流程
+		}
+
+		// 值步层循环：写入目标 ESC 回退到本层（重输入值覆盖先前收集值）。
+		while (true) {
+			let patch: { model?: string; thinking?: string };
+			if (field === "model") {
+				// $models: a non-empty list turns the value step into a select over
+				// the list (the chosen model ID itself is written); an empty list
+				// falls back to free-text input prefilled with the current
+				// effective model (empty string when none).
+				const available = loadAvailableModels(cwd).models;
+				let value: string | undefined;
+				if (available.length > 0) {
+					value = await ui.select(`Agent "${agentName}" — select model`, available);
+				} else {
+					value = await ui.input(
+						`Agent "${agentName}" — new model`,
+						"provider/model-id",
+						effective?.model ?? "",
+					);
+				}
+				if (value === undefined) break; // 值步 ESC → 回字段选择
+				if (value.trim() === "") {
+					// Invalid value is rejected at the UI layer: error + re-ask the value step.
+					ui.notify(`Agent "${agentName}": model must be a non-empty string — nothing written.`, "error");
+					continue;
+				}
+				patch = { model: value.trim() };
+			} else {
+				// Mark exactly the current effective level with "(current)" (appended).
+				const levels = [...THINKING_LEVELS];
+				const levelOptions = levels.map((l) => (l === effective?.thinking ? `${l} (current)` : l));
+				const pickedLevel = await ui.select(`Agent "${agentName}" — select thinking level`, levelOptions);
+				if (pickedLevel === undefined) break; // 值步 ESC → 回字段选择
+				const level = levels[levelOptions.indexOf(pickedLevel)];
+				if (level === undefined) break;
+				patch = { thinking: level };
+			}
+
+			const target = await pickTarget(field);
+			if (target === undefined) continue; // 写入目标 ESC → 回值步
+			const written = writePatch(field, patch, target);
+			if (written !== undefined) return written;
+			return undefined; // 写失败：错误已提示，结束流程
+		}
+		// break 落到此处 = 值步 ESC → 外层字段选择循环继续
+	}
+}
+
+/**
+ * $models management subflow of /subagent-config: 动作选择菜单即列表——选
+ * 项 = 当前生效列表（每项带来源标记、保持列表顺序）+ "add model" + "back"
+ * （空列表时菜单恰为 ["add model", "back"]，无独立查看选项）。选中列表项
+ * → 删除确认（指名模型 ID）→ 写入目标 → 写回；"add model" → input → 写入
+ * 目标 → 写回。每次回到动作选择都重新 loadAvailableModels（菜单即列表，
+ * 实时反映增删结果）；写回成功后回动作选择（可连续增删）；动作选择 ESC 或
+ * 选中 "back" → 返回 undefined 交回调用方（agent 选择）。回退/拒绝全程零写入。
+ */
+async function editAvailableModelsList(deps: {
+	ui: ModelConfigEditorUI;
+	cwd: string;
+}): Promise<void> {
+	const { ui, cwd } = deps;
+	// Write-target select marking the source that currently governs the list
+	// (no marker when no list is configured anywhere); re-reads on every call.
+	const pickTarget = async (): Promise<"user" | "project" | undefined> => {
+		const current = loadAvailableModels(cwd);
+		const targets: Array<"user" | "project"> = ["user", "project"];
+		const options = targets.map((t) => (t === current.source ? `${t} (current)` : t));
+		const picked = await ui.select("Write to which config level", options);
+		if (picked === undefined) return undefined;
+		return targets[options.indexOf(picked)];
+	};
+	while (true) {
+		// 每次回到动作选择重新读取列表（菜单即列表，实时反映增删结果）。
+		const current = loadAvailableModels(cwd);
+		const listOptions = current.models.map((m) => `${m} (${current.source})`);
+		const options = [...listOptions, "add model", "back"];
+		const picked = await ui.select("Available model list — select action", options);
+		if (picked === undefined || picked === "back") return; // ESC / back → 回 agent 选择
+		if (picked === "add model") {
+			// 值步层循环：写入目标 ESC 回退到本层（重输入覆盖先前收集值）；
+			// 写回成功退出本层 → 回动作选择（可连续 add）。
+			while (true) {
+				const value = await ui.input("Add available model", "provider/model-id");
+				if (value === undefined) break; // 值步 ESC → 回动作选择
+				const trimmed = value.trim();
+				if (trimmed === "" || /\s/.test(trimmed)) {
+					ui.notify(
+						`Invalid model id ${JSON.stringify(value)} (must be non-empty, no whitespace) — nothing written.`,
+						"error",
+					);
+					continue; // 无效输入 → 错误提示后重问值步
+				}
+				const target = await pickTarget();
+				if (target === undefined) continue; // 写入目标 ESC → 回值步
+				const filePath = resolveModelOverridePath(target, cwd);
+				const result = updateAvailableModels(filePath, { add: trimmed });
+				if (!result.ok) {
+					ui.notify(result.error, "error");
+					return;
+				}
+				ui.notify(`Added "${trimmed}" to the available model list (${target}-level: ${filePath}).`, "info");
+				break; // 写回成功 → 回动作选择
+			}
+			continue;
+		}
+		// 删除分支：动作 = 选中列表中的模型项（经 indexOf 映射回模型 ID，来源
+		// 标记永不进入写入值）。确认（指名模型 ID）通过才进写入目标；拒绝/取
+		// 消 → 回动作选择（重读列表），零写入。
+		const modelIndex = listOptions.indexOf(picked);
+		if (modelIndex < 0) continue;
+		const modelId = current.models[modelIndex];
+		const confirmed = await ui.confirm(
+			`Delete model "${modelId}"?`,
+			`Remove "${modelId}" from the available model list.`,
+		);
+		if (!confirmed) continue;
+		const target = await pickTarget();
+		if (target === undefined) continue; // 写入目标 ESC → 回动作选择
+		const filePath = resolveModelOverridePath(target, cwd);
+		const result = updateAvailableModels(filePath, { remove: modelId });
+		if (!result.ok) {
+			ui.notify(result.error, "error");
+			return;
+		}
+		ui.notify(`Removed "${modelId}" from the available model list (${target}-level: ${filePath}).`, "info");
+		// 写回成功 → 回动作选择（循环顶部重读列表，菜单反映删除结果）
+	}
+}
+
+/** Label of the agent-picker entry that opens $models list management (M4). */
+const MODELS_LIST_ENTRY_LABEL = "Manage available model list ($models)";
+
+/**
+ * Adapt a command-context ui to ModelConfigEditorUI. select 双路径：
+ * ui.custom 可用时改用 pi-tui SelectList（q/Q 与 Esc 同路关闭，复用
+ * pickTaskInteractively 的 q/Esc 处理模式；Enter 提交所选选项原串）；
+ * 不可用时回退原生 ui.select。input 路径不变（预填 Input：q 是普通字符）。
+ * confirm 直接转发命令上下文。
+ */
+function adaptModelConfigEditorUI(ui: ExtensionContext["ui"]): ModelConfigEditorUI {
+	return {
+		select: (title, options) => {
+			if (typeof ui.custom !== "function") {
+				// 回退路径：无 custom 的环境（假 UI 命令级用例）原样走原生 select。
+				return ui.select(title, options);
+			}
+			return ui.custom<string | undefined>((tui, theme, _kb, done) => {
+				const container = new Container();
+				container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+				container.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0));
+				// 选项原串即 SelectItem 的 label 与 value：选中回传原 option 串，与
+				// 原生 select 语义一致（调用方经 indexOf 映射回本体）。列宽放宽以防
+				// 长选项（如 $models 管理入口标签）被默认列宽截断。
+				const selectList = new SelectList(
+					options.map((option) => ({ label: option, value: option })),
+					Math.min(options.length, 10),
+					{
+						selectedPrefix: (t) => theme.fg("accent", t),
+						selectedText: (t) => theme.fg("accent", t),
+						description: (t) => theme.fg("muted", t),
+						scrollInfo: (t) => theme.fg("dim", t),
+						noMatch: (t) => theme.fg("warning", t),
+					},
+					{ minPrimaryColumnWidth: 80, maxPrimaryColumnWidth: 80 },
+				);
+				selectList.onSelect = (item) => done(item.value);
+				selectList.onCancel = () => done(undefined);
+				container.addChild(selectList);
+				container.addChild(new Text(theme.fg("dim", "↑↓ 选择 · Enter 确认 · Esc/q 退出"), 1, 0));
+				container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+				return {
+					render: (w) => container.render(w),
+					invalidate: () => container.invalidate(),
+					handleInput: (data) => {
+						// Key.shift("q") covers Shift+q / Caps Lock "Q"; matchesKey
+						// lowercases its keyId, so "Q" alone would be a no-op alias.
+						if (matchesKey(data, "q") || matchesKey(data, Key.shift("q"))) {
+							done(undefined);
+							return;
+						}
+						selectList.handleInput(data);
+						tui.requestRender();
+					},
+				};
+			});
+		},
+		input: (title, placeholder, initial) => {
+			if (initial === undefined || typeof ui.custom !== "function") {
+				return ui.input(title, placeholder);
+			}
+			return ui.custom<string | undefined>((tui, theme, _kb, done) => {
+				const container = new Container();
+				container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+				container.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0));
+				const input = new Input();
+				if (initial !== "") input.setValue(initial);
+				input.onSubmit = (value) => done(value);
+				input.onEscape = () => done(undefined);
+				container.addChild(input);
+				if (placeholder) container.addChild(new Text(theme.fg("dim", placeholder), 1, 0));
+				container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+				return {
+					render: (w) => container.render(w),
+					invalidate: () => container.invalidate(),
+					handleInput: (data) => {
+						input.handleInput(data);
+						tui.requestRender();
+					},
+				};
+			});
+		},
+		notify: (message, type) => ui.notify(message, type),
+		confirm: (title, message) => ui.confirm(title, message ?? ""),
+	};
+}
+
+/**
+ * agent picker 选项排序（显示层，用户需求：显示顺序 = subagent-isolation.json
+ * 的 key 顺序）：配置过的 agent 按覆盖记录的 key 顺序排列——
+ * {...userOverrides, ...projectOverrides} 合并保序（user 先出现的 key 在
+ * 前；同名 key 位置不变；project 新 key 追加在后）；$models 已被
+ * normalizeOverride 过滤（数组 → undefined），天然不在 key 集合中，不参与
+ * 排序。未配置的 agent 按 agents 原序（discoverAgents 的文件序）追加在后。
+ * 仅用于 editAgentConfig 的 picker 构造；discoverAgents 返回顺序与派发逻辑
+ * 不受影响。
+ */
+function orderAgentsForPicker(
+	agents: AgentConfig[],
+	userOverrides: Record<string, ModelOverride>,
+	projectOverrides: Record<string, ModelOverride>,
+): AgentConfig[] {
+	const byName = new Map(agents.map((a) => [a.name, a]));
+	const configured: AgentConfig[] = [];
+	for (const key of Object.keys({ ...userOverrides, ...projectOverrides })) {
+		const agent = byName.get(key);
+		if (agent !== undefined) configured.push(agent);
+	}
+	const configuredNames = new Set(configured.map((a) => a.name));
+	return [...configured, ...agents.filter((a) => !configuredNames.has(a.name))];
+}
+
+/**
+ * Unified config flow (/subagent-config 的唯一入口): agent picker（每个
+ * 选项带生效 model/thinking 总览标注；含 $models 列表管理入口）→ 选中后
+ * 直接进入字段选择（无详情 notify；信息获取靠字段选项标注）→ 6 字段（name
+ * 只读身份标识不可编辑；description/tools/skills/body/model/thinking，选项
+ * 标注当前值）→ 编辑 → 写回 → 提示。description 提示 /reload（注入花名册
+ * 被 before_agent_start 缓存）；tools/skills/body/model/thinking 即时生效。
+ *
+ * 连续编辑语义：每个字段写回成功后回字段选择，可在一个流程内修改多个字
+ * 段；本函数不返回写回结果，仅在用户逐级 ESC 后结束。
+ *
+ * ESC 逐级回退：文本编辑 ESC → 回字段选择（可重选其它字段）；字段选择 ESC
+ * → 回 agent 选择（agentName 预选时无该层 → 直接完全退出）；agent 选择 ESC
+ * → 完全退出。body 取消（read undefined）→ 回字段选择。回退全程零写入。
+ */
+export async function editAgentConfig(deps: {
+	ui: ModelConfigEditorUI;
+	cwd: string;
+	agents: AgentConfig[];
+	agentName?: string;
+	editBody?: (
+		filePath: string,
+	) => Promise<{ ok: true; changed: boolean; cancelled?: boolean } | { ok: false; error: string }>;
+}): Promise<unknown> {
+	const { ui, cwd, agents } = deps;
+	const editBody = deps.editBody ?? ((filePath: string) => editAgentBodyWithEditor({ filePath }));
+
+	// 字段选项标注共用的生效视图：一次计算悬挂复用（user/project 覆盖从各
+	// 自文件读取，生效视图的来源归属与 dispatch 一致：project 按整 key 遮蔽
+	// user）。回退不产生写入，故循环期间视图始终有效。
+	const userOverrides = loadModelOverridesFile(resolveModelOverridePath("user", cwd));
+	const projectOverrides = loadModelOverridesFile(resolveModelOverridePath("project", cwd));
+	const effectiveView = computeEffectiveModelConfigs(agents, userOverrides, projectOverrides, getProcessOverrides());
+	const effectiveOf = (name: string) => effectiveView.find((v) => v.name === name);
+
+	/**
+	 * 字段选择层循环（预选 agent 的编辑循环）：每个字段编辑完成（写回成功）
+	 * 后回到字段选择，可连续修改多个字段；仅字段选择 ESC 返回 undefined
+	 * （调用方回上一层：agent 选择 / 完全退出）。
+	 */
+	const editFields = async (agent: AgentConfig): Promise<void> => {
+		const effective = effectiveOf(agent.name);
+		const bodySummary = agent.systemPrompt.replace(/\s+/g, " ").trim();
+		// Field select annotated with current values (appended text only; the
+		// field key stays the leading word). Mapping back goes through the
+		// parallel arrays' index, so annotations never leak into the written value.
+		// name 是只读身份标识（不可编辑）；字段顺序使 description 为首项。
+		const fields = ["description", "tools", "skills", "body", "model", "thinking"] as const;
+		const truncate = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n)}…` : s);
+		const fieldOptions: string[] = [
+			`description — ${truncate(agent.description.replace(/\s+/g, " ").trim(), 60)}`,
+			`tools — ${agent.tools && agent.tools.length > 0 ? agent.tools.join(", ") : "(all)"}`,
+			`skills — ${agent.skills && agent.skills.length > 0 ? agent.skills.join(", ") : "(default)"}`,
+			`body — ${truncate(bodySummary, 60) || "(empty)"}`,
+			effective?.model !== undefined ? `model — ${effective.model} (${effective.modelSource})` : "model",
+			effective?.thinking !== undefined ? `thinking — ${effective.thinking} (${effective.thinkingSource})` : "thinking",
+		];
+		while (true) {
+			const pickedField = await ui.select(`Agent "${agent.name}" — select field to edit`, fieldOptions);
+			if (pickedField === undefined) return; // 字段选择 ESC → 回上一层（agent 选择 / 完全退出）
+			const fieldIndex = fieldOptions.indexOf(pickedField);
+			if (fieldIndex < 0) return;
+			const field: string = fields[fieldIndex];
+
+			switch (field) {
+				case "description": {
+					// Prefill with the current value so the user edits on top of it.
+					const value = await ui.input(`Agent "${agent.name}" — new description`, agent.description, agent.description);
+					if (value === undefined) continue; // 编辑 ESC → 回字段选择
+					const result = updateAgentFile(agent.filePath, { description: value });
+					if (!result.ok) {
+						ui.notify(`Agent "${agent.name}": ${result.error}`, "error");
+						continue; // 非法值/写失败 → 错误提示后回字段选择
+					}
+					ui.notify(
+						`Agent "${agent.name}": description updated. Run /reload to rebuild the injected agent list.`,
+						"info",
+					);
+					continue; // 写回成功 → 回字段选择（可继续修改其它字段）
+				}
+				case "tools":
+				case "skills": {
+					// Prefill with the current comma-joined list (empty string when the
+					// key is absent — the caller never null-checks initial).
+					const value = await ui.input(
+						`Agent "${agent.name}" — ${field} (comma-separated, empty clears the key)`,
+						agent[field]?.join(", "),
+						agent[field]?.join(", ") ?? "",
+					);
+					if (value === undefined) continue; // 编辑 ESC → 回字段选择
+					const patch = field === "tools" ? { tools: value } : { skills: value };
+					const result = updateAgentFile(agent.filePath, patch);
+					if (!result.ok) {
+						ui.notify(`Agent "${agent.name}": ${result.error}`, "error");
+						continue;
+					}
+					ui.notify(`Agent "${agent.name}": ${field} updated — takes effect immediately.`, "info");
+					continue; // 写回成功 → 回字段选择
+				}
+				case "body": {
+					const result = await editBody(agent.filePath);
+					if (!result.ok) {
+						// 编辑器失败 → 错误提示后回字段选择（用户可重试或换字段）
+						ui.notify(`Agent "${agent.name}": body edit failed — ${result.error}`, "error");
+						continue;
+					}
+					if (!result.changed) {
+						// 未修改（vim :q）与取消（cancelled）同路：提示后回字段选择
+						ui.notify(`Agent "${agent.name}": body unchanged.`, "info");
+						continue;
+					}
+					ui.notify(`Agent "${agent.name}": body updated — takes effect immediately.`, "info");
+					continue; // 保存成功 → 回字段选择
+				}
+				default: {
+					// model / thinking: delegate to the stage-2 subflow (its own field
+					// select offers model/thinking/clear model/clear thinking). 子流
+					// 程字段选择 ESC 返回 undefined、写回成功返回结果对象——两种结果
+					// 都回本字段选择（可继续修改其它字段，不退出、不重启子流程）。
+					await editAgentModelConfig({ ui, cwd, agents, agentName: agent.name });
+					continue;
+				}
+			}
+		}
+	};
+
+	if (deps.agentName !== undefined) {
+		// agentName 预选：无 agent 选择层，字段选择 ESC = 完全退出。
+		const agent = agents.find((a) => a.name === deps.agentName);
+		if (!agent) {
+			ui.notify(`Unknown agent "${deps.agentName}" — not among the discovered subagents.`, "error");
+			return undefined;
+		}
+		await editFields(agent);
+		return undefined;
+	}
+
+	// agent 选择层循环：每个选项直接带生效 model/thinking 总览标注（格式
+	// `<name> (<source>) — <model> (<thinking>)`，未配置槽位用全角占位符
+	// （未配置）；标注为追加内容，经 indexOf 映射回 agent 本体，永不进入写
+	// 入值）。取值统一走 computeEffectiveModelConfigs 的整 key 合并（与
+	// dispatch 一致：project entry 存在时遮蔽 user 级同 key entry，未配字段
+	// 回退 frontmatter）。选项顺序 = subagent-isolation.json 的 key 顺序
+	// （orderAgentsForPicker，未配置的 agent 按发现顺序追加在后）；排序只作
+	// 用于显示层，indexOf 映射作用于排序后的数组。picker 还携带 $models 列
+	// 表管理入口。
+	const orderedAgents = orderAgentsForPicker(agents, userOverrides, projectOverrides);
+	const agentOptions = orderedAgents.map((a) => {
+		const eff = effectiveOf(a.name);
+		return `${a.name} (${a.source}) — ${eff?.model ?? "（未配置）"} (${eff?.thinking ?? "（未配置）"})`;
+	});
+	const pickerOptions = [...agentOptions, MODELS_LIST_ENTRY_LABEL];
+	while (true) {
+		const picked = await ui.select("Configure subagent — select agent", pickerOptions);
+		if (picked === undefined) return undefined; // 顶层 ESC → 完全退出
+		if (picked === MODELS_LIST_ENTRY_LABEL) {
+			// $models 子流程：动作层 ESC 或写回成功后都回 agent 选择（可连续
+			// 管理列表或改选其它 agent）。
+			await editAvailableModelsList({ ui, cwd });
+			continue;
+		}
+		const agent = orderedAgents[pickerOptions.indexOf(picked)];
+		if (!agent) return undefined;
+		await editFields(agent);
+		// 字段选择层 ESC → 回 agent 选择（循环继续）
 	}
 }
 
@@ -273,6 +1184,264 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 		for (const agent of projectAgents) agentMap.set(agent.name, agent);
 	}
 	return { agents: Array.from(agentMap.values()), projectAgentsDir };
+}
+
+/**
+ * Build the system-prompt injection block listing every discovered subagent as
+ * `name — description` (U+2014 em dash) with its source marker (user/project)
+ * on the same line. Returns "" when no agents are discovered.
+ */
+export function buildAgentPromptInjection(cwd: string, scope: AgentScope): string {
+	const { agents } = discoverAgents(cwd, scope);
+	if (agents.length === 0) return "";
+	const lines = agents.map(
+		// Flatten whitespace so name, description and source marker always stay on one line.
+		(agent) => `- ${agent.name} \u2014 ${agent.description.replace(/\s+/g, " ").trim()} (${agent.source})`,
+	);
+	return [
+		"## Available Subagents",
+		"",
+		"Delegate tasks to these specialized subagents via the `subagent` tool:",
+		"",
+		...lines,
+	].join("\n");
+}
+
+// ===== Agent file read/write (stage 3: surgical frontmatter editing) =====
+
+/**
+ * Serialize a frontmatter scalar. Plain when safely round-trippable,
+ * double-quoted (with escapes) otherwise — YAML-significant characters
+ * (": ", "#", quotes, CJK, leading digits, true/false/null lookalikes)
+ * must survive a real-parser round trip exactly.
+ */
+function yamlScalar(value: string): string {
+	const plainSafe =
+		/^[A-Za-z0-9_][A-Za-z0-9_.\-/, ]*$/.test(value) &&
+		!/^(true|false|null|~)$/i.test(value) &&
+		!/^[0-9]/.test(value);
+	if (plainSafe) return value;
+	return `"${value
+		.replace(/\\/g, "\\\\")
+		.replace(/"/g, '\\"')
+		.replace(/\n/g, "\\n")
+		.replace(/\r/g, "\\r")
+		.replace(/\t/g, "\\t")}"`;
+}
+
+/**
+ * Parse an agent definition file. Same semantics as loadAgentsFromDir
+ * (parseFrontmatter + non-empty name/description; skills key present-but-empty
+ * means [], absent means undefined), but returns a result object instead of
+ * warn-and-skip, and never throws.
+ */
+export function readAgentFile(
+	filePath: string,
+):
+	| { ok: true; name: string; description: string; tools?: string[]; skills?: string[]; body: string }
+	| { ok: false; error: string } {
+	let content: string;
+	try {
+		content = fs.readFileSync(filePath, "utf-8");
+	} catch (err) {
+		return { ok: false, error: `cannot read ${filePath}: ${err instanceof Error ? err.message : String(err)}` };
+	}
+	let frontmatter: Record<string, unknown>;
+	let body: string;
+	try {
+		({ frontmatter, body } = parseFrontmatter<Record<string, unknown>>(content));
+	} catch (err) {
+		return {
+			ok: false,
+			error: `${filePath}: invalid frontmatter (${err instanceof Error ? err.message : String(err)})`,
+		};
+	}
+	if (typeof frontmatter.name !== "string" || frontmatter.name.trim() === "") {
+		return { ok: false, error: `${filePath}: name must be a non-empty string` };
+	}
+	if (typeof frontmatter.description !== "string" || frontmatter.description.trim() === "") {
+		return { ok: false, error: `${filePath}: description must be a non-empty string` };
+	}
+	const tools = parseListField(frontmatter.tools);
+	const hasSkills = "skills" in frontmatter;
+	const skills = hasSkills ? parseListField(frontmatter.skills) ?? [] : undefined;
+	return {
+		ok: true,
+		name: frontmatter.name,
+		description: frontmatter.description,
+		tools: tools && tools.length > 0 ? tools : undefined,
+		skills,
+		body,
+	};
+}
+
+/**
+ * Surgically patch an agent definition file: replace the `^key:` line value,
+ * delete the line (tools/skills patched with ""), or append at the end of the
+ * frontmatter block — never a whole-file re-serialization, so untouched
+ * frontmatter lines (including unknown keys) and the body section stay
+ * byte-identical. name 是只读身份标识（改名功能已移除）：任何含 name 的
+ * patch 整体拒绝（合法新名也拒绝、混合 patch 不半写、字节不变、目录零改
+ * 动）；签名保留 name? 仅为类型兼容。所有校验先于任何写入。
+ */
+export function updateAgentFile(
+	filePath: string,
+	patch: { name?: string; description?: string; tools?: string; skills?: string; body?: string },
+): { ok: true; filePath: string } | { ok: false; error: string } {
+	// ---- validate everything before touching the filesystem ----
+	// 改名功能移除：任何 name patch 整体拒绝（不触发任何文件系统改动）。
+	if (patch.name !== undefined) {
+		return {
+			ok: false,
+			error: "agent name is read-only (rename support removed); name patches are rejected outright",
+		};
+	}
+	let newDescription: string | undefined;
+	if (patch.description !== undefined) {
+		newDescription = patch.description.trim();
+		if (newDescription === "") {
+			return { ok: false, error: "description must be a non-empty string" };
+		}
+	}
+
+	let content: string;
+	try {
+		content = fs.readFileSync(filePath, "utf-8");
+	} catch (err) {
+		return { ok: false, error: `cannot read ${filePath}: ${err instanceof Error ? err.message : String(err)}` };
+	}
+	const fmMatch = content.match(/^---\n([\s\S]*?)\n---\n/);
+	if (!fmMatch) return { ok: false, error: `${filePath}: no frontmatter block found` };
+
+	const fmLines = fmMatch[1].split("\n");
+	// Collect the frontmatter edits (null = delete the key line).
+	const fmEdits: Array<[string, string | null]> = [];
+	if (newDescription !== undefined) fmEdits.push(["description", newDescription]);
+	for (const key of ["tools", "skills"] as const) {
+		const rawValue = patch[key];
+		if (rawValue === undefined) continue;
+		const items = parseListField(rawValue) ?? [];
+		fmEdits.push([key, items.length > 0 ? items.join(", ") : null]);
+	}
+	// P0-1 orphan-continuation guard: line-level rewriting of a key whose
+	// current value is multi-line (block scalar `key: |` / `key: >`, or a YAML
+	// list / indented continuation on following lines) would orphan the
+	// continuation lines. Refuse the whole patch in that case (before any
+	// write); unpatched multi-line keys do not affect other keys.
+	// Fail-closed trade-offs (deliberate, not bugs — do not "fix"):
+	//  - An indented comment line immediately after a single-line scalar also
+	//    trips the continuation check: conservative refusal (safe but
+	//    conservative). 宁可拒绝，不可损坏。
+	//  - A column-0 flow-style multi-line value (e.g. `key: [a,
+	//    b]`) would slip through — a theoretical miss, accepted because the
+	//    round-trip stays parseable and no known fixture uses that style.
+	for (const [key] of fmEdits) {
+		const re = new RegExp(`^${key}:`);
+		const idx = fmLines.findIndex((l) => re.test(l));
+		if (idx < 0) continue;
+		const blockScalar = /[|>][+-]?[ \t]*$/.test(fmLines[idx]);
+		let continuation = false;
+		for (let i = idx + 1; i < fmLines.length; i++) {
+			if (fmLines[i].trim() === "") continue;
+			continuation = /^[ \t]/.test(fmLines[i]);
+			break;
+		}
+		if (blockScalar || continuation) {
+			return {
+				ok: false,
+				error: `${filePath}: cannot patch "${key}" — its current value is multi-line (block scalar or list); edit the file manually`,
+			};
+		}
+	}
+	const setKey = (key: string, value: string | null): void => {
+		const re = new RegExp(`^${key}:`);
+		const idx = fmLines.findIndex((l) => re.test(l));
+		if (value === null) {
+			if (idx >= 0) fmLines.splice(idx, 1);
+			return;
+		}
+		const line = `${key}: ${yamlScalar(value)}`;
+		if (idx >= 0) fmLines[idx] = line;
+		else fmLines.push(line);
+	};
+	for (const [key, value] of fmEdits) setKey(key, value);
+
+	const newFrontmatter = `---\n${fmLines.join("\n")}\n---\n`;
+	const newContent =
+		patch.body !== undefined ? `${newFrontmatter}${patch.body}\n` : `${newFrontmatter}${content.slice(fmMatch[0].length)}`;
+
+	if (newContent === content) {
+		return { ok: true, filePath }; // no-op
+	}
+	try {
+		fs.writeFileSync(filePath, newContent, "utf-8");
+	} catch (err) {
+		return { ok: false, error: `failed to write ${filePath}: ${err instanceof Error ? err.message : String(err)}` };
+	}
+	return { ok: true, filePath };
+}
+
+/** Default body editor: write the body to a temp file, spawn $EDITOR (fallback vi), read it back. */
+async function openBodyInExternalEditor(currentBody: string): Promise<string | undefined | { ok: false; error: string }> {
+	const editor = process.env.EDITOR || process.env.VISUAL || "vi";
+	const tmpFile = path.join(os.tmpdir(), `subagent-body-${process.pid}-${Date.now()}.md`);
+	fs.writeFileSync(tmpFile, currentBody, "utf-8");
+	try {
+		const result = spawnSync(editor, [tmpFile], { stdio: "inherit" });
+		// Launch failures (command missing etc.) and non-zero exits are reported
+		// as distinguishable errors, not conflated with a user cancel.
+		if (result.error) return { ok: false, error: `editor failed to launch (${editor}): ${result.error.message}` };
+		if (result.status !== 0) return { ok: false, error: `editor exited with code ${result.status}` };
+		return fs.readFileSync(tmpFile, "utf-8");
+	} finally {
+		try {
+			fs.unlinkSync(tmpFile);
+		} catch {
+			/* ignore cleanup errors */
+		}
+	}
+}
+
+/**
+ * Edit an agent's body in an external editor. The read callback (default:
+ * spawn $EDITOR on a temp file) receives the current body and returns the
+ * edited text; undefined (cancel), unchanged (trailing-newline-only
+ * differences included), or whitespace-only results write nothing. A read
+ * result of { ok: false, error } (editor failed to launch / exited non-zero)
+ * is propagated as-is so the caller can show a distinguishable failure. The
+ * write callback defaults to a surgical body-only write back to filePath
+ * (frontmatter block stays byte-identical).
+ */
+export async function editAgentBodyWithEditor(deps: {
+	filePath: string;
+	read?: (currentBody: string) => Promise<string | undefined | { ok: false; error: string }>;
+	write?: (filePath: string, newBody: string) => unknown;
+}): Promise<{ ok: true; changed: boolean; cancelled?: boolean } | { ok: false; error: string }> {
+	const parsed = readAgentFile(deps.filePath);
+	if (!parsed.ok) return { ok: false, error: parsed.error };
+	const readFn = deps.read ?? openBodyInExternalEditor;
+	let edited: string | undefined | { ok: false; error: string };
+	try {
+		edited = await readFn(parsed.body);
+	} catch (err) {
+		return { ok: false, error: `editor failed: ${err instanceof Error ? err.message : String(err)}` };
+	}
+	if (typeof edited === "object" && edited !== null) return edited; // { ok: false, error } from a failed launch
+	// cancelled 判别位：调用方（editAgentConfig）据此区分「取消 → 回字段选择」
+	// 与「无变化 → 结束流程」（A5 既有断言只钉 ok/changed 两字段，追加兼容）。
+	if (edited === undefined) return { ok: true, changed: false, cancelled: true };
+	const newBody = edited;
+	// Editors often append a final newline on save: a trailing-newline-only
+	// difference counts as unchanged.
+	if (newBody.replace(/\n+$/, "") === parsed.body.replace(/\n+$/, "")) return { ok: true, changed: false };
+	if (newBody.trim() === "") return { ok: true, changed: false };
+	if (deps.write) {
+		await deps.write(deps.filePath, newBody);
+	} else {
+		const result = updateAgentFile(deps.filePath, { body: newBody });
+		if (!result.ok) return { ok: false, error: result.error };
+	}
+	return { ok: true, changed: true };
 }
 
 // ===== Original index.ts =====
@@ -2518,6 +3687,28 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	// /subagent-config is the single unified interactive config entry: edit an
+	// agent's name/description/tools/skills/body/model/thinking, or manage the
+	// $models list. (The former /subagent-models command was removed —
+	// model/thinking are fields of this unified entry, so a separate command
+	// was redundant.)
+	pi.registerCommand?.("subagent-config", {
+		description:
+			"Configure a subagent interactively: name, description, tools, skills, body, model/thinking, available model list (usage: /subagent-config [agent])",
+		handler: async (args, cmdCtx) => {
+			// Same non-TUI fallback as /subagent-cancel: usage warning, no dialogs.
+			if (!cmdCtx.hasUI || cmdCtx.mode !== "tui") {
+				cmdCtx.ui?.notify?.("/subagent-config requires TUI mode (interactive config editor).", "warning");
+				return;
+			}
+			const { agents } = discoverAgents(cmdCtx.cwd, "both");
+			const agentName = (args ?? "").trim() || undefined;
+			// 零 agent 不早退：editAgentConfig 的 picker 退化为仅含 $models 管理
+			// 入口（清单 8），未知 agentName 由 editAgentConfig 报错。
+			await editAgentConfig({ ui: adaptModelConfigEditorUI(cmdCtx.ui), cwd: cmdCtx.cwd, agents, agentName });
+		},
+	});
+
 	// Read-back belongs to the user only: /subagent-result <taskId> prints the
 	// full final assistant text of a finished background subagent task. The
 	// notification card stays minimal on purpose; the full result lives in the
@@ -2624,6 +3815,35 @@ export default function (pi: ExtensionAPI) {
 				console.log(`\n[subagent-result] taskId: ${taskId}\n\n${text}\n`);
 			}
 		},
+	});
+
+	// Inject the discovered subagent roster (name — description + source) into
+	// the main agent's system prompt so it knows what it can delegate without a
+	// hand-written agent list in its prompt. Built lazily on the first trigger
+	// (ctx.cwd is unavailable at factory time) and cached in this closure, so
+	// mid-session agent file edits do not change the injection; /reload
+	// re-executes the factory, giving a fresh closure that rebuilds it.
+	// A future config-editing command running in this same factory scope may
+	// reset the cache to null to have the injection rebuilt on the next turn.
+	let agentPromptInjection: string | null = null;
+	pi.on?.("before_agent_start", async (event, ctx) => {
+		// Depth guard: inside a subagent process (depth >= 1) the subagent tool
+		// surface does not exist, so injecting the roster would be pure pollution.
+		if (parseEnvInt(process.env.PI_SUBAGENT_DEPTH, 0) >= 1) return undefined;
+		if (agentPromptInjection === null) {
+			// "Attempted" sentinel: the first trigger settles the cache whether the
+			// build succeeds or not. A missing/invalid ctx.cwd or a build failure
+			// settles to "" (silent skip), so the empty state is attempted only
+			// once and later triggers never rethrow or rebuild.
+			try {
+				agentPromptInjection =
+					typeof ctx.cwd === "string" ? buildAgentPromptInjection(ctx.cwd, "both") : "";
+			} catch {
+				agentPromptInjection = "";
+			}
+		}
+		if (!agentPromptInjection) return undefined;
+		return { systemPrompt: `${event.systemPrompt}\n\n${agentPromptInjection}` };
 	});
 
 	// Kill all in-flight background subagents when the session goes away

@@ -235,6 +235,7 @@ User runs /subagent-result <taskId> to read the full output
 | `/subagent-cancel <taskId>` | Cancel one running background task (no argument opens an interactive picker of running tasks; Enter cancels the selection) |
 | `/subagent-cancel-all` | Cancel all running background tasks at once |
 | `/subagent-result <taskId>` | Read a task's full result in a full-screen viewer (no argument opens an interactive picker of the 5 most recent finished tasks) |
+| `/subagent-config [agent]` | The single interactive config entry: the agent picker annotates each agent's effective model/thinking; edit the six fields description/tools/skills/body/model/thinking (name is read-only) and manage the available model list (with an argument, jumps straight to that agent) |
 
 ---
 
@@ -248,22 +249,59 @@ The GitHub repo ships three ready-to-reference agents in [`examples/pi/agent/age
 | [`reviewer`](https://github.com/Wolido/subagent-isolation/blob/main/examples/pi/agent/agents/reviewer.md) | Read-only review with actionable feedback | `read, grep, find, ls` | _(none)_ |
 | [`writer`](https://github.com/Wolido/subagent-isolation/blob/main/examples/pi/agent/agents/writer.md) | Write docs, READMEs, commit messages | `read, write, edit, grep, find, ls` | `writing-clearly-and-concisely` |
 
-Copy the ones you need into `~/.pi/agent/agents/` (user-scoped) or `.pi/agents/` (project-scoped; project overrides user on name collisions). Feel free to modify them or create your own.
+Copy the ones you need into `~/.pi/agent/agents/` (user-scoped) or `.pi/agents/` (project-scoped; project overrides user on name collisions). Feel free to modify them or create your own. After modifying or adding agent files, run `/reload` to refresh the subagent roster injected into the main agent's prompt (see "Configuration management").
 
 ---
 
 ## Per-subagent model configuration
 
+Model configuration has three sources: the `model:` / `thinking:` fields in an agent file's frontmatter, `subagent-isolation.json` (user/project level), and process memory-level temporary overrides (effective in the current pi window only). Of the first two, the JSON file is the recommended one: all model settings live in one file instead of scattered across agent files, `/subagent-config` edits and writes it back interactively, and JSON overrides take precedence over frontmatter — a field set in JSON shadows the same frontmatter field, so a frontmatter value stops applying silently once an override exists. The process memory layer sits at the top of the priority chain, for temporary per-window adjustments when multiple windows share one config file (see below).
+
 Use `subagent-isolation.json` to assign a model and thinking level per subagent (the file name is retained from the sync original, so both projects can share the same config):
 
 ```json
 {
+  "$models": ["deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-flash"],
   "coder": { "model": "deepseek/deepseek-v4-pro", "thinking": "high" },
   "writer": "deepseek/deepseek-v4-flash"
 }
 ```
 
-Put it in `~/.pi/agent/subagent-isolation.json` (user-level) or `.pi/subagent-isolation.json` (project-level, which overrides user-level keys of the same name). Thinking levels, priority, and merge rules are in [ADVANCED.en.md](ADVANCED.en.md).
+Put it in `~/.pi/agent/subagent-isolation.json` (user-level) or `.pi/subagent-isolation.json` (project-level, which overrides user-level keys of the same name). A complete example with all three override formats is in `examples/pi/agent/subagent-isolation.json`.
+
+**Process memory-level temporary overrides.** When multiple pi windows share the same `subagent-isolation.json`, a window can temporarily write one subagent's `model`/`thinking` to `this process` via `/subagent-config`: the override lives only in the current process's memory, nothing is written to disk, and it disappears when the process exits or on `/reload` — other windows are unaffected. The priority chain is process memory > project JSON > user JSON > frontmatter, with the same whole-key shadowing as the file layers: a process entry shadows lower-level entries of the same agent key wholesale. `$models` is unaffected — the available-model list stays file-level (its write targets are `user`/`project` only).
+
+The optional top-level `$models` array is the available-model list (the `$` prefix avoids collisions with agent names): model overrides are picked from this list, with free-text input as the fallback when the list is empty or unconfigured. A valid project-level `$models` shadows the user-level list wholesale; `"$models": []` blanks it explicitly. No hand-editing required: `/subagent-config` has a list-management entry (see the next section).
+
+Thinking levels, priority, and merge rules are in [ADVANCED.en.md](ADVANCED.en.md).
+
+---
+
+## Configuration management: `/subagent-config`
+
+In TUI mode, `/subagent-config` manages all subagent configuration interactively, with no manual file editing:
+
+1. Pick an agent: each entry carries a `(user)` / `(project)` source marker plus its effective model/thinking annotation (`<name> (<source>) — <model> (<thinking>)`, `（未配置）` when unset; effective values follow the whole-key merge — a process-memory entry shadows the project/user entries of the same key, a project-level entry shadows the user-level entry of the same key, with unset fields falling back to frontmatter, identical to dispatch); the fixed last entry `Manage available model list ($models)` opens the available-model list management (view the current list with its source, add, remove, and choose user/project as the write target). With zero agents the picker degrades to just this entry, and `$models` stays manageable.
+2. Pick a field to edit: selecting an agent goes straight to the field select, whose options carry the current-value annotations (no detail notice — information comes from the menu annotations). Six fields: `description`, `tools`, `skills`, `body`, `model`, `thinking`; `name` is a read-only identity and is not among them.
+
+How each field is edited:
+
+| Field | How it is edited |
+|-------|------------------|
+| `description` | Single-line input prefilled with the current value; a successful edit asks for `/reload` to rebuild the injected roster |
+| `tools` / `skills` | Comma-separated input; an empty input removes the key from the frontmatter |
+| `body` | Opens in an external editor (`$EDITOR`, falling back to `$VISUAL`, then `vi`); cancel, unchanged, or whitespace-only results write nothing |
+| `model` / `thinking` | Write target is one of three: `this process` (in-memory, nothing written to disk, gone on process exit or `/reload`) / `user` / `project`; `thinking` is picked from pi's official 7 levels, `model` is picked from `$models` when the list is non-empty and free-typed otherwise (prefilled with the current effective value); `clear model (reset to frontmatter)` / `clear thinking (reset to frontmatter)` options remove the override — clearing the memory layer drops that agent's in-memory override, and the result notice recomputes the effective value under the whole-key merge (with dual-level config it falls back to the other level's JSON or stays unchanged) |
+
+`name` is a read-only identity and cannot be edited.
+
+When edits take effect (reload semantics): `description` edits require `/reload` to rebuild the injected roster, because the subagent roster injected into the main agent's system prompt is built and cached at startup (see "Security and permission discipline"); `tools` / `skills` / `body` / `model` / `thinking` take effect immediately, since every dispatch re-discovers agents and re-reads the config.
+
+`/subagent-config <name>` with an argument skips the agent picker and jumps straight to that agent's config; an unknown name is an error. In non-TUI mode the command only prints a usage notice and opens no dialogs.
+
+The flow supports ESC at every level: edit → field select → agent picker → exit, with only the top level exiting; in the model/thinking subflow the field-level ESC returns to the parent flow's field select. Every back-off path writes nothing.
+
+`/subagent-config` is the only interactive config entry — model/thinking overrides are edited in the same flow as every other field, with no separate shortcut command.
 
 ---
 
@@ -316,13 +354,14 @@ Async mode introduces a few rules, baked into the tool prompts and implementatio
 - **Anti-abuse cancellation**: `action="cancel"` is a two-step confirmation (the first call only returns a zero-side-effect challenge with elapsed time and last progress; `confirm:true` + a non-empty `reason` executes, and the reason is recorded on the task and quoted in the cancelled envelope body), with prompt guidance — cancel only when the task is clearly wrong or no longer needed, never just because it's slow (background subagents are expected to run long). Waiting means making no tool call at all and ending the turn; there is deliberately no query, nag or status action for in-flight tasks.
 - **Resource-conflict discipline**: before dispatching multiple tasks in parallel, consider whether they touch the same files or code areas; when in doubt, dispatch sequentially or ask the user.
 - **Subagents cannot call the subagent tool**: a subagent (depth ≥ 1) can never call any `subagent` action (including `action="cancel"`); delegation depth is capped at 1.
+- **Subagent roster injection**: at startup the extension appends every discovered subagent (user + project scope) to the main agent's system prompt as a `name — description` list with user/project source markers, so the main agent sees every subagent's role each turn and `master.md` no longer needs a hand-written agent table. The list is built and cached at startup (or `/reload`): after editing an agent file's `name` / `description`, `/reload` is required to refresh it. Nothing is injected inside subagent processes, where the `subagent` tool surface does not exist and the roster would be pure pollution.
 - **TUI async / non-TUI sync fallback**: only TUI mode takes the async path; print/json and other non-TUI modes fall back to synchronous blocking.
 
 ---
 
 ## Advanced usage
 
-Manual `subagent` calls, `sessionId` reuse, envelope and in-flight block details, `action="cancel"` cancellation, and environment variables are covered in [ADVANCED.en.md](ADVANCED.en.md).
+Manual `subagent` calls, `sessionId` reuse, envelope and in-flight block details, `action="cancel"` cancellation, roster-injection caching, config write-back guarantees, and environment variables are covered in [ADVANCED.en.md](ADVANCED.en.md).
 
 ---
 

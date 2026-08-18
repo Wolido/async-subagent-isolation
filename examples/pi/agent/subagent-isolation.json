@@ -1,0 +1,11 @@
+{
+  "$models": [
+    "deepseek/deepseek-v4-pro",
+    "deepseek/deepseek-v4-flash",
+    "kimi-coding/k3-256k",
+    "opencode-go/deepseek-v4-flash"
+  ],
+  "coder": { "model": "deepseek/deepseek-v4-pro", "thinking": "high" },
+  "writer": "deepseek/deepseek-v4-flash",
+  "reviewer": { "thinking": "low" }
+}

@@ -22,6 +22,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
 import extension, { taskRegistry } from "../src/index.ts";
+import * as mod from "../src/index.ts";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 vi.mock("@earendil-works/pi-coding-agent", async () => {
@@ -757,6 +758,112 @@ describe("异步化改造 - TDD 红阶段", () => {
 			const text = result.content[0].text;
 			expect(text).toContain(SESSION_ID);
 			expect(text).not.toMatch(/已派出|dispatched|queued/i);
+		});
+	});
+
+	// ===========================================================================
+	// 设计决策 10：进程内存级临时覆盖接入派发（红阶段契约）
+	// ===========================================================================
+	// 契约：setProcessOverride 写入的内存层覆盖必须影响派发实际 spawn 的
+	// --model/--thinking 参数（优先级高于 project/user json 与 frontmatter，即派发
+	// 读取处 modelOverrides 的合并必须含内存层）；resetProcessOverridesForTests 后回
+	// 退到文件配置（模拟进程退出/reload 后消失）。测试经完整 execute 路径（spawn 已
+	// mock），断言 spawn 参数而非内部实现。
+	describe("设计决策 10：进程内存级临时覆盖接入派发（红阶段契约）", () => {
+		beforeEach(() => {
+			// 测试间隔离：清空模块级内存覆盖层（红阶段函数不存在时跳过）。
+			(mod as any).resetProcessOverridesForTests?.();
+		});
+
+		/** 取第一次 spawn 的 CLI 参数（含 pi 入口脚本路径前缀）。 */
+		function spawnArgs(): string[] {
+			const calls = vi.mocked(spawn).mock.calls;
+			expect(calls.length, "子进程应已 spawn").toBeGreaterThan(0);
+			return calls[0][1] as string[];
+		}
+
+		/** 取指定 flag 后的参数值；flag 不存在时返回 undefined。 */
+		function argValue(args: string[], flag: string): string | undefined {
+			const idx = args.indexOf(flag);
+			return idx >= 0 ? args[idx + 1] : undefined;
+		}
+
+		it("should pass the process-layer model/thinking to the spawned subagent (派发实际使用值)", async () => {
+			// Arrange: 内存层覆盖 tester（无任何文件配置）
+			(mod as any).setProcessOverride("tester", { model: "proc/m", thinking: "high" });
+			const { executeTool } = setupExtension();
+			const ctx = createMockTuiCtx(defaultCwd);
+
+			// Act: TUI 异步派发（spawn 已 mock，回执立即返回）
+			const executePromise = executeTool(
+				"call-1",
+				{ agent: "tester", task: "test task", sessionId: SESSION_ID },
+				undefined,
+				undefined,
+				ctx,
+			);
+			const { timedOut } = await raceWithTimeout(executePromise, 200);
+			expect(timedOut, "TUI 模式 execute 应立即返回回执").toBe(false);
+
+			// Assert: spawn 参数携带内存层 model/thinking
+			const args = spawnArgs();
+			expect(argValue(args, "--model"), "派发应使用内存层 model").toBe("proc/m");
+			expect(argValue(args, "--thinking"), "派发应使用内存层 thinking").toBe("high");
+		});
+
+		it("should prefer the process layer over a project-file override at dispatch (优先级)", async () => {
+			// Arrange: project 文件覆盖 + 内存层覆盖（内存层优先级更高）
+			fs.writeFileSync(
+				path.join(defaultCwd, ".pi", "subagent-isolation.json"),
+				JSON.stringify({ tester: { model: "proj/m" } }),
+				"utf-8",
+			);
+			(mod as any).setProcessOverride("tester", { model: "proc/m" });
+			const { executeTool } = setupExtension();
+			const ctx = createMockTuiCtx(defaultCwd);
+
+			// Act
+			const executePromise = executeTool(
+				"call-1",
+				{ agent: "tester", task: "test task", sessionId: SESSION_ID },
+				undefined,
+				undefined,
+				ctx,
+			);
+			const { timedOut } = await raceWithTimeout(executePromise, 200);
+			expect(timedOut, "TUI 模式 execute 应立即返回回执").toBe(false);
+
+			// Assert: 内存层遮蔽 project 文件
+			const args = spawnArgs();
+			expect(argValue(args, "--model"), "派发应使用内存层 model").toBe("proc/m");
+		});
+
+		it("should fall back to the file config after resetProcessOverridesForTests (reload 后消失)", async () => {
+			// Arrange: project 文件覆盖 + 内存层覆盖，随后重置（模拟进程退出/reload）
+			fs.writeFileSync(
+				path.join(defaultCwd, ".pi", "subagent-isolation.json"),
+				JSON.stringify({ tester: { model: "proj/m" } }),
+				"utf-8",
+			);
+			(mod as any).setProcessOverride("tester", { model: "proc/m" });
+			(mod as any).resetProcessOverridesForTests();
+			const { executeTool } = setupExtension();
+			const ctx = createMockTuiCtx(defaultCwd);
+
+			// Act
+			const executePromise = executeTool(
+				"call-1",
+				{ agent: "tester", task: "test task", sessionId: SESSION_ID },
+				undefined,
+				undefined,
+				ctx,
+			);
+			const { timedOut } = await raceWithTimeout(executePromise, 200);
+			expect(timedOut, "TUI 模式 execute 应立即返回回执").toBe(false);
+
+			// Assert: 内存层已空 → 派发回退 project 文件
+			const args = spawnArgs();
+			expect(argValue(args, "--model"), "重置后派发应回退到 project 文件 model").toBe("proj/m");
 		});
 	});
 });

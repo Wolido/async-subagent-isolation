@@ -13,6 +13,7 @@
 ```
 examples/pi/agent/
 ├── master.md
+├── subagent-isolation.json
 ├── agents/
 │   ├── coder.md
 │   ├── reviewer.md
@@ -52,6 +53,27 @@ cp examples/pi/agent/master.md ~/.pi/agent/master.md
 ```
 
 也可以放到项目级 `.pi/agents/` 目录，只对当前仓库生效。
+
+## 为子 agent 指定模型（`subagent-isolation.json`）
+
+[`subagent-isolation.json`](pi/agent/subagent-isolation.json) 是模型配置示例：所有子 agent 的 model 与 thinking 覆盖集中在一个文件里。JSON 不支持注释，字段语义由下表说明。
+
+复制到 `~/.pi/agent/subagent-isolation.json`（用户级）或 `.pi/subagent-isolation.json`（项目级，覆盖用户级同名 key）：
+
+```bash
+cp examples/pi/agent/subagent-isolation.json ~/.pi/agent/
+```
+
+| 字段 | 语义 |
+|------|------|
+| `$models` | 可选。可用 model 列表，`/subagent-config` 编辑 model 时从中选择，列表为空或未配置时回退自由输入。项目级 `$models` 是合法数组时整体遮蔽用户级列表，写 `[]` 可显式清空 |
+| `"coder": { "model": ..., "thinking": ... }` | 对象格式，完整配置 model 与 thinking。thinking 取 pi 官方 7 个等级之一：`off` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` |
+| `"writer": "deepseek/deepseek-v4-flash"` | 旧格式字符串，等价于 `{ "model": "deepseek/deepseek-v4-flash" }`，只配置 model |
+| `"reviewer": { "thinking": "low" }` | 只配置 thinking 的对象，演示字段级回退：entry 内未配字段回退 frontmatter |
+
+优先级链从高到低：进程内存（`/subagent-config` 写入 `this process`，不落盘，进程退出或 `/reload` 后消失）> 项目级 json > 用户级 json > frontmatter。json 中配置的字段遮蔽 frontmatter 同名值；文件层级按整 key 合并——项目级 entry 存在时整体遮蔽用户级同 key entry，entry 内未配字段仍回退 frontmatter。
+
+无需手写 JSON：`/subagent-config` 可交互编辑 model/thinking 与 `$models` 列表并写回。
 
 ## Skills (`skills/`)
 

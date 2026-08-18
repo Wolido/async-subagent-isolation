@@ -35,6 +35,28 @@ skills: /path/to/skill1,/path/to/skill2
 | `thinking` | `string` | 可选，思考等级。值为 `off \| minimal \| low \| medium \| high \| xhigh \| max`。 |
 | `skills` | `string[]`（逗号分隔） | 可选的 skill 路径列表。若存在，则禁用全局 skills，仅加载列出的 skill。路径可绝对或相对于工作目录。 |
 
+## 子 agent 清单注入（系统提示词）
+
+扩展注册 `before_agent_start` 钩子，把已发现子 agent 的清单追加到主 agent 系统提示词尾部，原有内容保持在前。主 agent 由此在每轮都能看到所有子 agent 的职责，`master.md` 无需再手写 agent 用法表。注入块格式：
+
+```
+## Available Subagents
+
+Delegate tasks to these specialized subagents via the `subagent` tool:
+
+- coder — 写代码、改代码、跑验证 (project)
+- writer — 写文档、改 README (user)
+```
+
+行为细节：
+
+- 行格式：每行一个 agent，`name — description (source)`；分隔符是 U+2014 em dash；source 为 `user` 或 `project`。发现语义与 `discoverAgents(cwd, "both")` 一致：项目级 agent 覆盖用户级同名 agent。
+- 构建与缓存：注入文本在钩子首次触发时构建（factory 执行时 `ctx.cwd` 尚不可用，无法提前构建），随后缓存在 factory 闭包中。会话中途修改 agent 文件不影响注入；`/reload` 重新执行 factory，得到新闭包并重建清单。空结果同样只构建一次：首次构建为空之后再新增 agent 文件不会触发重建，`/reload` 后才可见。
+- depth 守卫：`PI_SUBAGENT_DEPTH >= 1`（子 agent 进程内）不注入；子 agent 没有 `subagent` 工具面，注入是纯污染。
+- 静默跳过：`ctx.cwd` 缺失或构建抛错时注入静默置空，不抛错、不注入，同一 factory 实例内的后续触发不再重试。
+- 多行 description 压平：description 中的换行、tab、连续空格全部压平为单个空格，YAML 块标量（`description: |`）产生的多行文本也不例外，保证 name、description、来源标记始终在同一行。
+- 无 agent 时不注入，系统提示词原样返回。
+
 ## 子 agent 模型与思考等级配置（subagent-isolation.json）
 
 可用 `subagent-isolation.json` 为每个子 agent 单独指定模型与思考等级（thinking level）。配置文件名沿用同步版，两个项目可共享同一份配置。
@@ -55,8 +77,11 @@ skills: /path/to/skill1,/path/to/skill2
 - **纯字符串（旧格式）**：只指定模型，等价于 `{ "model": "..." }`。
 - **对象**：`{ "model": ..., "thinking": ... }`，两个字段均可选，但须至少提供一个。
 
+顶层 `$models` 数组是保留字段（`$` 前缀避免与 agent 名冲突），记录可用 model 列表，详见下文“可用 model 列表（$models）”一节。
+
 ```json
 {
+  "$models": ["deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-flash"],
   "coder": { "model": "deepseek/deepseek-v4-pro", "thinking": "high" },
   "writer": "deepseek/deepseek-v4-flash"
 }
@@ -82,22 +107,88 @@ skills: /path/to/skill1,/path/to/skill2
 
 **模型**：
 
-1. 配置文件（`subagent-isolation.json` 中该 agent 的 `model`）
-2. Agent frontmatter（`coder.md` 的 `model:` 字段）
-3. 继承主 agent 当前使用的模型
+1. 进程内存覆盖（当前进程的 `this process` 内存层）
+2. 配置文件（`subagent-isolation.json` 中该 agent 的 `model`）
+3. Agent frontmatter（`coder.md` 的 `model:` 字段）
+4. 继承主 agent 当前使用的模型
 
 **思考等级**：
 
-1. 配置文件（`subagent-isolation.json` 中该 agent 的 `thinking`）
-2. Agent frontmatter（`coder.md` 的 `thinking:` 字段）
+1. 进程内存覆盖（当前进程的 `this process` 内存层）
+2. 配置文件（`subagent-isolation.json` 中该 agent 的 `thinking`）
+3. Agent frontmatter（`coder.md` 的 `thinking:` 字段）
 
 思考等级不继承主 agent。
+
+> **推荐**：frontmatter 的 `model:` / `thinking:` 字段同样可以配置模型与思考等级，但更推荐用 `subagent-isolation.json`：模型配置集中在一个文件里，`/subagent-config` 可交互编辑；且 json 覆盖优先于 frontmatter，json 中配置的字段会遮蔽 frontmatter 同名值（json 中未配置的字段仍回退 frontmatter）。
 
 ### 合并规则
 
 项目级配置与用户级配置按 **key 合并**：项目级 key 覆盖用户级同名 key，其余 key 保留。即最近的 `.pi/subagent-isolation.json` 覆盖 `~/.pi/agent/subagent-isolation.json` 中的同名项。
 
+进程内存层在文件合并之上再按 key 合并（`{...user, ...project, ...process}`）：内存层 entry 存在时整体遮蔽低层同 key entry，与 project 遮蔽 user 的整 key 语义一致（见下节）。
+
 > **注意**：当指定模型的 provider 不支持 reasoning 时，pi 会自动把 thinking 钳制为 `off`。
+
+### 进程内存级临时覆盖（this process）
+
+多个 pi 窗口共享同一份 `subagent-isolation.json` 时，某窗口工作过程中可以把某个 subagent 的 model/thinking 临时写入 `this process`（进程内存层），只在本进程生效、不落盘：
+
+- **语义**：覆盖存放在模块级内存单例中，不写文件、不读文件；进程退出或 `/reload` 后消失，其它窗口不受影响。适合“这次任务换个模型，但不想动共享配置文件”的临时调整。
+- **写入目标**：编辑 model/thinking（含 clear）时写入目标三选一：`this process`（内存）/ `user` / `project`，选项标注当前生效来源（`(current)`）。写内存层的确认提示为 `written to this process (memory only — no file written; disappears when the process exits)`。
+- **优先级链**：进程内存层 > 项目级 json > 用户级 json > frontmatter。
+- **整 key 遮蔽**：与文件层级一致——运行时按 `{...user, ...project, ...process}` 合并，process entry 存在时整体遮蔽低层同 key entry（低层 entry 的其它字段对派发不可见）。
+- **来源标注**：字段选项的生效值来源显示为 `process`（英文枚举值，如 `model — deepseek/deepseek-v4-pro (process)`）；写入目标选项显示为 `this process`。
+- **clear 语义**：clear 作用于内存层时清除该 agent 的内存覆盖（末字段清空删整 key；无 entry 时 no-op），反馈按清除后的整 key 合并重算——回退到文件配置（project/user）或 frontmatter。
+- **`$models` 不受影响**：内存层只覆盖 agent 的 model/thinking；`$models` 列表保持文件级（读取 user/project 文件，写入目标只有 user/project）。
+- **扩展开发 API**：`setProcessOverride(agentName, patch)`（patch 语义与 `writeModelOverride` 一致：string 设 / null 清 / undefined 不动；保留字拒绝）、`getProcessOverrides()`（返回副本）、`clearProcessOverride(agentName)`、`resetProcessOverridesForTests()`（测试隔离钩子，清空内存层，模拟进程退出/reload）。
+
+### 可用 model 列表（$models）
+
+顶层 `$models` 数组记录交互编辑时可选的 model 列表。项目从未读取过无扩展名 `subagent-models` 文本文件，可用模型列表统一由 `$models` 承载。
+
+- 读取与遮蔽：`loadAvailableModels` 先查项目级文件（从 cwd 向上最近的 `.pi/subagent-isolation.json`）。项目级 `$models` 是合法数组时整体遮蔽用户级列表，显式 `"$models": []` 也算合法，可借此清空用户级列表；非数组视为未配置，回退用户级。这与 agent 覆盖的按 key 合并不同：`$models` 是整体替换，不做并集。列表项读取时会被清洗：只保留字符串项，trim，丢弃空白项，去重（首现保留）。
+- 对覆盖配置不可见：`loadModelOverridesFile` 忽略 `$models`，它不会产生名为 `$models` 的 agent 覆盖。
+- 在编辑流程中：`/subagent-config` 编辑 model 时，列表非空则从列表中选择（写入所选 ID 本身），为空或未配置时回退自由输入 `provider/model-id`（输入框预填当前生效值）。
+- 管理入口：`/subagent-config` 的 agent 选择列表末尾有 `Manage available model list ($models)` 入口，流程为查看当前列表（含来源 user/project）→ 添加或删除 → 选择写入目标（user/project）→ 写回。add 追加到列表末尾（幂等去重；原值非数组时重写为单元素列表）；remove 的目标不存在时是 no-op，删到最后一项保留 `"$models": []`，项目级可借此显式遮蔽用户级。写回保留文件的其它顶层 key（agent 配置与未知 key）逐字不变；目标文件是非法 JSON 时拒绝覆写。
+- 零 agent 仍可用：一个 agent 都没有时，`/subagent-config` 的选择列表退化为只剩该入口，`$models` 照常可管理。
+
+### 配置写回保证
+
+所有交互编辑（`/subagent-config`）落盘时遵循同一套保证：
+
+- 未知字段保留：写回读取原始 JSON，只改目标字段；其它顶层 key（含 `$schema`、`$models`）与 entry 内未知字段原样保留。旧格式纯字符串 entry（`"writer": "model-id"`）原位升级为对象格式。
+- 校验防半写：全部校验先于任何文件 IO；非法值（空 model、非法 thinking 等级）或目标文件为非法 JSON 时整体拒绝，不产生半写状态。
+- 保留 key 拒绝：agent 名为 `__proto__` / `constructor` / `prototype` 时直接拒绝（原型链污染防护）。
+- 清空语义：用 clear 选项清除字段后，若该 agent 不再有其它字段，整个 key 从 JSON 移除，不残留空对象。
+- BOM 容忍：读取配置时容忍 UTF-8 BOM（解析前剥离 `\uFEFF` 前缀）。
+- 内存层除外：写入 `this process` 的覆盖只存在于进程内存，不经由任何落盘路径（见上文“进程内存级临时覆盖”一节）。
+
+## 配置管理命令（/subagent-config）
+
+### /subagent-config 编辑流程
+
+统一交互入口，主流程：选择 agent → 选择字段 → 编辑 → 写回 → 结果提示。任一步取消都零写入。
+
+- agent 选择：选项格式为 `<name> (<source>) — <model> (<thinking>)`——来源标记外加生效 model/thinking 总览标注，未配置槽位显示 `（未配置）`；标注是追加文本，经 indexOf 映射回 agent 本体，永不进入写入值。生效值统一走 `computeEffectiveModelConfigs` 的整 key 合并，与派发实际使用一致：process entry 存在时遮蔽 project/user 同 key entry，project entry 存在时遮蔽 user 级同 key entry（低层 entry 的其它字段对派发不可见），entry 内未配字段回退 frontmatter。末尾固定 `$models` 管理入口。`/subagent-config <name>` 带参数预选直进，未知名报错。零 agent 时不早退，列表退化为只剩 `$models` 入口。
+- ESC 逐级回退：文本编辑 ESC → 回字段选择；字段选择 ESC → 回 agent 选择（带参数预选时无该层 → 直接完全退出）；agent 选择 ESC → 完全退出。body 取消（read undefined）→ 回字段选择。成功写入后流程结束；回退全程零写入。
+- 字段选择：选中 agent 后直接进入字段选择，无详情通知；信息获取靠菜单标注——字段选项自带当前值（description/tools/skills、body 摘要、model/thinking 生效值与来源）。
+- description：单行输入，输入框预填当前值（真实 TUI 用自定义预填输入框：`ui.custom` + pi-tui `Input`，Enter 提交——未改动提交原值，ESC 取消）；空或纯空白整体拒绝，文件字节不变。写回成功提示 `/reload` 刷新注入清单。
+- tools / skills：逗号分隔输入；空串从 frontmatter 删除该 key 行。
+- body：当前正文写入临时文件后 spawn 外部编辑器（`$EDITOR`，未设置回退 `$VISUAL`，再回退 vi），保存退出后读回写盘。取消、仅尾部换行差异、全空白结果均不写盘。编辑器启动失败与非零退出给出各自的错误提示，与“未改动”明确区分。
+- model / thinking：进入 model/thinking 编辑子流程（`editAgentModelConfig`），字段选择层选项带当前生效值标注（`model — <值> (<来源>)` 形式，来源为 process/project/user/frontmatter），clear 选项为 `clear model (reset to frontmatter)` / `clear thinking (reset to frontmatter)`。写入目标三选一：`this process`（进程内存，不落盘，进程退出或 /reload 后消失）/ `user` / `project`，选项标注当前生效来源（`(current)`）。clear 执行后重读 user/project 覆盖记录与内存层、按整 key 合并重算生效值作为反馈：内存层清除回退到文件配置，双层级配置下回退到另一级 json 或保持不变，frontmatter 字样仅当重算来源确为 frontmatter（或回退链到 frontmatter 仍无值 → 未配置语义）。子流程内 ESC 逐级回退：值步 ESC → 回字段选择；写入目标 ESC → 回值步（clear 分支无值步 → 直接回字段选择）；字段选择 ESC → 返回父流程字段选择（不退出、不重启子流程）。
+- reload 提示矩阵：改 description 后结果提示需 `/reload`（注入清单已缓存，见上文“子 agent 清单注入”）；改 tools/skills/body/model/thinking 提示即时生效，每次派发都重新发现 agent 并重读配置。
+- name 只读：name 是身份标识，字段选择中不出现；任何含 name 的 patch 整体拒绝（见下文“agent 文件写回（updateAgentFile）”）。
+- 非 TUI 模式：只提示用法（warning），不弹对话框、不写文件。
+
+### agent 文件写回（updateAgentFile）
+
+agent 文件编辑是行级外科手术，不做整文件重序列化：替换目标 `^key:` 行的值、删除该 key 行（tools/skills 清空时）、或在 frontmatter 块末尾追加新 key。未触碰的 frontmatter 行（含未知 key）与正文保持字节不变。
+
+- 多行值守卫：被改 key 的当前值是多行（块标量 `key: |` / `key: >`，或后跟缩进续行 / YAML 列表项）时，行级改写会孤儿化续行，整个 patch 在任何写入前被拒绝并提示手动编辑；未被改的多行 key 不影响其它字段的编辑。
+- YAML 标量序列化：值可安全往返时原样输出，否则双引号加转义（覆盖冒号、井号、引号、CJK、数字开头、true/false/null 形似值等情况）。
+- name patch 拒绝：任何含 name 的 patch 整体拒绝（name 是只读身份标识，改名功能已移除）——合法新名也拒绝、混合 patch 不半写、字节不变、目录零改动；签名保留 name? 仅为类型兼容。
+- 校验原子性：所有校验先于任何文件写入。
 
 ## 异步模式（TUI）
 

@@ -235,6 +235,7 @@ TUI 模式下 `subagent` **立即返回派发回执**，不阻塞：
 | `/subagent-cancel <taskId>` | 取消单个运行中的后台任务（不带参数时弹出运行中任务的交互选择列表，Enter 取消所选） |
 | `/subagent-cancel-all` | 一键取消全部运行中的后台任务 |
 | `/subagent-result <taskId>` | 全屏查看某任务的完整返回（不带参数时弹出最近 5 个已结束任务的交互选择列表） |
+| `/subagent-config [agent]` | 唯一的交互式配置入口：agent 选择菜单直接标注每个 agent 的生效 model/thinking，可编辑 description/tools/skills/body/model/thinking 六字段（name 只读）并管理可用 model 列表（带参数直进指定 agent） |
 
 ---
 
@@ -248,22 +249,59 @@ TUI 模式下 `subagent` **立即返回派发回执**，不阻塞：
 | [`reviewer`](https://github.com/Wolido/subagent-isolation/blob/main/examples/pi/agent/agents/reviewer.md) | 只读评审，输出可操作的反馈 | `read, grep, find, ls` | _(无)_ |
 | [`writer`](https://github.com/Wolido/subagent-isolation/blob/main/examples/pi/agent/agents/writer.md) | 写文档、改 README、生成 commit message | `read, write, edit, grep, find, ls` | `writing-clearly-and-concisely` |
 
-复制到 `~/.pi/agent/agents/`（用户级）或 `.pi/agents/`（项目级，同名时 project 覆盖 user）即可使用，可按需修改或新建。
+复制到 `~/.pi/agent/agents/`（用户级）或 `.pi/agents/`（项目级，同名时 project 覆盖 user）即可使用，可按需修改或新建。修改或新建 agent 文件后运行 `/reload`，刷新注入主 agent 提示词的子 agent 清单（见“配置管理”一节）。
 
 ---
 
 ## 为子 agent 指定模型
 
+模型有三个配置来源：agent 文件 frontmatter 的 `model:` / `thinking:` 字段、`subagent-isolation.json`（用户级/项目级），以及进程内存级临时覆盖（仅当前 pi 窗口进程生效）。前两者都支持，更推荐 json：所有 agent 的模型配置集中在一个文件里，不用逐个翻 agent 文件；`/subagent-config` 可交互编辑并写回；json 覆盖优先于 frontmatter，json 中配置的字段会遮蔽 frontmatter 同名值，frontmatter 里的配置被遮蔽时不生效、也不易察觉。进程内存层优先级最高，适合多窗口共享同一配置文件时只在本窗口临时调整（见下）。
+
 可用 `subagent-isolation.json` 为每个子 agent 单独指定模型与 thinking level（配置文件名沿用同步版，两者可共享）：
 
 ```json
 {
+  "$models": ["deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-flash"],
   "coder": { "model": "deepseek/deepseek-v4-pro", "thinking": "high" },
   "writer": "deepseek/deepseek-v4-flash"
 }
 ```
 
-文件放在 `~/.pi/agent/subagent-isolation.json`（用户级）或 `.pi/subagent-isolation.json`（项目级，覆盖用户级同名 key）。thinking 等级、优先级与合并规则详见 [ADVANCED.md](ADVANCED.md)。
+文件放在 `~/.pi/agent/subagent-isolation.json`（用户级）或 `.pi/subagent-isolation.json`（项目级，覆盖用户级同名 key）。三种覆盖格式的完整示例见 `examples/pi/agent/subagent-isolation.json`。
+
+**进程内存级临时覆盖。** 多个 pi 窗口共享同一份 `subagent-isolation.json` 时，某窗口工作过程中可以用 `/subagent-config` 把某个 subagent 的 model/thinking 临时写入 `this process`：覆盖只存在当前进程的内存里，不落盘、不写文件，进程退出或 `/reload` 后消失，其它窗口不受影响。优先级链为进程内存层 > 项目级 json > 用户级 json > frontmatter，整 key 遮蔽语义与文件层级一致——内存层 entry 存在时整体遮蔽低层同 key entry。`$models` 列表不受影响，仍是文件级（写入目标只有 user/project）。
+
+顶层 `$models` 数组是可选的可用 model 列表（`$` 前缀避免与 agent 名冲突）：配置 model 覆盖时从列表中选择，列表为空或未配置时回退自由输入。项目级 `$models` 是合法数组时整体遮蔽用户级列表，写 `"$models": []` 可显式清空。无需手写 JSON：`/subagent-config` 提供列表管理入口（见下节）。
+
+thinking 等级、优先级与合并规则详见 [ADVANCED.md](ADVANCED.md)。
+
+---
+
+## 配置管理：`/subagent-config`
+
+TUI 模式下用 `/subagent-config` 统一管理子 agent 配置，全程交互，不用手动编辑文件：
+
+1. 选择 agent：列表逐项带来源标记 `(user)` / `(project)`，并直接标注生效 model/thinking（格式 `<name> (<source>) — <model> (<thinking>)`，未配置显示 `（未配置）`；生效值按整 key 合并语义计算——进程内存 entry 遮蔽项目级/用户级同 key entry，项目级 entry 遮蔽用户级同 key entry，entry 内未配字段回退 frontmatter，与派发实际使用一致）；末尾固定一项 `Manage available model list ($models)`，进入可用 model 列表管理（查看当前列表及来源、添加、删除，写入目标可选用户级/项目级）。一个 agent 都没有时列表只剩该入口，`$models` 照常可管理。
+2. 选择字段编辑：选中 agent 后直接进入字段选择，字段选项自带当前值标注（无详情通知，信息获取靠菜单标注）。可编辑 `description`、`tools`、`skills`、`body`、`model`、`thinking` 六个字段；`name` 是只读身份标识，不在其中。
+
+各字段的编辑方式：
+
+| 字段 | 编辑方式 |
+|------|----------|
+| `description` | 单行输入，输入框预填当前值；改后需 `/reload` 才刷新注入清单 |
+| `tools` / `skills` | 逗号分隔输入；输入空串即从 frontmatter 移除该 key |
+| `body` | 在外部编辑器中编辑（`$EDITOR`，未设置回退 `$VISUAL`，再回退 vi）；取消、未改动、改完全空白都不写盘 |
+| `model` / `thinking` | 写入目标三选一：`this process`（进程内存，不落盘，进程退出或 `/reload` 后消失）/ `user` / `project`；`thinking` 从 pi 官方 7 个等级中选择，`$models` 列表非空时 `model` 从列表选择、为空时自由输入（预填当前生效值）；另有 `clear model (reset to frontmatter)` / `clear thinking (reset to frontmatter)` 选项清除覆盖，清除后按整 key 合并重算生效值并反馈（内存层清除回退到文件配置；双层级配置下回退到另一级 json 或保持不变） |
+
+`name` 是只读身份标识，不可编辑。
+
+生效时机（reload 语义）：改 `description` 后需 `/reload` 才刷新注入清单（注入主 agent 系统提示词的子 agent 清单在启动时构建并缓存，见“安全与权限纪律”一节）；改 `tools` / `skills` / `body` / `model` / `thinking` 即时生效，每次派发都会重新发现 agent 并重读配置。
+
+`/subagent-config <name>` 带参数可跳过 agent 选择、直进该 agent 的配置；名字不存在会报错。非 TUI 模式下命令只提示用法，不弹对话框。
+
+配置流程全程支持 ESC 逐级回退：编辑 → 字段选择 → agent 选择 → 退出，仅最顶层退出；model/thinking 子流程的字段层 ESC 返回父流程的字段选择。任何回退路径零写入。
+
+`/subagent-config` 是唯一的交互配置入口，model/thinking 覆盖与其余字段在同一流程内编辑，没有独立的快捷命令。
 
 ---
 
@@ -316,13 +354,14 @@ TUI 模式下 `subagent` **立即返回派发回执**，不阻塞：
 - **防滥用取消**：`action="cancel"` 为两步确认（首次调用只返回含已运行时长/最近进度的质询回执，零副作用；`confirm:true` + 非空 `reason` 才执行，理由记入任务记录并随取消信封正文返回），且内嵌提示词——仅当任务明显错误或不再需要时取消，勿因耗时长而取消（后台任务本就预期长时间运行）。等待 = 不发起任何工具调用、直接结束回合；对在途任务不存在查询/催办/状态确认类动作（刻意设计）。
 - **资源冲突纪律**：并行派发多个任务前，考虑它们是否会改同一批文件或代码区域；冲突时串行派发或先问用户。
 - **子 agent 不可调用 subagent 工具**：子 agent（深度 ≥ 1）不可调用任何 `subagent` action（含 `action="cancel"`），深度限制为 1。
+- **子 agent 清单注入**：启动时扩展把所有已发现子 agent（用户级 + 项目级）的 `name — description` 清单（含 user/project 来源标记）自动追加进主 agent 系统提示词，主 agent 每轮都能看到全部子 agent 的职责，`master.md` 无需再手写 agent 用法表。清单在启动（或 `/reload`）时构建并缓存：改了 agent 文件的 `name` / `description`，要 `/reload` 才会刷新。子 agent 进程内不注入（子 agent 没有 `subagent` 工具面，注入纯属污染）。
 - **TUI 异步 / 非 TUI 同步降级**：只在 TUI 模式走异步路径；print/json 等非 TUI 模式降级为同步阻塞。
 
 ---
 
 ## 进阶用法
 
-手写 `subagent` 调用、复用 `sessionId`、信封与在途任务块细节、`action="cancel"` 取消任务、环境变量等见 [ADVANCED.md](ADVANCED.md)。
+手写 `subagent` 调用、复用 `sessionId`、信封与在途任务块细节、`action="cancel"` 取消任务、清单注入缓存、配置写回保证、环境变量等见 [ADVANCED.md](ADVANCED.md)。
 
 ---
 
