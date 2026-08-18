@@ -13,13 +13,120 @@
 
 </div>
 
-**async-subagent-isolation** is an extension for [Pi Agent](https://github.com/earendil-works/pi) and the **async evolution** of [subagent-isolation](https://github.com/Wolido/subagent-isolation) (the synchronous version).
+Does your AI agent start "forgetting" after long sessions — output quality dropping, files changed that you never asked for? These are classic symptoms of context explosion, context rot, and context pollution. **async-subagent-isolation** is an extension for [Pi Agent](https://github.com/earendil-works/pi) and the **async evolution** of [subagent-isolation](https://github.com/Wolido/subagent-isolation) (the synchronous version), fixing them by isolating every subagent in its own process.
 
-The core constraint is unchanged: **the main agent can't touch code**. No `write`, no `edit`, no `bash` — only the four read-only tools `read`, `grep`, `find`, `ls`, plus a `subagent` tool for delegation. All file changes, shell commands, and execution logic go to subagents, each running in its own `pi` process with its own system prompt and skills. No shared state between the main agent and subagents, or between subagents.
+The core constraint is unchanged: **the main agent can't touch code**. No `write`, no `edit`, no `bash` — only the four read-only tools `read`, `grep`, `find`, `ls`, plus a `subagent` tool for delegation; all file changes, shell commands, and execution logic go to subagents. Two selling points follow. First, **skill-level prompt isolation**: every subagent runs in its own `pi` process with its own agent definition file (e.g. `coder.md`) and a skill whitelist, inheriting neither the main agent's prompt nor its skills — not a single one of the main agent's skills gets in. Second, **a division-of-labor model**: the main agent only splits, dispatches, and reviews; `coder` writes code, `writer` writes docs, `reviewer` reviews, and each subagent receives only the slice of context in its own domain. The key difference is **async**: in TUI mode, dispatch returns an **immediate receipt** (`已派出 <agent>. taskId: <taskId>`), the subagent runs in the background, and the result arrives as a **[subagent-result] system notification**; the main agent never blocks and can dispatch multiple tasks in parallel while it keeps working.
 
-The key difference is **async**: in TUI mode, the main agent dispatches a subagent and gets an **immediate receipt** (`已派出 <agent>. taskId: <taskId>`) without blocking. The subagent runs in a background process; when it finishes, the result arrives as a **[subagent-result] system notification**. If the main agent is idle the notification triggers processing right away; if busy, it queues. Meanwhile the main agent can dispatch multiple tasks in parallel and keep working.
+---
 
-Subagents split an ever-growing context into pieces, each handling its own slice; async keeps the main agent's context down to "what to do" and "what came back", while the subagent's long execution trail stays in its own process.
+## Is your agent showing these symptoms
+
+All five symptoms trace back to structural root causes, and each has a structural fix:
+
+| Symptom | Root cause | How this project fixes it |
+|---------|------------|---------------------------|
+| Output quality drops after long sessions; early agreements get forgotten | Context rot (also called context degradation): the context balloons over the session and early details get buried | Context partitioning: the main agent keeps only "what to do" and "what came back"; execution trails stay in the subagent's process |
+| The context fills up with irrelevant tool output | Context pollution: verbose subtask output flows back into the main agent | Context isolation: a subagent receives only the delegated task, never sees the main agent's execution trail, and sends back just the result |
+| The agent modifies files or runs unauthorized commands | The main agent holds write/edit/bash, too much power in one place | Least privilege: the main agent loses write/edit/bash and keeps only four read-only tools plus delegation |
+| Multiple subtasks interfere with each other | No process isolation: subagents reuse the main agent's prompt and skills | Process isolation: every subagent runs in its own pi process, with its own prompt, skills, and execution ability |
+| The main agent blocks while waiting on subtasks, with no parallelism | Synchronous delegation semantics: every call blocks until the subagent finishes | Async subagent delegation: dispatch returns a receipt immediately; the subagent runs in the background and reports back via notification |
+
+---
+
+## Why common workarounds fall short
+
+The usual responses to context rot take three routes: compaction, retrieval, and longer windows. All three buy time; none changes the mechanism by which rot sets in.
+
+- **`/compact`-style compaction is after-the-fact repair.** You compress once the context has already degraded, and compression itself loses information: early agreements and the reasoning behind decisions are often exactly what you need later. After compacting, the context swells again and the next round loses more. The rhythm of rot is unchanged — the clock just restarts from the last compaction point.
+- **RAG / retrieval memory turns the problem into tuning.** Storing history in a vector database and fetching on demand is a reasonable idea, but "what to fetch, how much, and when" becomes a new tuning burden. Fetching the wrong fragment is worse than fetching nothing: context that looks relevant but isn't will derail the main agent's judgment more easily than a clean context.
+- **A longer context window only moves the wall.** Double the window and filling it is a matter of time; every turn sends the entire history to the model, so cost climbs with length first. Nor does a bigger window cure rot: Chroma's Context Rot study measured this — performance starts degrading well before the window is full.
+
+All three routes share one default premise: a single agent carries the entire context. With that premise fixed, every solution amounts to giving the agent more: a longer window, a bigger memory, more tools. async-subagent-isolation replaces the premise itself — cut the context into slices, let each subagent handle its own, and let the main agent keep only "what to do" and "what came back".
+
+---
+
+## Who this is for
+
+This project fits if any of these describe you:
+
+- Indie developers who live in long agent sessions, and want to prevent context rot and context bloat so the main agent stays clear-headed over the long run
+- Heavy users running many subtasks in parallel, who need subagent context isolation so verbose subtask output never becomes context pollution
+- Tech leads who hold the line on permission discipline, and want the main agent under least privilege (no write/edit/bash) so touching files or running commands is structurally impossible
+- Architects building multi-agent systems, who need agent process isolation for reliable workflows
+- Throughput-minded developers who want async subagent delegation without synchronous blocking
+
+---
+
+## Prerequisites: install Pi Agent
+
+Install Pi Agent first (Node.js >= 20 required):
+
+```bash
+curl -fsSL https://pi.dev/install.sh | sh
+# or via npm:
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+```
+
+---
+
+## Quick start
+
+### 1. Install the extension
+
+```bash
+pi install npm:@wolido/async-subagent-isolation
+```
+
+### 2. Copy the example agents and skills
+
+```bash
+cp examples/pi/agent/agents/*.md ~/.pi/agent/agents/
+cp examples/pi/agent/master.md ~/.pi/agent/master.md
+cp -r examples/pi/agent/skills/* ~/.pi/agent/skills/
+```
+
+### 3. Start the main agent
+
+```bash
+pi --tools read,grep,find,ls,subagent \
+   --no-skills \
+   --append-system-prompt ~/.pi/agent/master.md \
+   --skill ~/.pi/agent/skills/brainstorming/
+```
+
+This restricts the main agent to read-only tools plus `subagent` delegation (no `write`/`edit`/`bash`), and loads the main agent prompt and brainstorming skill. For daily use, add an alias:
+
+```bash
+alias pp='pi --tools read,grep,find,ls,subagent --no-skills --append-system-prompt ~/.pi/agent/master.md --skill ~/.pi/agent/skills/brainstorming/'
+```
+
+Then just say what you need — for example, "Refactor the auth middleware to use async/await." The main agent dispatches the `coder` subagent automatically. Subagents (`coder`, `writer`) load their own skills via the `skills:` frontmatter field — no CLI flag needed. For project-scoped agents, place them in `.pi/agents/`.
+
+---
+
+## How this differs from plain subagents: why context isolation goes deeper than prompt isolation
+
+Many subagent implementations are just "spawn a tool call inside the main agent": the subagent still reuses the main agent's prompt and skills, and the main agent keeps write and shell access — isolation is optional and partial.
+
+async-subagent-isolation enforces complete isolation:
+
+- **Process isolation**: every subagent starts in its own `pi` process.
+- **Prompt isolation**: each subagent has its own agent definition file (e.g. `coder.md`), not the main agent's `master.md`.
+- **Skill isolation**: the main agent and each subagent load only their own skills, with no cross-contamination.
+- **Execution isolation (least privilege)**: the main agent loses `write`, `edit`, and `bash`; it can only delegate.
+- **Independent configuration**: each agent defines its own `tools` and `skills`, controlling exactly what it can and cannot do.
+
+Beyond that, a subagent sees only the one task it was delegated — not the main agent's execution trail (context isolation) — and cannot delegate further (recursion depth capped at 1).
+
+Two mutually reinforcing design decisions make this isolation the default behavior.
+
+**Async by default.** Dispatch delivers a task: the call returns a receipt immediately, the task runs in an independent process in the background, and the result is pushed back as a `[subagent-result]` system notification. Async is the default semantics with no optional switch — the main agent never blocks, can dispatch in parallel and keep planning, and the user always faces the dispatcher alone.
+
+**Exclusive skill isolation.** A subagent's skills load from a whitelist: everything is off by default, and only individually listed skills can enter its context. Isolation happens at the process level: each subagent is its own `pi` process, and none of the main agent's skills can get in. Isolation is therefore a structural fact: a subagent knows only what it is allowed to know, and its domain of focus is precisely controllable.
+
+**Why it matters: context partitioning.** The main agent keeps only "what to do" and "what came back"; the subagent's long execution trail stays in its own process and session, never flowing back to the main agent. Context is cut into small slices, each handled by its own agent — the main agent stays clear-headed over the long run, and planning and review are never drowned in detail. Async and isolation are both defaults, so the division of labor does not depend on discipline.
+
+Plain subagents split work. async-subagent-isolation splits everything.
 
 ---
 
@@ -50,36 +157,6 @@ More important is **the freedom after dispatch**. While a task runs in the backg
 Finally, **review when the result returns**. The subagent finishes, the notification arrives, and the main agent processes it and reports back. While you wait, you can check the progress widget, but you never have to watch.
 
 In one line: sync traps you in the "swarm execution" block; async keeps you facing a single dispatcher while background work runs alongside your own pace.
-
----
-
-## How this differs from plain subagents
-
-Many subagent implementations are just "spawn a tool call inside the main agent": the subagent still reuses the main agent's prompt and skills, and the main agent keeps write and shell access — isolation is optional and partial.
-
-async-subagent-isolation enforces complete isolation:
-
-- **Process isolation**: every subagent starts in its own `pi` process.
-- **Prompt isolation**: each subagent has its own agent definition file (e.g. `coder.md`), not the main agent's `master.md`.
-- **Skill isolation**: the main agent and each subagent load only their own skills, with no cross-contamination.
-- **Execution isolation**: the main agent loses `write`, `edit`, and `bash`; it can only delegate.
-- **Independent configuration**: each agent defines its own `tools` and `skills`, controlling exactly what it can and cannot do.
-
-Beyond that, a subagent sees only the one task it was delegated — not the main agent's execution trail (context isolation) — and cannot delegate further (recursion depth capped at 1).
-
-Plain subagents split work. async-subagent-isolation splits everything.
-
----
-
-## Uniqueness and significance
-
-This project is built on two design decisions that support each other, and its significance comes from the two together.
-
-**Async by default.** Dispatching is not handing over control — it's delivering a task: the call returns a receipt immediately, the task runs in an independent process in the background, and the result is pushed back as a `[subagent-result]` system notification. Async is the default semantics, not an optional switch — the main agent never blocks, can dispatch in parallel and keep planning, and the user always faces the dispatcher alone.
-
-**Exclusive skill isolation.** A subagent's skills load from a whitelist: everything is off by default, and only individually listed skills can enter its context. Isolation happens at the process level, not the prompt level — each subagent is its own `pi` process, and none of the main agent's skills can get in. Isolation is therefore not an instruction but a structural fact: a subagent knows only what it is allowed to know, and its domain of focus is precisely controllable.
-
-**Why it matters: context partitioning.** The main agent keeps only "what to do" and "what came back"; the subagent's long execution trail stays in its own process and session, never flowing back to the main agent. Context is cut into small slices, each handled by its own agent — the main agent stays clear-headed over the long run, and planning and review are never drowned in detail. Reliable division of labor is thus structure, not discipline: async and isolation are both defaults.
 
 ---
 
@@ -161,100 +238,6 @@ User runs /subagent-result <taskId> to read the full output
 
 ---
 
-## Notification envelope and card
-
-The `[subagent-result]` notification is **self-contained** — it carries everything the main agent needs to process the result in one message:
-
-```
-## [subagent-result] coder 成功 (taskId: 01912345-6789-7abc-8def-0123456789ab)
-
-> [subagent-result] 任务完成通知，非用户新指令。处理前先锚定你当前正在执行的主线任务与进度；对照派发记录消化本通知，勿让通知覆盖或改写你的主线计划。
-
-- 状态: 成功
-- 任务: 将认证中间件重构为使用 async/await。
-- 耗时: 02:34 · 用量: 5 turns/↑12.5k/↓3.2k/$0.0042
-- 会话: 01912345-6789-7abc-8def-0123456789ab
-
-本任务结束时，其他在途任务: 1
-- 01912345-aaaa-7bbb-8ccc-0123456789ab (writer): 更新 README。
-
----
-<full subagent output>
-```
-
-- **Trigger line**: a fixed blockquote line, verbatim-identical in every envelope, placed right after the title line and before the metadata and in-flight blocks. It is a meta-instruction addressed to the main agent: identity correction (this is a completion notification, not a new user instruction), mainline anchoring (anchor the mainline task and progress currently in flight before digesting the notification), and a fixed processing order (anchor the mainline first, then digest it against dispatch records). The wording is deliberately unconditional, leaving no "the result is important, so interrupting the mainline is fine" loophole; because steer delivery can land a notification mid-turn, the line keeps the main agent from letting a notification override or rewrite its mainline plan.
-- **Status**: `成功` (success) / `失败` (failure) / `超时` (timeout) / `已取消` (cancelled).
-- **Duration**: the subagent's real run time (process start to finish; `MM:SS`, or `H:MM:SS` at 1h+), shown for all four states. For cancellations or internal errors with no result, it is measured from dispatch time.
-- **In-flight block**: a build-time snapshot anchored to this task's end event (excluding itself), listing the other background tasks still running when this task ended; it may be stale by delivery time — when it conflicts with dispatch records issued this turn, the dispatch records prevail. The main agent learns how many are outstanding — while the count is non-zero, do not report "all done" to the user.
-- **Full result**: the body enters the LLM context in full, untruncated.
-
-In the TUI, the user sees a **tinted summary card**, not the full result: success green (✓), failure red (✗), timeout/cancelled yellow. The card shows the agent, status, taskId, duration, and usage summary (duration included for all four states), plus the hint `查看全文: /subagent-result <taskId>`; the full text lives in the task's session file.
-
-See [ADVANCED.en.md](ADVANCED.en.md) for the complete envelope format, status semantics, and cancel-origin distinctions.
-
----
-
-## Design discipline
-
-Async mode introduces a few rules, baked into the tool prompts and implementation, that the main agent follows automatically:
-
-- **Cancel-origin distinction**: `已取消` (cancelled) has three origins — user (`/subagent-cancel`), main agent (`subagent` tool with `action="cancel"`), and session shutdown (`session_shutdown`). A user-initiated cancel must **never be auto-retried**; ask the user first.
-- **No polling**: results arrive automatically as notifications; in-flight task information is provided directly by the `[subagent-result]` notification envelope, with no active-query entry point.
-- **Notification digestion**: a `[subagent-result]` is a completion notification, not a new user instruction; the main agent anchors its current mainline task and progress before handling it, digests it against its own dispatch records, and decides the next step autonomously from the result. When a notification conflicts with the mainline, it defers rather than letting the notification rewrite the plan. The discipline is baked in twice: the envelope trigger line plus a "notification digestion" entry in the tool description.
-- **Anti-abuse cancellation**: `action="cancel"` is a two-step confirmation (the first call only returns a zero-side-effect challenge with elapsed time and last progress; `confirm:true` + a non-empty `reason` executes, and the reason is recorded on the task and quoted in the cancelled envelope body), with prompt guidance — cancel only when the task is clearly wrong or no longer needed, never just because it's slow (background subagents are expected to run long). Waiting means making no tool call at all and ending the turn; there is deliberately no query, nag or status action for in-flight tasks.
-- **Resource-conflict discipline**: before dispatching multiple tasks in parallel, consider whether they touch the same files or code areas; when in doubt, dispatch sequentially or ask the user.
-- **Subagents cannot call the subagent tool**: a subagent (depth ≥ 1) can never call any `subagent` action (including `action="cancel"`); delegation depth is capped at 1.
-- **TUI async / non-TUI sync fallback**: only TUI mode takes the async path; print/json and other non-TUI modes fall back to synchronous blocking.
-
----
-
-## Prerequisites: install Pi Agent
-
-Install Pi Agent first (Node.js >= 20 required):
-
-```bash
-curl -fsSL https://pi.dev/install.sh | sh
-# or via npm:
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent
-```
-
----
-
-## Quick start
-
-### 1. Install the extension
-
-```bash
-pi install npm:@wolido/async-subagent-isolation
-```
-
-### 2. Copy the example agents and skills
-
-```bash
-cp examples/pi/agent/agents/*.md ~/.pi/agent/agents/
-cp examples/pi/agent/master.md ~/.pi/agent/master.md
-cp -r examples/pi/agent/skills/* ~/.pi/agent/skills/
-```
-
-### 3. Start the main agent
-
-```bash
-pi --tools read,grep,find,ls,subagent \
-   --no-skills \
-   --append-system-prompt ~/.pi/agent/master.md \
-   --skill ~/.pi/agent/skills/brainstorming/
-```
-
-This restricts the main agent to read-only tools plus `subagent` delegation (no `write`/`edit`/`bash`), and loads the main agent prompt and brainstorming skill. For daily use, add an alias:
-
-```bash
-alias pp='pi --tools read,grep,find,ls,subagent --no-skills --append-system-prompt ~/.pi/agent/master.md --skill ~/.pi/agent/skills/brainstorming/'
-```
-
-Then just say what you need — for example, "Refactor the auth middleware to use async/await." The main agent dispatches the `coder` subagent automatically. Subagents (`coder`, `writer`) load their own skills via the `skills:` frontmatter field — no CLI flag needed. For project-scoped agents, place them in `.pi/agents/`.
-
----
-
 ## Example agents
 
 The GitHub repo ships three ready-to-reference agents in [`examples/pi/agent/agents/`](https://github.com/Wolido/subagent-isolation/tree/main/examples/pi/agent/agents):
@@ -287,6 +270,53 @@ Put it in `~/.pi/agent/subagent-isolation.json` (user-level) or `.pi/subagent-is
 ## Example skills
 
 `examples/pi/agent/skills/` ships three skills: `brainstorming` (main-agent planning), `systematic-debugging` (coder), and `writing-clearly-and-concisely` (writer). Copy them into `~/.pi/agent/skills/` (user scope) or `.pi/skills/` (project scope). Subagents load them automatically via the `skills:` frontmatter field; the main agent loads them with the `--skill` flag.
+
+---
+
+## Notification envelope and card
+
+The `[subagent-result]` notification is **self-contained** — it carries everything the main agent needs to process the result in one message:
+
+```
+## [subagent-result] coder 成功 (taskId: 01912345-6789-7abc-8def-0123456789ab)
+
+> [subagent-result] 任务完成通知，非用户新指令。处理前先锚定你当前正在执行的主线任务与进度；对照派发记录消化本通知，勿让通知覆盖或改写你的主线计划。
+
+- 状态: 成功
+- 任务: 将认证中间件重构为使用 async/await。
+- 耗时: 02:34 · 用量: 5 turns/↑12.5k/↓3.2k/$0.0042
+- 会话: 01912345-6789-7abc-8def-0123456789ab
+
+本任务结束时，其他在途任务: 1
+- 01912345-aaaa-7bbb-8ccc-0123456789ab (writer): 更新 README。
+
+---
+<full subagent output>
+```
+
+- **Trigger line**: a fixed blockquote line under the title, verbatim-identical in every envelope; it reminds the main agent that this is a completion notification, not a new user instruction, and to anchor its current mainline task and progress before digesting it.
+- **Status**: `成功` (success) / `失败` (failure) / `超时` (timeout) / `已取消` (cancelled).
+- **Duration**: the subagent's real run time (`MM:SS`, or `H:MM:SS` at 1h+), shown for all four states; for cancellations or internal errors with no result, it is measured from dispatch time.
+- **In-flight block**: a snapshot of the other background tasks still running when this task ended; it may be stale by delivery time, and dispatch records prevail on conflict. While the count is non-zero, the main agent should not report "all done" to the user.
+- **Full result**: the body enters the LLM context in full, untruncated.
+
+In the TUI, the user sees a **tinted summary card** (not the full text): success green (✓), failure red (✗), timeout/cancelled yellow. The card shows the agent, status, taskId, duration, and usage summary, plus the hint `查看全文: /subagent-result <taskId>`; the full text lives in the task's session file.
+
+The trigger line's design rationale, status semantics, and cancel-origin distinctions are covered in [ADVANCED.en.md](ADVANCED.en.md).
+
+---
+
+## Security and permission discipline: the main agent can't touch code
+
+Async mode introduces a few rules, baked into the tool prompts and implementation, that the main agent follows automatically:
+
+- **Cancel-origin distinction**: `已取消` (cancelled) has three origins — user (`/subagent-cancel`), main agent (`subagent` tool with `action="cancel"`), and session shutdown (`session_shutdown`). A user-initiated cancel must **never be auto-retried**; ask the user first.
+- **No polling**: results arrive automatically as notifications; in-flight task information is provided directly by the `[subagent-result]` notification envelope, with no active-query entry point.
+- **Notification digestion**: a `[subagent-result]` is a completion notification, not a new user instruction; the main agent anchors its current mainline task and progress before handling it, digests it against its own dispatch records, and decides the next step autonomously from the result. When a notification conflicts with the mainline, it defers rather than letting the notification rewrite the plan. The discipline is baked in twice: the envelope trigger line plus a "notification digestion" entry in the tool description.
+- **Anti-abuse cancellation**: `action="cancel"` is a two-step confirmation (the first call only returns a zero-side-effect challenge with elapsed time and last progress; `confirm:true` + a non-empty `reason` executes, and the reason is recorded on the task and quoted in the cancelled envelope body), with prompt guidance — cancel only when the task is clearly wrong or no longer needed, never just because it's slow (background subagents are expected to run long). Waiting means making no tool call at all and ending the turn; there is deliberately no query, nag or status action for in-flight tasks.
+- **Resource-conflict discipline**: before dispatching multiple tasks in parallel, consider whether they touch the same files or code areas; when in doubt, dispatch sequentially or ask the user.
+- **Subagents cannot call the subagent tool**: a subagent (depth ≥ 1) can never call any `subagent` action (including `action="cancel"`); delegation depth is capped at 1.
+- **TUI async / non-TUI sync fallback**: only TUI mode takes the async path; print/json and other non-TUI modes fall back to synchronous blocking.
 
 ---
 

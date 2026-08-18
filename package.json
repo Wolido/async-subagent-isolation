@@ -1,7 +1,7 @@
 {
   "name": "@wolido/async-subagent-isolation",
   "version": "1.5.1",
-  "description": "A pi extension that asynchronously delegates tasks to specialized subagents running in isolated pi processes.",
+  "description": "Fix context rot and context pollution in long AI agent sessions. Subagents run in isolated processes; the main agent stays read-only and context stays clean.",
   "license": "MIT",
   "author": "Wolido",
   "repository": {
@@ -34,7 +34,16 @@
     "subagent",
     "isolation",
     "async",
-    "background"
+    "background",
+    "context-rot",
+    "context-pollution",
+    "context-isolation",
+    "process-isolation",
+    "least-privilege",
+    "agent-delegation",
+    "context-degradation",
+    "agent-memory",
+    "context-engineering"
   ],
   "publishConfig": {
     "access": "public",
