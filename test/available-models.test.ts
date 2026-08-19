@@ -605,11 +605,13 @@ describe("M3. editAgentModelConfig 的 model 分支：列表非空走 select，�
 	it("should offer exactly the $models list as a select for the model value and write the chosen id verbatim", async () => {
 		// Arrange: user 级配置 $models
 		writeIsolationFile(userFile, { $models: ["kimi-coding/k3-256k", "opencode-go/deepseek-v4-flash"] });
-		// A1 适配：agentName 必传（子流程形态，无 agent 选择步）
+		// A1 适配：agentName 必传（子流程形态，无 agent 选择步）+ 合并编辑（动作选
+		// 择层 → model 值步（$models select）→ thinking 值步 → 写入目标）
 		const { ui, calls, mismatches, leftover, notifyMock } = createScriptedUi([
-			{ select: "model" }, // 1. 选择字段
-			{ select: "kimi-coding/k3-256k" }, // 2. 从列表选择 model
-			{ select: "project" }, // 3. 写入目标
+			{ select: "edit model & thinking" }, // 1. 动作选择 edit
+			{ select: "kimi-coding/k3-256k" }, // 2. model 值步：从 $models 列表 select
+			{ select: "not set" }, // 3. thinking 值步（未配置 current）
+			{ select: "project" }, // 4. 写入目标
 		]);
 
 		// Act
@@ -623,7 +625,7 @@ describe("M3. editAgentModelConfig 的 model 分支：列表非空走 select，�
 		expect(valueCall.options, "model 值 select 的选项应恰为 $models 列表项").toHaveLength(2);
 		expect(valueCall.options!.some((o) => o.includes("kimi-coding/k3-256k"))).toBe(true);
 		expect(valueCall.options!.some((o) => o.includes("opencode-go/deepseek-v4-flash"))).toBe(true);
-		// 写入的是 model ID 本身，不是展示标签
+		// 写入的是 model ID 本身，不是展示标签；thinking 显式未配置 → 只写 model
 		expect(loadModelOverridesFile(projectFile)).toEqual({ coder: { model: "kimi-coding/k3-256k" } });
 		expect(notifyMock.mock.calls.some(([m]) => String(m).includes("coder"))).toBe(true);
 	});
@@ -632,10 +634,11 @@ describe("M3. editAgentModelConfig 的 model 分支：列表非空走 select，�
 		// Arrange: 两侧都有 $models —— project 覆盖 user
 		writeIsolationFile(userFile, { $models: ["u/user-model"] });
 		writeIsolationFile(projectFile, { $models: ["p/model-a", "p/model-b"] });
-		// A1 适配：agentName 必传（子流程形态，无 agent 选择步）
+		// A1 适配：agentName 必传（子流程形态，无 agent 选择步）+ 合并编辑
 		const { ui, calls, mismatches, leftover } = createScriptedUi([
-			{ select: "model" },
+			{ select: "edit model & thinking" },
 			{ select: "p/model-b" },
+			{ select: "not set" },
 			{ select: "user" },
 		]);
 
@@ -657,10 +660,12 @@ describe("M3. editAgentModelConfig 的 model 分支：列表非空走 select，�
 	it("should fall back to a free-text input when the $models list is empty (向后兼容，预期绿)", async () => {
 		// Arrange: （无 $models 配置 —— 与阶段 2/3 全部既有用例的环境相同）
 
-		// Act: A1 适配 —— agentName 必传，脚本首步即字段选择
+		// Act: A1 适配 —— agentName 必传 + 合并编辑（动作选择 → model 值步 input →
+		// thinking 值步 select → 写入目标 select）
 		const { ui, calls, mismatches, leftover } = createScriptedUi([
-			{ select: "model" },
+			{ select: "edit model & thinking" },
 			{ input: "vendor/free-typed" },
+			{ select: "not set" },
 			{ select: "user" },
 		]);
 		await runEditorFlow({ ui, cwd: projectDir, agents: [makeAgent("coder")], agentName: "coder" });
@@ -668,31 +673,31 @@ describe("M3. editAgentModelConfig 的 model 分支：列表非空走 select，�
 		// Assert: 值步骤是 input；写入 trim 后的自由输入值
 		expect(mismatches).toEqual([]);
 		expect(leftover).toEqual([]);
-		expect(calls.map((c) => c.kind)).toEqual(["select", "input", "select"]);
+		expect(calls.map((c) => c.kind)).toEqual(["select", "input", "select", "select"]);
 		expect(loadModelOverridesFile(userFile)).toEqual({ coder: { model: "vendor/free-typed" } });
 	});
 
-	it("should return to the field select on ESC at the model-select step (then exit on field ESC, zero writes)", async () => {
+	it("should return to the action layer on ESC at the model-select step (then exit on action ESC, zero writes)", async () => {
 		// Arrange: $models 非空，值选择步 ESC
 		writeIsolationFile(userFile, { $models: ["kimi-coding/k3-256k"] });
 		const before = fs.readFileSync(userFile, "utf-8");
-		// A1 适配 + ESC 回退语义（M4++ 同款）：值步 ESC → 回字段选择；字段选择
-		// ESC → 子流程返回（独立调用无父级 = 直接 resolve）
+		// A1 适配 + 合并编辑 ESC 回退语义（同款）：model 值步 ESC → 回动作选择；
+		// 动作选择 ESC → 子流程返回（独立调用无父级 = 直接 resolve）
 		const { ui, calls, mismatches, leftover } = createScriptedUi([
-			{ select: "model" }, // 1. 字段选择
-			{ select: undefined }, // 2. 值选择步 ESC → 回字段选择
-			{ select: undefined }, // 3. 字段选择步 ESC → 子流程返回
+			{ select: "edit model & thinking" }, // 1. 动作选择 edit
+			{ select: undefined }, // 2. model 值步（$models select）ESC → 回动作选择
+			{ select: undefined }, // 3. 动作选择步 ESC → 子流程返回
 		]);
 
 		// Act
 		await runEditorFlow({ ui, cwd: projectDir, agents: [makeAgent("coder")], agentName: "coder" });
 
-		// Assert: 值步 ESC 后回到同一字段选择；全程零写入
+		// Assert: 值步 ESC 后回到同一动作选择；全程零写入
 		expect(mismatches).toEqual([]);
 		expect(leftover).toEqual([]);
 		expect(calls).toHaveLength(3);
-		expect(calls[2].options, "值步 ESC 后应回到子流程字段选择（选项与首次一致）").toEqual(calls[0].options);
-		expect(calls[2].options?.some((o) => /clear/i.test(o)), "字段选择应含 clear 选项（区别于值步 select）").toBe(true);
+		expect(calls[2].options, "model 值步 ESC 后应回到动作选择层（选项与首次一致）").toEqual(calls[0].options);
+		expect(calls[2].options?.some((o) => /clear/i.test(o)), "动作选择应含 clear 选项（区别于值步 select）").toBe(true);
 		expect(fs.readFileSync(userFile, "utf-8")).toBe(before);
 		expect(fs.existsSync(projectFile)).toBe(false);
 	});

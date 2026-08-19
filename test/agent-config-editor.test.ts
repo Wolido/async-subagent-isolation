@@ -123,7 +123,7 @@
  *      → model → thinking；分隔/润色自由）。model/thinking 取
  *      computeEffectiveModelConfigs 生效值（json 覆盖优先 frontmatter——
  *      被遮蔽的 frontmatter 值不得出现在选项中）；未配置槽位的占位符
- *      钉死为 `（未配置）`（全角括号，不会与 model ID 子串撞车）。既有
+ *      钉死为 `not set`（全角括号，不会与 model ID 子串撞车）。既有
  *      (user)/(project) 来源标记子串断言保持兼容；标注永不进入写入值
  *      （选中标注选项必须映射回 agent 本体）。
  *   F2 ESC 逐级回退（editAgentConfig 主流程）：文本字段编辑 ESC → 回
@@ -1261,10 +1261,14 @@ describe("B9/B10. 字段编辑与 reload 提示矩阵（editAgentConfig 假 UI �
 		expect(optionOf("tools")!, "tools 选项应标注当前值").toContain("bash");
 		expect(optionOf("skills")!, "skills 选项应标注当前值").toContain("systematic-debugging");
 		expect(optionOf("body")!, "body 选项应标注正文摘要").toContain("You are the detailer");
-		expect(optionOf("model")!, "model 选项应标注生效值").toContain("fm/detail-model");
-		expect(optionOf("model")!, "model 选项应标注来源（frontmatter）").toMatch(/frontmatter/i);
-		expect(optionOf("thinking")!, "thinking 选项应标注生效级别（project json 覆盖生效）").toContain("high");
-		expect(optionOf("thinking")!, "thinking 选项应标注来源（project）").toMatch(/project/i);
+		// model & thinking 已合并为一项：合并选项同时携带两个生效值 + 各自来源
+		// （optionOf("model") 与 optionOf("thinking") 均命中同一合并项）。
+		expect(optionOf("model")!, "合并项应标注生效 model").toContain("fm/detail-model");
+		expect(optionOf("model")!, "合并项应标注 model 来源（frontmatter）").toMatch(/frontmatter/i);
+		expect(optionOf("thinking")!, "合并项应标注生效 thinking（project json 覆盖生效）").toContain("high");
+		expect(optionOf("thinking")!, "合并项应标注 thinking 来源（project）").toMatch(/project/i);
+		expect(optionOf("model")!, "model/thinking 必须合并为同一选项（同时含两个英文 key）").toMatch(/\bmodel\b/i);
+		expect(optionOf("model")!, "model/thinking 必须合并为同一选项（同时含两个英文 key）").toMatch(/\bthinking\b/i);
 		// 零写入
 		expect(fs.readFileSync(workspaceFile, "utf-8")).toBe(JSON.stringify({ detailer: { thinking: "high" } }));
 	});
@@ -1302,7 +1306,7 @@ describe("B9/B10. 字段编辑与 reload 提示矩阵（editAgentConfig 假 UI �
 		expect(readAgent(filePath).description).toBe("Detail-free desc v2");
 	});
 
-	it("should offer exactly six editable fields in the field select, with no name option (B9 完整性)", async () => {
+	it("should offer exactly five editable fields in the field select, with no name option (B9 完整性：model/thinking 合并)", async () => {
 		// Arrange
 		writeProjectAgent("coder", "model: fm/m");
 		const { agents } = discoverAgents(workspaceDir, "both");
@@ -1311,24 +1315,27 @@ describe("B9/B10. 字段编辑与 reload 提示矩阵（editAgentConfig 假 UI �
 		// Act
 		await runConfigFlow({ ui, cwd: workspaceDir, agents, agentName: "coder" });
 
-		// Assert: 字段 select 恰 6 个可编辑字段（name 已移除——只读身份标识）；
-		// 每个字段整词匹配，标签可自由润色
+		// Assert: 字段 select 恰 5 个可编辑字段（4 文本字段 + model & thinking 合
+		// 并项；name 已移除——只读身份标识）。合并项同时含 model/thinking 两个
+		// 英文 key（\bmodel\b / \bthinking\b 子串均命中它），标签可自由润色。
 		const fieldCall = calls.find((c) => c.kind === "select");
 		expect(fieldCall).toBeDefined();
 		const options = fieldCall!.options ?? [];
-		const fieldKeys = ["description", "tools", "skills", "body", "model", "thinking"];
-		for (const field of fieldKeys) {
+		const textFieldKeys = ["description", "tools", "skills", "body"];
+		const isCombinedField = (o: string) => /\bmodel\b/i.test(o) && /\bthinking\b/i.test(o);
+		for (const field of textFieldKeys) {
 			expect(
 				options.some((o) => new RegExp(`\\b${field}\\b`, "i").test(o)),
 				`字段选项缺少 ${field}（实际选项 = [${options.join(" | ")}]）`,
 			).toBe(true);
 		}
-		// 精确性：可编辑字段恰好 6 项（无多余字段项）；name 不得出现在选项中
+		expect(options.some(isCombinedField), "字段选项缺少 model & thinking 合并项（实际选项 = [" + options.join(" | ") + "]）").toBe(true);
+		// 精确性：可编辑字段恰好 5 项（无多余字段项）；name 不得出现在选项中
 		// （整词匹配，防 "rename"/标注内容中的 name 误伤）
 		expect(
-			options.filter((o) => fieldKeys.some((f) => new RegExp(`\\b${f}\\b`, "i").test(o))),
-			"字段选项应恰好覆盖 6 个可编辑字段（无多余字段项）",
-		).toHaveLength(6);
+			options.filter((o) => textFieldKeys.some((f) => new RegExp(`\\b${f}\\b`, "i").test(o)) || isCombinedField(o)),
+			"字段选项应恰好覆盖 5 个可编辑字段（无多余字段项）",
+		).toHaveLength(5);
 		expect(
 			options.some((o) => new RegExp(`\\bname\\b`, "i").test(o)),
 			"name 已不可编辑，字段选择不得出现 name 选项（实际选项 = [" + options.join(" | ") + "]）",
@@ -1471,48 +1478,53 @@ describe("B9/B10. 字段编辑与 reload 提示矩阵（editAgentConfig 假 UI �
 // 子流程写入成功 → 回父流程字段选择（本轮语义变更：脚本末尾追加父流程字段
 // 选择 ESC 步，写回断言保留）。
 // ===========================================================================
-describe("B11. model/thinking 复用阶段 2 流程（含 clear 选项与 frontmatter 回退）", () => {
-	it("should enter the stage-2 model subflow when the model field is chosen (agent 文件不受影响)", async () => {
+describe("B11. model/thinking 合并编辑（动作选择层：edit / clear model & thinking）", () => {
+	it("should enter the combined subflow when the merged field is chosen (agent 文件不受影响)", async () => {
 		// Arrange
 		const agentPath = writeProjectAgent("coder", "model: fm/coder-model");
 		const before = fs.readFileSync(agentPath, "utf-8");
 		const { agents } = discoverAgents(workspaceDir, "both");
 		const { ui, calls, mismatches, leftover, notifyMock } = createScriptedUi([
-			{ select: "model" }, // 1. 统一字段选择
-			{ select: "model" }, // 2. 复用流程的字段选择（model/thinking）
-			{ input: "vendor/m-new" }, // 3. 输入新值
-			{ select: "user" }, // 4. 写入目标
-			{ select: undefined }, // 5. 子流程写回成功 → 回父流程字段选择；字段选择 ESC → 完全退出（agentName 预选）
+			{ select: "model & thinking" }, // 1. 父流程字段选择（合并项）→ 子流程
+			{ select: "edit model & thinking" }, // 2. 子流程动作选择 edit
+			{ input: "vendor/m-new" }, // 3. model 值步（$models 空 → input）
+			{ select: "not set" }, // 4. thinking 值步：未配置 (current) → null
+			{ select: "user" }, // 5. 写入目标
+			{ select: undefined }, // 6. 子流程写回成功 → 回父流程字段选择；字段选择 ESC → 完全退出（agentName 预选）
 		]);
 
 		// Act
 		await runConfigFlow({ ui, cwd: workspaceDir, agents, agentName: "coder" });
 
-		// Assert: 序列对齐；第 2 步是阶段 2 的字段 select（含 "model"/"thinking" 字段项）
+		// Assert: 序列对齐；第 2 步是子流程动作选择层（edit / clear 两项）
 		expect(mismatches).toEqual([]);
 		expect(leftover).toEqual([]);
-		const subFieldCall = calls.filter((c) => c.kind === "select")[1];
-		// UX 改进适配（见头注 E 组）：子流程字段选项现追加当前生效值标注
-		// （如 "model — fm/m (frontmatter)"），原精确相等断言放宽为词边界子串
-		// 匹配并排除 clear 项，语义不变。
-		expect(subFieldCall.options?.some((o) => /\bmodel\b/i.test(o) && !/clear/i.test(o))).toBe(true);
-		expect(subFieldCall.options?.some((o) => /\bthinking\b/i.test(o) && !/clear/i.test(o))).toBe(true);
-		// 写入 user 级 json；agent 文件字节不变（model/thinking 不走 frontmatter patch）
+		const actionCall = calls.filter((c) => c.kind === "select")[1];
+		expect(
+			actionCall.options?.some((o) => /edit/i.test(o) && /\bmodel\b/i.test(o) && /\bthinking\b/i.test(o)),
+			"动作选择层应含 edit model & thinking 项",
+		).toBe(true);
+		expect(
+			actionCall.options?.some((o) => /clear/i.test(o) && /\bmodel\b/i.test(o) && /\bthinking\b/i.test(o)),
+			"动作选择层应含 clear model & thinking 项",
+		).toBe(true);
+		// 一次写入：thinking 显式未配置 → 只写 model；agent 文件字节不变
 		expect(loadModelOverridesFile(userFile)).toEqual({ coder: { model: "vendor/m-new" } });
 		expect(fs.readFileSync(agentPath, "utf-8")).toBe(before);
 		expect(allNotifyText(notifyMock), "model 覆盖即时生效，提示不得含 reload").not.toMatch(/reload/i);
 	});
 
-	it("should enter the stage-2 thinking subflow with the 7-level select and write the project-level file", async () => {
+	it("should write both model and thinking in one pass with the 7-level select and the project-level file", async () => {
 		// Arrange
 		writeProjectAgent("coder", "thinking: low");
 		const { agents } = discoverAgents(workspaceDir, "both");
 		const { ui, calls, mismatches, leftover, notifyMock } = createScriptedUi([
-			{ select: "thinking" }, // 1. 统一字段选择
-			{ select: "thinking" }, // 2. 复用流程的字段选择
-			{ select: "high" }, // 3. 7 级别 select
-			{ select: "project" }, // 4. 写入目标
-			{ select: undefined }, // 5. 子流程写回成功 → 回父流程字段选择；字段选择 ESC → 完全退出（agentName 预选）
+			{ select: "model & thinking" }, // 1. 父流程字段选择（合并项）→ 子流程
+			{ select: "edit model & thinking" }, // 2. 动作选择 edit
+			{ input: "keep/m" }, // 3. model 值步（$models 空 → input）
+			{ select: "high" }, // 4. thinking 值步：官方 7 级别 select
+			{ select: "project" }, // 5. 写入目标
+			{ select: undefined }, // 6. 写回成功 → 回父流程字段选择；字段选择 ESC → 完全退出（agentName 预选）
 		]);
 
 		// Act
@@ -1528,20 +1540,21 @@ describe("B11. model/thinking 复用阶段 2 流程（含 clear 选项与 frontm
 		for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
 			expect(levelCall!.options!.some((o) => o.includes(level)), `thinking 选项缺 ${level}`).toBe(true);
 		}
-		expect(loadModelOverridesFile(workspaceFile)).toEqual({ coder: { thinking: "high" } });
+		// 合并写入：model 与 thinking 一次落盘（entry 完整，不再有字段级遮蔽坑）
+		expect(loadModelOverridesFile(workspaceFile)).toEqual({ coder: { model: "keep/m", thinking: "high" } });
 		expect(fs.existsSync(userFile)).toBe(false);
 		expect(allNotifyText(notifyMock)).not.toMatch(/reload/i);
 	});
 
-	it("should offer a clear option for thinking that removes the override and falls back to frontmatter", async () => {
+	it("should clear the whole entry via the combined clear action and fall back to frontmatter", async () => {
 		// Arrange: project 级覆盖 thinking=low；frontmatter thinking=minimal
 		writeProjectAgent("coder", "thinking: minimal");
 		fs.mkdirSync(path.dirname(workspaceFile), { recursive: true });
 		fs.writeFileSync(workspaceFile, JSON.stringify({ coder: { thinking: "low" } }), "utf-8");
 		const { agents } = discoverAgents(workspaceDir, "both");
 		const { ui, mismatches, leftover, notifyMock } = createScriptedUi([
-			{ select: "thinking" }, // 1. 统一字段选择
-			{ select: /clear.*thinking|thinking.*clear/i }, // 2. 复用流程字段层的 clear 选项
+			{ select: "model & thinking" }, // 1. 父流程字段选择（合并项）→ 子流程
+			{ select: "clear model & thinking" }, // 2. 动作选择 clear（整体清除，无值步）
 			{ select: "project" }, // 3. 写入目标（清除也按目标文件生效）
 			{ select: undefined }, // 4. clear 写回成功 → 回父流程字段选择；字段选择 ESC → 完全退出（agentName 预选）
 		]);
@@ -1549,7 +1562,7 @@ describe("B11. model/thinking 复用阶段 2 流程（含 clear 选项与 frontm
 		// Act
 		await runConfigFlow({ ui, cwd: workspaceDir, agents, agentName: "coder" });
 
-		// Assert: coder key 整个移除（writeModelOverride 既有清空语义）
+		// Assert: coder 整条 entry 移除（两字段 null → entry 消失）
 		expect(mismatches).toEqual([]);
 		expect(leftover).toEqual([]);
 		expect(loadModelOverridesFile(workspaceFile)).toEqual({});
@@ -1561,14 +1574,14 @@ describe("B11. model/thinking 复用阶段 2 流程（含 clear 选项与 frontm
 		expect(allNotifyText(notifyMock)).not.toMatch(/reload/i);
 	});
 
-	it("should offer a clear option for model that removes the override and falls back to frontmatter", async () => {
+	it("should clear the whole entry on the user level and fall back to the frontmatter model", async () => {
 		// Arrange: user 级覆盖 model；frontmatter model=fm/coder-model
 		writeProjectAgent("coder", "model: fm/coder-model");
 		fs.writeFileSync(userFile, JSON.stringify({ coder: { model: "user/override-model" } }), "utf-8");
 		const { agents } = discoverAgents(workspaceDir, "both");
 		const { ui, mismatches, leftover, notifyMock } = createScriptedUi([
-			{ select: "model" }, // 1. 统一字段选择
-			{ select: /clear.*model|model.*clear/i }, // 2. 复用流程字段层的 clear 选项
+			{ select: "model & thinking" }, // 1. 父流程字段选择（合并项）→ 子流程
+			{ select: "clear model & thinking" }, // 2. 动作选择 clear
 			{ select: "user" }, // 3. 写入目标
 			{ select: undefined }, // 4. clear 写回成功 → 回父流程字段选择；字段选择 ESC → 完全退出（agentName 预选）
 		]);
@@ -1792,7 +1805,7 @@ describe("E. UX 改进：字段选项标注当前值与文本输入预填（红�
 		expect(optionOf("body")!, "body 选项应标注当前正文摘要").toContain("You are the coder");
 	});
 
-	it("should annotate the model field option with the effective model and its source", async () => {
+	it("should annotate the combined model & thinking field option with the effective model and its source", async () => {
 		// Arrange: user 级覆盖 vendor/override-m 生效（frontmatter 另有 fm/m）。
 		// 覆盖值特意不含 "user" 字样，使 /\buser\b/ 只能来自来源标注。
 		writeProjectAgent("coder", "model: fm/m");
@@ -1808,12 +1821,14 @@ describe("E. UX 改进：字段选项标注当前值与文本输入预填（红�
 		expect(leftover).toEqual([]);
 		const fieldCall = calls.find((c) => c.kind === "select");
 		const modelOption = (fieldCall?.options ?? []).find((o) => /\bmodel\b/i.test(o));
-		expect(modelOption, "字段选项缺 model").toBeDefined();
-		expect(modelOption!, "model 选项应标注当前生效值").toContain("vendor/override-m");
-		expect(modelOption!, "model 选项应标注生效来源（user 级覆盖）").toMatch(/\buser\b/i);
+		expect(modelOption, "字段选项缺 model & thinking 合并项").toBeDefined();
+		expect(modelOption!, "合并项应标注当前生效 model").toContain("vendor/override-m");
+		expect(modelOption!, "合并项应标注生效来源（user 级覆盖）").toMatch(/\buser\b/i);
+		expect(modelOption!, "合并项必须同时含 model 与 thinking 两个槽位").toMatch(/\bthinking\b/i);
+		expect(modelOption!, "thinking 未配置时槽位应显示占位符").toContain(UNCONFIGURED_PLACEHOLDER);
 	});
 
-	it("should annotate the thinking field option with the effective thinking level", async () => {
+	it("should annotate the combined model & thinking field option with the effective thinking level", async () => {
 		// Arrange: project 级覆盖 high 生效（frontmatter minimal）—— 标注取生效值而非 frontmatter
 		writeProjectAgent("coder", "thinking: minimal");
 		fs.mkdirSync(path.dirname(workspaceFile), { recursive: true });
@@ -1829,8 +1844,10 @@ describe("E. UX 改进：字段选项标注当前值与文本输入预填（红�
 		expect(leftover).toEqual([]);
 		const fieldCall = calls.find((c) => c.kind === "select");
 		const thinkingOption = (fieldCall?.options ?? []).find((o) => /\bthinking\b/i.test(o));
-		expect(thinkingOption, "字段选项缺 thinking").toBeDefined();
-		expect(thinkingOption!, "thinking 选项应标注当前生效级别（覆盖优先）").toContain("high");
+		expect(thinkingOption, "字段选项缺 model & thinking 合并项").toBeDefined();
+		expect(thinkingOption!, "合并项应标注当前生效级别（覆盖优先）").toContain("high");
+		expect(thinkingOption!, "合并项必须同时含 model 与 thinking 两个槽位").toMatch(/\bmodel\b/i);
+		expect(thinkingOption!, "model 未配置时槽位应显示占位符").toContain(UNCONFIGURED_PLACEHOLDER);
 	});
 
 	// ---------------------------------------------------------------------
@@ -1952,7 +1969,7 @@ describe("E. UX 改进：字段选项标注当前值与文本输入预填（红�
 // 选择（本轮语义变更，可连续编辑；见文件尾 G 组），仅 ESC 逐级回退触发退出。
 
 /** F1 钉死的未配置占位符（全角括号，不会与 model ID 子串撞车）。 */
-const UNCONFIGURED_PLACEHOLDER = "（未配置）";
+const UNCONFIGURED_PLACEHOLDER = "not set";
 
 describe("F1. 总览标注：agent picker 选项带生效 model/thinking（红阶段契约）", () => {
 	function setupExtension() {
@@ -2020,7 +2037,7 @@ describe("F1. 总览标注：agent picker 选项带生效 model/thinking（红�
 		const deckedOption = options.find((o) => /\bdecked\b/.test(o));
 		expect(bareOption, "picker 缺 bare 选项").toBeDefined();
 		expect(deckedOption, "picker 缺 decked 选项").toBeDefined();
-		expect(bareOption!, "未配置 agent 的选项应带占位符（未配置）").toContain(UNCONFIGURED_PLACEHOLDER);
+		expect(bareOption!, "未配置 agent 的选项应带占位符not set").toContain(UNCONFIGURED_PLACEHOLDER);
 		expect(deckedOption!, "全配置 agent 的选项不得出现占位符").not.toContain(UNCONFIGURED_PLACEHOLDER);
 		expect(deckedOption!, "decked 选项应标注生效 model").toContain("fm/decked-m");
 		expect(deckedOption!, "decked 选项应标注生效 thinking").toContain("high");
@@ -2182,67 +2199,72 @@ describe("F2. ESC 逐级回退：editAgentConfig 主流程（红阶段契约）"
 });
 
 describe("F3. ESC 逐级回退：editAgentModelConfig 子流程（红阶段契约）", () => {
-	it("should return to the subflow field select on ESC at the value step and allow switching fields (model → thinking)", async () => {
+	it("should return to the action layer on ESC at the model-value step and allow restarting edit (model 值步 ESC → 回动作选择)", async () => {
 		// Arrange
 		const agentPath = writeProjectAgent("coder");
 		const before = fs.readFileSync(agentPath, "utf-8");
 		const { agents } = discoverAgents(workspaceDir, "both");
 		const { ui, calls, mismatches, leftover } = createScriptedUi([
-			{ select: "model" }, // 1. 父流程字段选择 model → 进入子流程
-			{ select: "model" }, // 2. 子流程字段选择 model
-			{ input: undefined }, // 3. 值步 ESC → 回子流程字段选择
-			{ select: "thinking" }, // 4. 换选 thinking
-			{ select: "high" }, // 5. 官方 7 级别 select
-			{ select: "project" }, // 6. 写入目标
-			{ select: undefined }, // 7. 子流程写回成功 → 回父流程字段选择；字段选择 ESC → 完全退出（agentName 预选）
+			{ select: "model & thinking" }, // 1. 父流程字段选择（合并项）→ 进入子流程
+			{ select: "edit model & thinking" }, // 2. 子流程动作选择 edit
+			{ input: undefined }, // 3. model 值步 ESC → 回动作选择（丢弃已收集值）
+			{ select: "edit model & thinking" }, // 4. 重选 edit（换不了字段——合并编辑只有一项）
+			{ input: "keep/m" }, // 5. model 值步
+			{ select: "high" }, // 6. thinking 值步（官方 7 级别 select）
+			{ select: "project" }, // 7. 写入目标
+			{ select: undefined }, // 8. 子流程写回成功 → 回父流程字段选择；字段选择 ESC → 完全退出（agentName 预选）
 		]);
 
 		// Act
 		await runConfigFlow({ ui, cwd: workspaceDir, agents, agentName: "coder" });
 
-		// Assert: 第 4 次提问是子流程字段选择（含 clear 选项，区别于父流程字段选择）
+		// Assert: 第 4 次提问是动作选择层（含 clear 选项，区别于父流程字段选择）
 		expect(mismatches).toEqual([]);
 		expect(leftover).toEqual([]);
-		expect(calls[3].options, "值步 ESC 后应回到子流程字段选择（与首次一致）").toEqual(calls[1].options);
-		expect(calls[3].options?.some((o) => /clear/i.test(o)), "子流程字段选择应含 clear 选项").toBe(true);
-		// 换字段生效：thinking 落盘，model 未写；agent 文件字节不变
-		expect(loadModelOverridesFile(workspaceFile)).toEqual({ coder: { thinking: "high" } });
+		expect(calls[3].options, "model 值步 ESC 后应回到动作选择层（与首次一致）").toEqual(calls[1].options);
+		expect(calls[3].options?.some((o) => /clear/i.test(o)), "动作选择层应含 clear 选项").toBe(true);
+		// 重选后写回成功：model+thinking 合并落盘；agent 文件字节不变
+		expect(loadModelOverridesFile(workspaceFile)).toEqual({ coder: { model: "keep/m", thinking: "high" } });
 		expect(fs.existsSync(userFile)).toBe(false);
 		expect(fs.readFileSync(agentPath, "utf-8")).toBe(before);
 	});
 
-	it("should return to the value step on ESC at the write-target step (重输入值覆盖先前收集值)", async () => {
+	it("should return to the action layer on ESC at the write-target step (目标 ESC → 回动作选择，丢弃已收集值)", async () => {
 		// Arrange
 		writeProjectAgent("coder");
 		const { agents } = discoverAgents(workspaceDir, "both");
 		const { ui, calls, mismatches, leftover } = createScriptedUi([
-			{ select: "model" }, // 1. 父流程字段选择
-			{ select: "model" }, // 2. 子流程字段选择
-			{ input: "vendor/first-m" }, // 3. 输入第一个值
-			{ select: undefined }, // 4. 写入目标 ESC → 回值步
-			{ input: "vendor/second-m" }, // 5. 重输入（覆盖先前收集值）
-			{ select: "user" }, // 6. 写入目标 user
-			{ select: undefined }, // 7. 子流程写回成功 → 回父流程字段选择；字段选择 ESC → 完全退出（agentName 预选）
+			{ select: "model & thinking" }, // 1. 父流程字段选择
+			{ select: "edit model & thinking" }, // 2. 动作选择 edit
+			{ input: "vendor/first-m" }, // 3. model 值步
+			{ select: "high" }, // 4. thinking 值步
+			{ select: undefined }, // 5. 写入目标 ESC → 回动作选择（重编辑覆盖先前收集值）
+			{ select: "edit model & thinking" }, // 6. 重选 edit
+			{ input: "vendor/second-m" }, // 7. 重输入（覆盖先前收集值）
+			{ select: "high" }, // 8. thinking 值步
+			{ select: "user" }, // 9. 写入目标 user
+			{ select: undefined }, // 10. 子流程写回成功 → 回父流程字段选择；字段选择 ESC → 完全退出（agentName 预选）
 		]);
 
 		// Act
 		await runConfigFlow({ ui, cwd: workspaceDir, agents, agentName: "coder" });
 
-		// Assert: 第 5 次提问是值步 input（不是字段选择）；先前值不得落盘
+		// Assert: 第 6 次提问是动作选择层 select（不是值步 input）；只有重编辑值落盘
 		expect(mismatches).toEqual([]);
 		expect(leftover).toEqual([]);
-		expect(calls[4].kind, "写入目标 ESC 后应回到值步（input）").toBe("input");
-		expect(loadModelOverridesFile(userFile), "只有重输入的值落盘").toEqual({ coder: { model: "vendor/second-m" } });
+		expect(calls[5].kind, "写入目标 ESC 后应回到动作选择层（select）").toBe("select");
+		expect(calls[5].options?.some((o) => /clear/i.test(o)), "回到的应是动作选择层（含 clear 选项）").toBe(true);
+		expect(loadModelOverridesFile(userFile), "只有重编辑的值落盘").toEqual({ coder: { model: "vendor/second-m", thinking: "high" } });
 		expect(fs.existsSync(workspaceFile)).toBe(false);
 	});
 
-	it("should return to the PARENT field select on ESC at the subflow field select (不退出、不重启子流程)", async () => {
+	it("should return to the PARENT field select on ESC at the subflow action layer (不退出、不重启子流程)", async () => {
 		// Arrange
 		const filePath = writeProjectAgent("coder");
 		const { agents } = discoverAgents(workspaceDir, "both");
 		const { ui, calls, mismatches, leftover } = createScriptedUi([
-			{ select: "model" }, // 1. 父流程字段选择 model → 进入子流程
-			{ select: undefined }, // 2. 子流程字段选择 ESC → 回父流程字段选择
+			{ select: "model & thinking" }, // 1. 父流程字段选择 → 进入子流程
+			{ select: undefined }, // 2. 动作选择层 ESC → 回父流程字段选择
 			{ select: "description" }, // 3. 父流程重选 description
 			{ input: "Back at parent field" }, // 4. 提交
 			{ select: undefined }, // 5. 写回成功 → 回字段选择；字段选择 ESC → 完全退出（agentName 预选）
@@ -2251,10 +2273,10 @@ describe("F3. ESC 逐级回退：editAgentModelConfig 子流程（红阶段契�
 		// Act
 		await runConfigFlow({ ui, cwd: workspaceDir, agents, agentName: "coder" });
 
-		// Assert: 第 3 次提问是父流程字段选择（与第 1 次一致；6 字段、无 clear 选项）
+		// Assert: 第 3 次提问是父流程字段选择（与第 1 次一致；5 字段、无 clear 选项）
 		expect(mismatches).toEqual([]);
 		expect(leftover).toEqual([]);
-		expect(calls[2].options, "子流程字段选择 ESC 后应回到父流程字段选择（与首次一致）").toEqual(calls[0].options);
+		expect(calls[2].options, "动作选择 ESC 后应回到父流程字段选择（与首次一致）").toEqual(calls[0].options);
 		expect(calls[2].options?.some((o) => /clear/i.test(o)), "父流程字段选择不得含子流程的 clear 选项").toBe(false);
 		// 回父流程后可再选其它字段并落盘；model/thinking 零写入
 		expect(readAgent(filePath).description).toBe("Back at parent field");
@@ -2262,17 +2284,17 @@ describe("F3. ESC 逐级回退：editAgentModelConfig 子流程（红阶段契�
 		expect(fs.existsSync(workspaceFile)).toBe(false);
 	});
 
-	it("should return to the subflow field select on ESC at the write-target step of a clear branch (clear 无值步)", async () => {
+	it("should return to the action layer on ESC at the write-target step of a clear branch (clear 无值步)", async () => {
 		// Arrange: project 级已有 model+thinking 覆盖
 		writeProjectAgent("coder", "model: fm/coder-m\nthinking: minimal");
 		fs.mkdirSync(path.dirname(workspaceFile), { recursive: true });
 		fs.writeFileSync(workspaceFile, JSON.stringify({ coder: { model: "keep/m", thinking: "low" } }), "utf-8");
 		const { agents } = discoverAgents(workspaceDir, "both");
 		const { ui, calls, mismatches, leftover } = createScriptedUi([
-			{ select: "model" }, // 1. 父流程字段选择 model → 子流程
-			{ select: /clear.*model|model.*clear/i }, // 2. 子流程 clear model（无值步）
-			{ select: undefined }, // 3. 写入目标 ESC → 回子流程字段选择（clear 未执行）
-			{ select: /clear.*thinking|thinking.*clear/i }, // 4. 换选 clear thinking
+			{ select: "model & thinking" }, // 1. 父流程字段选择 → 子流程
+			{ select: "clear model & thinking" }, // 2. 动作选择 clear（无值步）
+			{ select: undefined }, // 3. 写入目标 ESC → 回动作选择（clear 未执行）
+			{ select: "clear model & thinking" }, // 4. 重选 clear
 			{ select: "project" }, // 5. 写入目标 project → 执行
 			{ select: undefined }, // 6. clear 写回成功 → 回父流程字段选择；字段选择 ESC → 完全退出（agentName 预选）
 		]);
@@ -2280,53 +2302,49 @@ describe("F3. ESC 逐级回退：editAgentModelConfig 子流程（红阶段契�
 		// Act
 		await runConfigFlow({ ui, cwd: workspaceDir, agents, agentName: "coder" });
 
-		// Assert: 第 4 次提问是子流程字段选择；第一个 clear 未落盘，第二个落盘
+		// Assert: 第 4 次提问是动作选择层；第一个 clear 未落盘，第二个落盘（整条清除）
 		expect(mismatches).toEqual([]);
 		expect(leftover).toEqual([]);
-		expect(calls[3].options, "clear 分支写入目标 ESC 后应回到子流程字段选择（与首次一致）").toEqual(calls[1].options);
-		expect(loadModelOverridesFile(workspaceFile), "clear model 被 ESC 不得执行；clear thinking 落盘").toEqual({
-			coder: { model: "keep/m" },
-		});
+		expect(calls[3].options, "clear 分支写入目标 ESC 后应回到动作选择层（与首次一致）").toEqual(calls[1].options);
+		expect(loadModelOverridesFile(workspaceFile), "clear 被 ESC 不得执行；重选后整条 entry 清除").toEqual({});
 		expect(fs.existsSync(userFile)).toBe(false);
 	});
 });
 
-describe("F4. Clear 说明：标签含 reset 说明 + 完成反馈含回退目标（红阶段契约）", () => {
-	it("should label the clear options with a reset-to-frontmatter explanation", async () => {
+describe("F4. Clear 说明：动作层标签含 reset 说明 + 完成反馈含双字段回退目标（红阶段契约）", () => {
+	it("should label the clear action with a reset-to-frontmatter explanation", async () => {
 		// Arrange
 		writeProjectAgent("coder");
 		const { agents } = discoverAgents(workspaceDir, "both");
 		const { ui, calls, mismatches, leftover } = createScriptedUi([
-			{ select: "model" }, // 1. 父流程字段选择 model → 子流程
-			{ select: undefined }, // 2. 子流程字段选择 ESC → 回父流程字段选择
+			{ select: "model & thinking" }, // 1. 父流程字段选择（合并项）→ 子流程
+			{ select: undefined }, // 2. 动作选择层 ESC → 回父流程字段选择
 			{ select: undefined }, // 3. 父流程字段选择 ESC → 完全退出（agentName 预选）
 		]);
 
 		// Act
 		await runConfigFlow({ ui, cwd: workspaceDir, agents, agentName: "coder" });
 
-		// Assert: 子流程字段选择的 clear 选项带 reset 说明（标签 = clear model/thinking (reset to frontmatter)）
+		// Assert: 动作选择层的 clear 选项带 reset 说明（整体清除 model & thinking）
 		expect(mismatches).toEqual([]);
 		expect(leftover).toEqual([]);
-		const subFieldOptions = calls[1].options ?? [];
-		const clearModel = subFieldOptions.find((o) => /clear/i.test(o) && /\bmodel\b/i.test(o));
-		const clearThinking = subFieldOptions.find((o) => /clear/i.test(o) && /\bthinking\b/i.test(o));
-		expect(clearModel, "子流程字段选择缺 clear model 选项").toBeDefined();
-		expect(clearThinking, "子流程字段选择缺 clear thinking 选项").toBeDefined();
-		expect(clearModel!, "clear model 标签应含 reset 说明").toMatch(/\breset\b/i);
-		expect(clearModel!, "clear model 标签应说明回退目标 frontmatter").toMatch(/\bfrontmatter\b/i);
-		expect(clearThinking!, "clear thinking 标签应含 reset 说明").toMatch(/\breset\b/i);
-		expect(clearThinking!, "clear thinking 标签应说明回退目标 frontmatter").toMatch(/\bfrontmatter\b/i);
+		const actionOptions = calls[1].options ?? [];
+		const clearAction = actionOptions.find((o) => /clear/i.test(o) && /\bmodel\b/i.test(o) && /\bthinking\b/i.test(o));
+		const editAction = actionOptions.find((o) => /edit/i.test(o) && /\bmodel\b/i.test(o) && /\bthinking\b/i.test(o));
+		expect(clearAction, "动作选择层缺 clear model & thinking 项").toBeDefined();
+		expect(editAction, "动作选择层缺 edit model & thinking 项").toBeDefined();
+		expect(clearAction!, "clear 标签应含 reset 说明").toMatch(/\breset\b/i);
+		expect(clearAction!, "clear 标签应说明回退目标 frontmatter").toMatch(/\bfrontmatter\b/i);
 	});
 
-	it("should notify the fallback target value after clearing (frontmatter 有值 → 反馈含回退值)", async () => {
-		// Arrange: user 级覆盖 model；frontmatter model=fm/coder-model
+	it("should notify the fallback target values for both model and thinking after clearing (frontmatter 有值 → 反馈含双回退值)", async () => {
+		// Arrange: user 级覆盖 model；frontmatter model=fm/coder-model（无 thinking）
 		writeProjectAgent("coder", "model: fm/coder-model");
 		fs.writeFileSync(userFile, JSON.stringify({ coder: { model: "user/override-model" } }), "utf-8");
 		const { agents } = discoverAgents(workspaceDir, "both");
 		const { ui, mismatches, leftover, notifyMock } = createScriptedUi([
-			{ select: "model" }, // 1. 父流程字段选择
-			{ select: /clear.*model|model.*clear/i }, // 2. clear model
+			{ select: "model & thinking" }, // 1. 父流程字段选择
+			{ select: "clear model & thinking" }, // 2. 动作选择 clear
 			{ select: "user" }, // 3. 写入目标
 			{ select: undefined }, // 4. clear 写回成功 → 回父流程字段选择；字段选择 ESC → 完全退出（agentName 预选）
 		]);
@@ -2334,24 +2352,24 @@ describe("F4. Clear 说明：标签含 reset 说明 + 完成反馈含回退目�
 		// Act
 		await runConfigFlow({ ui, cwd: workspaceDir, agents, agentName: "coder" });
 
-		// Assert: clear 落盘 + 完成反馈说明回退结果（frontmatter + 回退后的生效值）
+		// Assert: clear 落盘 + 完成反馈说明双字段各自回退结果（frontmatter + 生效值）
 		expect(mismatches).toEqual([]);
 		expect(leftover).toEqual([]);
 		expect(loadModelOverridesFile(userFile)).toEqual({});
 		const text = allNotifyText(notifyMock);
 		expect(text, "clear 完成反馈应说明回退到 frontmatter").toMatch(/\bfrontmatter\b/i);
-		expect(text, "clear 完成反馈应含回退后的生效值（frontmatter model）").toContain("fm/coder-model");
+		expect(text, "clear 完成反馈应含回退后的生效 model（frontmatter fm/coder-model）").toContain("fm/coder-model");
 	});
 
 	it("should notify the unconfigured fallback after clearing when frontmatter has no value either", async () => {
-		// Arrange: project 级覆盖 thinking；frontmatter 无 thinking
+		// Arrange: project 级覆盖 thinking；frontmatter 无 model/thinking
 		writeProjectAgent("coder");
 		fs.mkdirSync(path.dirname(workspaceFile), { recursive: true });
 		fs.writeFileSync(workspaceFile, JSON.stringify({ coder: { thinking: "low" } }), "utf-8");
 		const { agents } = discoverAgents(workspaceDir, "both");
 		const { ui, mismatches, leftover, notifyMock } = createScriptedUi([
-			{ select: "thinking" }, // 1. 父流程字段选择
-			{ select: /clear.*thinking|thinking.*clear/i }, // 2. clear thinking
+			{ select: "model & thinking" }, // 1. 父流程字段选择
+			{ select: "clear model & thinking" }, // 2. 动作选择 clear
 			{ select: "project" }, // 3. 写入目标
 			{ select: undefined }, // 4. clear 写回成功 → 回父流程字段选择；字段选择 ESC → 完全退出（agentName 预选）
 		]);
@@ -2370,10 +2388,10 @@ describe("F4. Clear 说明：标签含 reset 说明 + 完成反馈含回退目�
 		);
 	});
 
-	it("should report the recomputed effective value (user level) after clearing a project-level model in a dual-layer setup", async () => {
+	it("should report the recomputed effective values (user level) after clearing a project-level entry in a dual-layer setup", async () => {
 		// Arrange: 双层级混合 —— user 级 model=A + project 级 model=B + frontmatter
-		// fm/coder-m（project entry 整 key 遮蔽 user）。clear project 级 model 后生效
-		// 视图重算：project entry 消失 → 生效值回退到 user 级 A，而非 frontmatter。
+		// fm/coder-m（project entry 整 key 遮蔽 user）。clear project 级整条后生效
+		// 视图重算：project entry 消失 → model 回退到 user 级 A；thinking 无配置。
 		// 注意：project 值取名 remove-m（避开 "clear" 子串，防止与选项标注拼接后
 		// 误命中 clear 选项正则）。
 		writeProjectAgent("coder", "model: fm/coder-m");
@@ -2382,8 +2400,8 @@ describe("F4. Clear 说明：标签含 reset 说明 + 完成反馈含回退目�
 		fs.writeFileSync(workspaceFile, JSON.stringify({ coder: { model: "project/remove-m" } }), "utf-8");
 		const { agents } = discoverAgents(workspaceDir, "both");
 		const { ui, mismatches, leftover, notifyMock } = createScriptedUi([
-			{ select: "model" }, // 1. 父流程字段选择
-			{ select: /clear.*model|model.*clear/i }, // 2. clear model
+			{ select: "model & thinking" }, // 1. 父流程字段选择
+			{ select: "clear model & thinking" }, // 2. 动作选择 clear
 			{ select: "project" }, // 3. 写入目标 project
 			{ select: undefined }, // 4. clear 写回成功 → 回父流程字段选择；字段选择 ESC → 完全退出（agentName 预选）
 		]);
@@ -2393,7 +2411,7 @@ describe("F4. Clear 说明：标签含 reset 说明 + 完成反馈含回退目�
 
 		// Assert: clear 落盘；clear 完成反馈 = 清除目标 entry 后重算的生效值（user 级
 		// A，值自含来源可辨识子串 user/），不得宣称 frontmatter: fm/coder-m。断言限定
-		// 断言限定在含 "cleared" 的反馈行（写回确认/回退反馈行，不属于本契约的提示不掺入）。
+		// 在含 "cleared" 的反馈行（写回确认/回退反馈行，不属于本契约的提示不掺入）。
 		expect(mismatches).toEqual([]);
 		expect(leftover).toEqual([]);
 		expect(loadModelOverridesFile(workspaceFile)).toEqual({});
@@ -2403,9 +2421,9 @@ describe("F4. Clear 说明：标签含 reset 说明 + 完成反馈含回退目�
 		expect(clearNotify, "clear 反馈不得宣称回退到 frontmatter 值").not.toContain("fm/coder-m");
 	});
 
-	it("should report the still-effective project value after clearing a shadowed user-level model (dual-layer symmetric)", async () => {
+	it("should report the still-effective project value after clearing a shadowed user-level entry (dual-layer symmetric)", async () => {
 		// Arrange: 对称场景 —— user 级 model=A + project 级 model=B + frontmatter
-		// fm/coder-m。clear user 级 model 后 project entry 仍整 key 遮蔽 user →
+		// fm/coder-m。clear user 级整条后 project entry 仍整 key 遮蔽 user →
 		// 生效值不变仍为 B；反馈不得宣称回退到 frontmatter 或被遮蔽的 user 级 A。
 		writeProjectAgent("coder", "model: fm/coder-m");
 		fs.writeFileSync(userFile, JSON.stringify({ coder: { model: "user/keep-m" } }), "utf-8");
@@ -2413,8 +2431,8 @@ describe("F4. Clear 说明：标签含 reset 说明 + 完成反馈含回退目�
 		fs.writeFileSync(workspaceFile, JSON.stringify({ coder: { model: "project/keep-m" } }), "utf-8");
 		const { agents } = discoverAgents(workspaceDir, "both");
 		const { ui, mismatches, leftover, notifyMock } = createScriptedUi([
-			{ select: "model" }, // 1. 父流程字段选择
-			{ select: /clear.*model|model.*clear/i }, // 2. clear model
+			{ select: "model & thinking" }, // 1. 父流程字段选择
+			{ select: "clear model & thinking" }, // 2. 动作选择 clear
 			{ select: "user" }, // 3. 写入目标 user
 			{ select: undefined }, // 4. clear 写回成功 → 回父流程字段选择；字段选择 ESC → 完全退出（agentName 预选）
 		]);
@@ -2424,7 +2442,7 @@ describe("F4. Clear 说明：标签含 reset 说明 + 完成反馈含回退目�
 
 		// Assert: user 级 clear 落盘；project 仍遮蔽 → 生效值不变仍为 B；clear 完成反
 		// 馈 = 清除后重算的生效值（B，值自含来源可辨识子串 project/）。断言限定在含
-		// 断言限定在含 "cleared" 的反馈行（写回确认/回退反馈行，不属于本契约的提示不掺入）。
+		// "cleared" 的反馈行（写回确认/回退反馈行，不属于本契约的提示不掺入）。
 		expect(mismatches).toEqual([]);
 		expect(leftover).toEqual([]);
 		expect(loadModelOverridesFile(userFile)).toEqual({});
@@ -2463,8 +2481,21 @@ describe("G. 编辑成功/结束后回字段选择（可连续修改核心语义
 		expect(mismatches).toEqual([]);
 		expect(leftover).toEqual([]);
 		expect(calls.map((c) => c.kind)).toEqual(["select", "input", "select", "input", "select"]);
-		expect(calls[2].options, "第一次写回后应回到字段选择（选项与首次一致）").toEqual(calls[0].options);
-		expect(calls[4].options, "第二次写回后应再次回到字段选择（选项与首次一致）").toEqual(calls[0].options);
+		// 标注必须随写回实时刷新（本轮 bug 契约）：第一次写回后 description 标注
+		// 含新值；第二次写回后 tools 标注含新列表（且不再停留旧值）。"回到字段
+		// 选择"的语义不变：仍是 select 提问、标题含 agent 名。
+		expect(calls[2].kind, "第一次写回后应回到字段选择（仍是 select 提问）").toBe("select");
+		expect(calls[2].title, "回到字段选择的标题应含 agent 名").toContain("coder");
+		const descOption2 = (calls[2].options ?? []).find((o) => /\bdescription\b/i.test(o));
+		expect(descOption2, "第一次写回后字段选择的 description 选项应存在").toBeDefined();
+		expect(descOption2!, "description 标注应刷新为写回的新值").toContain("Desc v2");
+		expect(descOption2!, "description 标注不得停留旧值").not.toContain("coder agent");
+		expect(calls[4].kind, "第二次写回后应回到字段选择（仍是 select 提问）").toBe("select");
+		expect(calls[4].title, "回到字段选择的标题应含 agent 名").toContain("coder");
+		const toolsOption2 = (calls[4].options ?? []).find((o) => /\btools\b/i.test(o));
+		expect(toolsOption2, "第二次写回后字段选择的 tools 选项应存在").toBeDefined();
+		expect(toolsOption2!, "tools 标注应刷新为新列表").toContain("read, write, bash");
+		expect(toolsOption2!, "tools 标注不得停留在旧值（旧标注为 tools — read）").not.toMatch(/tools\s*—\s*read\s*$/i);
 		expect(readAgent(filePath).description).toBe("Desc v2");
 		expect(readAgent(filePath).tools).toEqual(["read", "write", "bash"]);
 		// 确认提示保留：description 改后需 /reload；两次写回各有含 agent 名的 info 确认
@@ -2474,17 +2505,19 @@ describe("G. 编辑成功/结束后回字段选择（可连续修改核心语义
 	});
 
 	it("should return to the parent field select after a successful model subflow write and allow continuing with a text field (子流程写回父字段选择)", async () => {
-		// Arrange: model 经子流程写回成功后不退出，回父流程字段选择继续改 description
+		// Arrange: model & thinking 经子流程合并写回成功后不退出，回父流程字段
+		// 选择继续改 description（thinking 值步确认未配置 → 只写 model）
 		const filePath = writeProjectAgent("coder");
 		const { agents } = discoverAgents(workspaceDir, "both");
 		const { ui, calls, mismatches, leftover } = createScriptedUi([
-			{ select: "model" }, // 1. 父流程字段选择 model → 进入子流程
-			{ select: "model" }, // 2. 子流程字段选择 model
-			{ input: "vendor/cont-m" }, // 3. 值步
-			{ select: "user" }, // 4. 写入目标 user → 写回成功 → 回父流程字段选择
-			{ select: "description" }, // 5. 父流程重选 description（未退出）
-			{ input: "After subflow" }, // 6. 提交 → 写回成功 → 回字段选择
-			{ select: undefined }, // 7. 字段选择 ESC → 完全退出（agentName 预选）
+			{ select: "model & thinking" }, // 1. 父流程字段选择（合并项）→ 进入子流程
+			{ select: "edit model & thinking" }, // 2. 子流程动作选择 edit
+			{ input: "vendor/cont-m" }, // 3. model 值步
+			{ select: "not set" }, // 4. thinking 值步：未配置 (current) → 确认 → null
+			{ select: "user" }, // 5. 写入目标 user → 写回成功 → 回父流程字段选择
+			{ select: "description" }, // 6. 父流程重选 description（未退出）
+			{ input: "After subflow" }, // 7. 提交 → 写回成功 → 回字段选择
+			{ select: undefined }, // 8. 字段选择 ESC → 完全退出（agentName 预选）
 		]);
 
 		// Act
@@ -2493,7 +2526,19 @@ describe("G. 编辑成功/结束后回字段选择（可连续修改核心语义
 		// Assert: 子流程写回后父字段选择可继续编辑；两侧写回都落盘
 		expect(mismatches).toEqual([]);
 		expect(leftover).toEqual([]);
-		expect(calls[4].options, "子流程写回成功后应回到父流程字段选择（选项与首次一致）").toEqual(calls[0].options);
+		// 子流程写回后父字段选择的 model 标注必须实时刷新（旧值 = frontmatter
+		// 默认/未配置占位；本夹具无 frontmatter model → 未配置）。"回到父流程
+		// 字段选择"的语义不变：仍是 select 提问、标题含 agent 名。
+		expect(calls[5].kind, "子流程写回成功后应回到父流程字段选择（仍是 select 提问）").toBe("select");
+		expect(calls[5].title, "回到字段选择的标题应含 agent 名").toContain("coder");
+		const modelOption5 = (calls[5].options ?? []).find((o) => /\bmodel\b/i.test(o));
+		expect(modelOption5, "子流程写回后父字段选择的 model & thinking 合并项应存在").toBeDefined();
+		expect(modelOption5!, "合并项 model 标注应刷新为子流程写回的新值").toContain("vendor/cont-m");
+		expect(modelOption5!, "合并项 model 标注应标 user 来源").toMatch(/\buser\b/i);
+		// 契约（E 组同款）：未配置槽位必须显示not set——本视图 thinking 未配置
+		// （子流程 thinking 值步选not set），故占位符按契约出现；model 槽位已刷
+		// 新为新值（vendor/cont-m + user 来源，见上两条断言），不再停留未配置。
+		expect(modelOption5!, "thinking 未配置槽位按契约显示占位符not set").toContain(UNCONFIGURED_PLACEHOLDER);
 		expect(loadModelOverridesFile(userFile)).toEqual({ coder: { model: "vendor/cont-m" } });
 		expect(readAgent(filePath).description).toBe("After subflow");
 	});
@@ -2519,7 +2564,14 @@ describe("G. 编辑成功/结束后回字段选择（可连续修改核心语义
 		expect(mismatches).toEqual([]);
 		expect(leftover).toEqual([]);
 		expect(calls).toHaveLength(2);
-		expect(calls[1].options, "body 保存后应回到字段选择（选项与首次一致）").toEqual(calls[0].options);
+		// body 保存后字段选择的 body 标注必须实时刷新为新正文摘要（旧正文摘要
+		// "You are the coder agent…" 不得停留）。"回到字段选择"语义不变。
+		expect(calls[1].kind, "body 保存后应回到字段选择（仍是 select 提问）").toBe("select");
+		expect(calls[1].title, "回到字段选择的标题应含 agent 名").toContain("coder");
+		const bodyOption1 = (calls[1].options ?? []).find((o) => /\bbody\b/i.test(o));
+		expect(bodyOption1, "body 保存后字段选择的 body 选项应存在").toBeDefined();
+		expect(bodyOption1!, "body 标注应刷新为新正文摘要").toContain("Body v2");
+		expect(bodyOption1!, "body 标注不得停留旧正文摘要").not.toContain("You are the coder");
 		expect(readAgent(filePath).body).toBe("Body v2.");
 		const confirmed = notifyMock.mock.calls.some(([m, t]) => (t === undefined || t === "info") && String(m).includes("coder"));
 		expect(confirmed, "保存成功应有 info 确认提示").toBe(true);
@@ -3166,10 +3218,17 @@ describe("J. 进程内存级临时覆盖：字段标注与 clear 回退（红阶
 		expect(calls).toHaveLength(1);
 		expect(notifyMock, "选中 agent 后直接进入字段选择，不得有详情 notify（取消流程应安静）").not.toHaveBeenCalled();
 		const modelOption = (calls[0].options ?? []).find((o) => /\bmodel\b/i.test(o));
-		expect(modelOption, "字段选项缺 model").toBeDefined();
-		expect(modelOption!, "字段标注应显示内存层生效 model").toContain("proc/m");
-		expect(modelOption!, "字段标注的 model 来源应含 process").toMatch(/process/i);
-		expect(modelOption!, "字段标注不得把被遮蔽的 frontmatter model 显示为生效值").not.toContain("fm/coder-m");
+		expect(modelOption, "字段选项缺 model & thinking 合并项").toBeDefined();
+		expect(modelOption!, "合并项标注应显示内存层生效 model").toContain("proc/m");
+		expect(modelOption!, "合并项 model 来源应含 process").toMatch(/process/i);
+		expect(modelOption!, "合并项必须同时含 model 与 thinking 两个槽位").toMatch(/\bthinking\b/i);
+		// saved 新语义：单字段（仅 model）进程覆盖也显示 saved；被遮蔽的前端值只
+		// 允许出现在 saved 片段内，不得泄漏进 (process) 前的生效值槽位。
+		expect(modelOption!, "单字段进程覆盖也应显示 saved 片段").toContain("[saved:");
+		const saved = modelOption!.match(/\[saved:([^\]]*)\]/)?.[1];
+		expect(saved, "saved 片段应存在").toBeDefined();
+		expect(saved!, "saved 片段应显示低层 frontmatter model 值与来源").toMatch(/fm\/coder-m\s*\(\s*frontmatter\s*\)/i);
+		expect(modelOption!.split("[saved:")[0]!, "生效值槽位不得含被遮蔽的 frontmatter model（只允许出现在 saved 片段）").not.toContain("fm/coder-m");
 	});
 
 	it("should clear the process-layer override via the full flow and fall back to frontmatter with correct feedback", async () => {
@@ -3178,8 +3237,8 @@ describe("J. 进程内存级临时覆盖：字段标注与 clear 回退（红阶
 		(mod as any).setProcessOverride("coder", { model: "proc/m" });
 		const { agents } = discoverAgents(workspaceDir, "both");
 		const { ui, mismatches, leftover, notifyMock } = createScriptedUi([
-			{ select: "model" }, // 1. 父流程字段选择 model → 子流程
-			{ select: /clear.*model|model.*clear/i }, // 2. clear model（无值步）
+			{ select: "model & thinking" }, // 1. 父流程字段选择（合并项）→ 子流程
+			{ select: "clear model & thinking" }, // 2. 动作选择 clear（整条清除，无值步）
 			{ select: "this process" }, // 3. 写入目标 this process
 			{ select: undefined }, // 4. clear 成功 → 回父流程字段选择；字段选择 ESC → 完全退出
 		]);
@@ -3197,5 +3256,739 @@ describe("J. 进程内存级临时覆盖：字段标注与 clear 回退（红阶
 		expect(clearNotify, "clear 反馈应说明回退到 frontmatter").toMatch(/\bfrontmatter\b/i);
 		expect(clearNotify, "clear 反馈应含回退后的生效值（frontmatter model）").toContain("fm/coder-m");
 		expect(clearNotify, "clear 反馈不得宣称被清除的内存层值").not.toContain("proc/m");
+	});
+});
+
+// ===========================================================================
+// K. 写回后菜单标注实时刷新（本轮红阶段，用户报告的 bug 契约）
+// ===========================================================================
+// 用户报告：在 /subagent-config 里更新一个 agent 的 model 后，同一命令会话
+// 内菜单标注不会立即更新（字段选择与 agent 选择列表的标注都是旧值），必须
+// 退出命令重新进入才能看到新值。根因：editAgentConfig 的生效视图
+// （userOverrides/projectOverrides/effectiveView）、editFields 的
+// effective/fieldOptions、agent picker 的 orderedAgents/agentOptions/
+// pickerOptions 都在命令入口只计算一次并悬挂在闭包里——任何字段写回成功后
+// 这些标注都不刷新。
+// 本组钉死新契约：同一次命令会话内，任何写回成功后回到的菜单（父字段选择 /
+// agent picker）标注必须立即反映新值（含来源）；clear 后标注回退显示回退
+// 值；this process 写入只刷新标注、不落盘。全部经 createScriptedUi 的 calls
+// 记录断言（optionOf 风格定位选项，子串/正则匹配，不钉死实现文案）。
+describe("K. 写回后菜单标注实时刷新（同一次命令会话内不退出即可见）", () => {
+	beforeEach(() => {
+		// 测试间隔离：清空模块级内存覆盖层（K7 写 this process 的密闭性）。
+		(mod as any).resetProcessOverridesForTests?.();
+	});
+
+	afterEach(() => {
+		// 密闭：不留覆盖给同文件后续 describe（测试卫生）。
+		(mod as any).resetProcessOverridesForTests?.();
+	});
+
+	/** optionOf 辅助：按字段 key 词边界定位选项（与 E 组同款风格）。 */
+	function optionOf(options: string[] | undefined, field: string): string | undefined {
+		return (options ?? []).find((o) => new RegExp(`\\b${field}\\b`, "i").test(o));
+	}
+
+	/** setupExtension：命令注册捕获（与 H/B8 组同款，K 组内局部定义）。 */
+	function setupExtension() {
+		const pi = createMockPi();
+		(mod.default as any)(pi);
+		return { pi, command: pi._commandDefs.get("subagent-config") };
+	}
+
+	/** $models 管理入口选项（picker 恒追加在 agent 选项之后，顺序断言剥离它）。 */
+	const PICKER_MODELS_ENTRY_RE = /manage available model list/i;
+
+	/**
+	 * 提取 picker 选项数组的纯 agent 顺序（H 组 agentOrderOf 的等价实现——H 组
+	 * 的 helper 定义在其 describe 内部不可达）。选项格式
+	 * `<name> (<source>) — <model> (<thinking>)`，故取首 token 即 agent 名；
+	 * 提取失败（格式假设被破坏）大声报错，便于调整夹具而非静默误判。
+	 */
+	function pickerAgentOrderOf(options: string[] | undefined, knownNames: string[]): string[] {
+		const order: string[] = [];
+		for (const option of options ?? []) {
+			if (PICKER_MODELS_ENTRY_RE.test(option)) continue;
+			const first = option.match(/^\S+/)?.[0] ?? "";
+			if (!knownNames.includes(first)) {
+				throw new Error(
+					`K 组夹具/格式假设被破坏：无法从选项提取 agent 名（选项 = "${option}"，已知名 = [${knownNames.join(", ")}]）`,
+				);
+			}
+			order.push(first);
+		}
+		return order;
+	}
+
+	it("K1 should refresh the model annotation on the parent field select after a model write-back (model → user)", async () => {
+		// Arrange: frontmatter model 为旧值；脚本写回新值到 user 级后 ESC 退出
+		writeProjectAgent("coder", "model: fm/old-m");
+		const { agents } = discoverAgents(workspaceDir, "both");
+		const { ui, calls, mismatches, leftover } = createScriptedUi([
+			{ select: "model & thinking" }, // 1. 父字段选择（合并项）→ 子流程
+			{ select: "edit model & thinking" }, // 2. 动作选择 edit
+			{ input: "vendor/cont-m" }, // 3. model 值步（$models 空 → input）
+			{ select: "not set" }, // 4. thinking 值步：未配置 (current) → 确认 → null
+			{ select: "user" }, // 5. 写入目标 user → 写回成功 → 回父字段选择
+			{ select: undefined }, // 6. 父字段选择 ESC → 完全退出（agentName 预选）
+		]);
+
+		// Act
+		await runConfigFlow({ ui, cwd: workspaceDir, agents, agentName: "coder" });
+
+		// Assert: 回父字段选择那次的合并项标注含新值 + user 来源，不含旧值
+		expect(mismatches).toEqual([]);
+		expect(leftover).toEqual([]);
+		expect(calls[5].kind).toBe("select");
+		expect(calls[5].title).toContain("coder");
+		const modelOption = optionOf(calls[5].options, "model");
+		expect(modelOption, "写回后父字段选择的 model & thinking 合并项应存在").toBeDefined();
+		expect(modelOption!, "合并项 model 标注应刷新为写回的新值").toContain("vendor/cont-m");
+		expect(modelOption!, "合并项 model 标注应标 user 来源").toMatch(/\buser\b/i);
+		expect(modelOption!, "合并项不得停留旧值（frontmatter fm/old-m）").not.toContain("fm/old-m");
+	});
+
+	it("K2 should refresh the picker overview annotation after a model write-back without leaving the command (用户报告的确切场景)", async () => {
+		// Arrange: 命令级（无 agentName）——picker 总览标注带旧 model
+		writeProjectAgent("coder", "model: fm/coder-m");
+		const { command } = (() => {
+			const pi = createMockPi();
+			(mod.default as any)(pi);
+			return { command: pi._commandDefs.get("subagent-config") };
+		})();
+		const { ui, calls, mismatches, leftover } = createScriptedUi([
+			{ select: "coder" }, // 1. picker 选 coder
+			{ select: "model & thinking" }, // 2. 父字段选择（合并项）→ 子流程
+			{ select: "edit model & thinking" }, // 3. 动作选择 edit
+			{ input: "new/proj-m" }, // 4. model 值步（$models 空 → input）
+			{ select: "not set" }, // 5. thinking 值步 → null
+			{ select: "project" }, // 6. 写入目标 project → 写回成功 → 回父字段选择
+			{ select: undefined }, // 7. 父字段选择 ESC → 回 agent picker
+			{ select: undefined }, // 8. picker ESC → 完全退出
+		]);
+		const ctx = { hasUI: true, mode: "tui", cwd: workspaceDir, ui };
+
+		// Act
+		await command.handler("", ctx);
+
+		// Assert: 第二次 picker 的 coder 选项标注含新 model，不含旧值
+		expect(mismatches).toEqual([]);
+		expect(leftover).toEqual([]);
+		expect(calls[7].kind, "父字段选择 ESC 后应回 agent picker（仍是 select 提问）").toBe("select");
+		const coderOption = (calls[7].options ?? []).find((o) => /\bcoder\b/.test(o));
+		expect(coderOption, "第二次 picker 应含 coder 选项").toBeDefined();
+		expect(coderOption!, "picker 总览标注应刷新为新 model").toContain("new/proj-m");
+		expect(coderOption!, "picker 总览标注不得停留旧值（frontmatter fm/coder-m）").not.toContain("fm/coder-m");
+	});
+
+	it("K3 should refresh the description annotation on the field select after a description write-back", async () => {
+		// Arrange: 缺省 description = "coder agent"（writeProjectAgent 缺省）
+		writeProjectAgent("coder");
+		const { agents } = discoverAgents(workspaceDir, "both");
+		const { ui, calls, mismatches, leftover } = createScriptedUi([
+			{ select: "description" }, // 1. 字段选择 description
+			{ input: "Desc v3" }, // 2. 提交 → 写回成功 → 回字段选择
+			{ select: undefined }, // 3. 字段选择 ESC → 完全退出（agentName 预选）
+		]);
+
+		// Act
+		await runConfigFlow({ ui, cwd: workspaceDir, agents, agentName: "coder" });
+
+		// Assert: 回字段选择那次的 description 标注含新值、不含旧值
+		expect(mismatches).toEqual([]);
+		expect(leftover).toEqual([]);
+		expect(calls[2].kind).toBe("select");
+		const descOption = optionOf(calls[2].options, "description");
+		expect(descOption, "写回后字段选择的 description 选项应存在").toBeDefined();
+		expect(descOption!, "description 标注应刷新为写回的新值").toContain("Desc v3");
+		expect(descOption!, "description 标注不得停留旧值").not.toContain("coder agent");
+	});
+
+	it("K4 should refresh the tools annotation on the field select after a tools write-back (旧值被替换)", async () => {
+		// Arrange: 旧值 curl 不是新列表的子串，可干净断言"被替换"
+		writeProjectAgent("coder", "tools: curl");
+		const { agents } = discoverAgents(workspaceDir, "both");
+		const { ui, calls, mismatches, leftover } = createScriptedUi([
+			{ select: "tools" }, // 1. 字段选择 tools
+			{ input: "read, write, bash" }, // 2. 提交 → 写回成功 → 回字段选择
+			{ select: undefined }, // 3. 字段选择 ESC → 完全退出（agentName 预选）
+		]);
+
+		// Act
+		await runConfigFlow({ ui, cwd: workspaceDir, agents, agentName: "coder" });
+
+		// Assert: 回字段选择那次的 tools 标注含新列表、旧值被替换
+		expect(mismatches).toEqual([]);
+		expect(leftover).toEqual([]);
+		expect(calls[2].kind).toBe("select");
+		const toolsOption = optionOf(calls[2].options, "tools");
+		expect(toolsOption, "写回后字段选择的 tools 选项应存在").toBeDefined();
+		expect(toolsOption!, "tools 标注应刷新为新列表").toContain("read, write, bash");
+		expect(toolsOption!, "tools 标注不得停留旧值（curl 被替换）").not.toContain("curl");
+	});
+
+	it("K5 should refresh the body annotation on the field select after a saved body edit (changed:true)", async () => {
+		// Arrange: 注入 editBody 写盘 "Body v2."（与 G 组 body 测试同款写法）
+		writeProjectAgent("coder");
+		const { agents } = discoverAgents(workspaceDir, "both");
+		const newContent = agentFileContent("coder", "coder agent", "", "Body v2.");
+		const editBody = vi.fn(async (p: string) => {
+			fs.writeFileSync(p, newContent, "utf-8");
+			return { ok: true, changed: true };
+		});
+		const { ui, calls, mismatches, leftover } = createScriptedUi([
+			{ select: "body" }, // 1. 字段选择 body
+			{ select: undefined }, // 2. 保存成功 → 回字段选择；字段选择 ESC → 完全退出
+		]);
+
+		// Act
+		await runConfigFlow({ ui, cwd: workspaceDir, agents, agentName: "coder", editBody });
+
+		// Assert: 回字段选择那次的 body 标注含新正文摘要、不含旧正文摘要
+		expect(mismatches).toEqual([]);
+		expect(leftover).toEqual([]);
+		expect(calls[1].kind).toBe("select");
+		const bodyOption = optionOf(calls[1].options, "body");
+		expect(bodyOption, "body 保存后字段选择的 body 选项应存在").toBeDefined();
+		expect(bodyOption!, "body 标注应刷新为新正文摘要").toContain("Body v2");
+		expect(bodyOption!, "body 标注不得停留旧正文摘要").not.toContain("You are the coder");
+	});
+
+	it("K6 should refresh the model annotation back to the frontmatter value after a clear (user 覆盖被清除)", async () => {
+		// Arrange: user 级覆盖遮蔽 frontmatter；clear user → 生效值回退 frontmatter
+		writeProjectAgent("coder", "model: fm/coder-m");
+		fs.writeFileSync(userFile, JSON.stringify({ coder: { model: "user/override-m" } }), "utf-8");
+		const { agents } = discoverAgents(workspaceDir, "both");
+		const { ui, calls, mismatches, leftover } = createScriptedUi([
+			{ select: "model & thinking" }, // 1. 父字段选择（合并项）→ 子流程
+			{ select: "clear model & thinking" }, // 2. 动作选择 clear（整条清除，无值步）
+			{ select: "user" }, // 3. 写入目标 user → 清除成功 → 回父字段选择
+			{ select: undefined }, // 4. 父字段选择 ESC → 完全退出（agentName 预选）
+		]);
+
+		// Act
+		await runConfigFlow({ ui, cwd: workspaceDir, agents, agentName: "coder" });
+
+		// Assert: 回字段选择那次的合并项标注回退显示 frontmatter 值 + 来源，
+		// 不含被清除的 user 覆盖值
+		expect(mismatches).toEqual([]);
+		expect(leftover).toEqual([]);
+		expect(calls[3].kind).toBe("select");
+		const modelOption = optionOf(calls[3].options, "model");
+		expect(modelOption, "clear 后字段选择的 model & thinking 合并项应存在").toBeDefined();
+		expect(modelOption!, "clear 后合并项 model 标注应回退显示 frontmatter 值").toContain("fm/coder-m");
+		expect(modelOption!, "clear 后合并项 model 来源应为 frontmatter").toMatch(/\bfrontmatter\b/i);
+		expect(modelOption!, "clear 后合并项不得含被清除的覆盖值").not.toContain("user/override-m");
+	});
+
+	it("K7 should refresh the model annotation with the process source after writing to this process, with zero file writes", async () => {
+		// Arrange: frontmatter model 旧值；写 this process（内存层）→ 标注刷新
+		writeProjectAgent("coder", "model: fm/coder-m");
+		const { agents } = discoverAgents(workspaceDir, "both");
+		const { ui, calls, mismatches, leftover } = createScriptedUi([
+			{ select: "model & thinking" }, // 1. 父字段选择（合并项）→ 子流程
+			{ select: "edit model & thinking" }, // 2. 动作选择 edit
+			{ input: "proc/m" }, // 3. model 值步（$models 空 → input）
+			{ select: "not set" }, // 4. thinking 值步 → null
+			{ select: "this process" }, // 5. 写入目标 this process → 写回成功 → 回父字段选择
+			{ select: undefined }, // 6. 父字段选择 ESC → 完全退出（agentName 预选）
+		]);
+
+		// Act
+		await runConfigFlow({ ui, cwd: workspaceDir, agents, agentName: "coder" });
+
+		// Assert: 标注含新值 + process 来源，不含被遮蔽的 frontmatter 值；
+		// 内存层写入不得触碰 user/project 文件
+		expect(mismatches).toEqual([]);
+		expect(leftover).toEqual([]);
+		expect(calls[5].kind).toBe("select");
+		const modelOption = optionOf(calls[5].options, "model");
+		expect(modelOption, "this process 写回后字段选择的 model & thinking 合并项应存在").toBeDefined();
+		expect(modelOption!, "合并项 model 标注应刷新为内存层新值").toContain("proc/m");
+		expect(modelOption!, "合并项 model 来源应含 process").toMatch(/process/i);
+		// saved 新语义：写回 this process 后的单字段（仅 model）覆盖也显示 saved。
+		// 被遮蔽的 frontmatter 值只出现在 saved 片段内，生效值槽位不得泄漏。
+		expect(modelOption!, "单字段进程覆盖写回后也应显示 saved 片段").toContain("[saved:");
+		const saved = modelOption!.match(/\[saved:([^\]]*)\]/)?.[1];
+		expect(saved, "saved 片段应存在").toBeDefined();
+		expect(saved!, "saved 片段应显示低层 frontmatter model 值与来源").toMatch(/fm\/coder-m\s*\(\s*frontmatter\s*\)/i);
+		expect(modelOption!.split("[saved:")[0]!, "生效值槽位不得含被遮蔽的 frontmatter 值（只允许出现在 saved 片段）").not.toContain("fm/coder-m");
+		expect(fs.existsSync(userFile), "写 this process 不得写 user 级文件").toBe(false);
+		expect(fs.existsSync(workspaceFile), "写 this process 不得写 project 级文件").toBe(false);
+	});
+
+	it("K8 should re-order the picker by the new json key when a model write-back creates a fresh override key (回归保护：写回新建 key 后回 picker 排序随 json 更新)", async () => {
+		// Arrange: 3 个 agent 均未配置（无任何 json）→ 首次 picker 顺序 = 发现
+		// 顺序（readdir 文件序）；给 tester 写 user 级 model 后 → user json 新
+		// key [tester] → 回 picker 时 tester 前移到首位（配置过的按 json key 顺
+		// 序在前，未配置的按发现顺序在后）。
+		writeProjectAgent("coder");
+		writeProjectAgent("reviewer");
+		writeProjectAgent("tester");
+		const allNames = ["coder", "reviewer", "tester"];
+		const discovered = discoverAgents(workspaceDir, "both").agents.map((a) => a.name);
+		// 夹具前提：tester 不得天然位于发现顺序首位（否则"前移"无区分度），
+		// 环境异常时大声失败而非静默误绿（H 组同款模式）。
+		expect(discovered[0], "夹具前提：readdir 文件序首位不应是 tester（否则无区分度，请调整 fixture）").not.toBe("tester");
+		const { command } = setupExtension();
+		const { ui, calls, mismatches, leftover } = createScriptedUi([
+			{ select: "tester" }, // 1. picker 选 tester（未配置区，按发现顺序）
+			{ select: "model & thinking" }, // 2. 父字段选择（合并项）→ 子流程
+			{ select: "edit model & thinking" }, // 3. 动作选择 edit
+			{ input: "user/ord-m" }, // 4. model 值步（$models 空 → input）
+			{ select: "not set" }, // 5. thinking 值步 → null
+			{ select: "user" }, // 6. 写入目标 user → 写回成功 → 回父字段选择
+			{ select: undefined }, // 7. 父字段选择 ESC → 回 agent picker
+			{ select: undefined }, // 8. picker ESC → 完全退出
+		]);
+		const ctx = { hasUI: true, mode: "tui", cwd: workspaceDir, ui };
+
+		// Act
+		await command.handler("", ctx);
+
+		// Assert: 写回前 picker 顺序 = 发现顺序（tester 不在首位）；写回后 user
+		// json key 顺序 [tester] → 第二次 picker 中 tester 前移为首位，其余
+		// agent 保持发现相对顺序。
+		expect(mismatches).toEqual([]);
+		expect(leftover).toEqual([]);
+		expect(calls[7].kind, "父字段选择 ESC 后应回 agent picker（仍是 select 提问）").toBe("select");
+		expect(calls[7].title, "回到 picker 的标题应含 select agent").toMatch(/select agent/i);
+		const firstOrder = pickerAgentOrderOf(calls[0]?.options, allNames);
+		expect(firstOrder, "初始无配置时 picker 顺序 = 发现顺序").toEqual(discovered);
+		expect(firstOrder[0], "初始 tester 不得在首位（与夹具前提一致）").not.toBe("tester");
+		expect(loadModelOverridesFile(userFile), "写回应落盘 user 级 json").toEqual({ tester: { model: "user/ord-m" } });
+		const secondOrder = pickerAgentOrderOf(calls[7]?.options, allNames);
+		expect(
+			secondOrder,
+			"写回新建 json key 后，picker 顺序应随 json key 更新：tester 前移到首位，其余保持发现顺序",
+		).toEqual(["tester", ...discovered.filter((n) => n !== "tester")]);
+		expect(secondOrder[0], "第二次 picker 首位应为 tester（user json key 顺序）").toBe("tester");
+	});
+
+	// ---------------------------------------------------------------------
+	// K9-K11：合并编辑重构追加（用户场景回归 + 进程级标识 + clear 合并反馈）
+	// ---------------------------------------------------------------------
+	it("K9 should keep the entry complete after a merged process-layer edit so lower layers are never shadowed (用户场景回归：进程级合并编辑后 model/thinking 都不再意外消失)", async () => {
+		// 场景 A：user 级只配 model（无 thinking）。进程级合并编辑 model & thinking：
+		// model 输入新值，thinking 值步确认预选的not set(current) → 进程 entry
+		// { model: "proc/m" }。断言 model 生效为进程新值、thinking 保持未配置、
+		// user 文件原样（低层无遮蔽）。
+		writeProjectAgent("coder");
+		fs.writeFileSync(userFile, JSON.stringify({ coder: { model: "user/m" } }), "utf-8");
+		const userBefore = fs.readFileSync(userFile, "utf-8");
+		const { agents } = discoverAgents(workspaceDir, "both");
+		const { ui: uiA, calls: callsA, mismatches: mismatchesA, leftover: leftoverA } = createScriptedUi([
+			{ select: "model & thinking" }, // 1. 父字段选择（合并项）→ 子流程
+			{ select: "edit model & thinking" }, // 2. 动作选择 edit
+			{ input: "proc/m" }, // 3. model 值步
+			{ select: "not set" }, // 4. thinking 值步：预选not set(current) 并确认
+			{ select: "this process" }, // 5. 写入目标 this process
+			{ select: undefined }, // 6. 父字段选择 ESC → 完全退出
+		]);
+
+		// Act A
+		await runConfigFlow({ ui: uiA, cwd: workspaceDir, agents, agentName: "coder" });
+
+		// Assert A：model 生效为进程新值；thinking 保持未配置；user 文件原样
+		expect(mismatchesA).toEqual([]);
+		expect(leftoverA).toEqual([]);
+		expect((mod as any).getProcessOverrides(), "进程 entry 只含 model（thinking 显式未配置）").toEqual({ coder: { model: "proc/m" } });
+		const viewA = computeEffectiveModelConfigs(
+			agents,
+			loadModelOverridesFile(userFile),
+			loadModelOverridesFile(workspaceFile),
+			(mod as any).getProcessOverrides(),
+		).find((v) => v.name === "coder");
+		expect(viewA?.model, "model 生效值应为进程新值").toBe("proc/m");
+		expect(viewA?.modelSource).toBe("process");
+		expect(viewA?.thinking, "thinking 保持未配置（进程/低层均无值）").toBeUndefined();
+		expect(fs.readFileSync(userFile, "utf-8"), "写 this process 不得改动 user 文件（低层无遮蔽）").toBe(userBefore);
+		expect(fs.existsSync(workspaceFile)).toBe(false);
+
+		// 场景 B（对称）：user 级配 model+thinking。进程级合并编辑时 thinking 值步
+		// 预选当前生效值（user 级 high (current)）并确认 → 进程 entry 完整
+		// { model, thinking } → thinking 保持低层值（不再是not set——旧 bug）。
+		(mod as any).resetProcessOverridesForTests?.();
+		fs.writeFileSync(userFile, JSON.stringify({ coder: { model: "user/m", thinking: "high" } }), "utf-8");
+		const userBeforeB = fs.readFileSync(userFile, "utf-8");
+		const { ui: uiB, calls: callsB, mismatches: mismatchesB, leftover: leftoverB } = createScriptedUi([
+			{ select: "model & thinking" }, // 1. 父字段选择（合并项）→ 子流程
+			{ select: "edit model & thinking" }, // 2. 动作选择 edit
+			{ input: "proc/m" }, // 3. model 值步
+			{ select: "high" }, // 4. thinking 值步：预选生效值 high (current) 并确认
+			{ select: "this process" }, // 5. 写入目标 this process
+			{ select: undefined }, // 6. 父字段选择 ESC → 完全退出
+		]);
+
+		// Act B
+		await runConfigFlow({ ui: uiB, cwd: workspaceDir, agents, agentName: "coder" });
+
+		// Assert B：进程 entry 完整（model+thinking 合并写入）；thinking 保持低层
+		// 值（不再被意外遮蔽成未配置）；user 文件原样
+		expect(mismatchesB).toEqual([]);
+		expect(leftoverB).toEqual([]);
+		expect((mod as any).getProcessOverrides(), "进程 entry 必须完整（model+thinking 一次写入）").toEqual({
+			coder: { model: "proc/m", thinking: "high" },
+		});
+		const viewB = computeEffectiveModelConfigs(
+			agents,
+			loadModelOverridesFile(userFile),
+			loadModelOverridesFile(workspaceFile),
+			(mod as any).getProcessOverrides(),
+		).find((v) => v.name === "coder");
+		expect(viewB?.model, "model 生效值应为进程新值").toBe("proc/m");
+		expect(viewB?.thinking, "thinking 保持低层生效值（合并写入后不再变not set）").toBe("high");
+		expect(viewB?.thinkingSource).toBe("process");
+		expect(fs.readFileSync(userFile, "utf-8"), "写 this process 不得改动 user 文件").toBe(userBeforeB);
+		expect(fs.existsSync(workspaceFile)).toBe(false);
+	});
+
+	it("K10 should mark agents with a process-layer override with a trailing (process) badge in the picker overview (picker 进程级标识)", async () => {
+		// Arrange: 命令级；coder 将在流程内写入 this process，writer 全程无覆盖
+		writeProjectAgent("coder");
+		writeProjectAgent("writer");
+		const { command } = setupExtension();
+		const { ui, calls, mismatches, leftover } = createScriptedUi([
+			{ select: "coder" }, // 1. picker 选 coder
+			{ select: "model & thinking" }, // 2. 父字段选择（合并项）→ 子流程
+			{ select: "edit model & thinking" }, // 3. 动作选择 edit
+			{ input: "proc/k10" }, // 4. model 值步
+			{ select: "not set" }, // 5. thinking 值步 → null
+			{ select: "this process" }, // 6. 写入目标 this process
+			{ select: undefined }, // 7. 父字段选择 ESC → 回 agent picker
+			{ select: undefined }, // 8. picker ESC → 完全退出
+		]);
+		const ctx = { hasUI: true, mode: "tui", cwd: workspaceDir, ui };
+
+		// Act
+		await command.handler("", ctx);
+
+		// Assert: 无覆盖时选项行尾无 (process) 标记；进程级写入后回 picker，coder
+		// 选项行尾出现 (process) 标记（writer 无覆盖 → 不出现）
+		expect(mismatches).toEqual([]);
+		expect(leftover).toEqual([]);
+		const pickerOption = (options: string[] | undefined, name: string) => (options ?? []).find((o) => new RegExp(`\\b${name}\\b`).test(o));
+		const coder0 = pickerOption(calls[0]?.options, "coder");
+		const writer0 = pickerOption(calls[0]?.options, "writer");
+		expect(coder0, "首次 picker 应含 coder 选项").toBeDefined();
+		expect(writer0, "首次 picker 应含 writer 选项").toBeDefined();
+		expect(coder0!, "无进程覆盖时 coder 选项行尾不得有 (process) 标记").not.toMatch(/\(process\)\s*$/);
+		expect(coder0!, "无进程覆盖时 coder 选项不得含 saved 片段").not.toContain("[saved:");
+		expect(writer0!, "无进程覆盖时 writer 选项行尾不得有 (process) 标记").not.toMatch(/\(process\)\s*$/);
+		expect(writer0!, "无进程覆盖时 writer 选项不得含 saved 片段").not.toContain("[saved:");
+		expect(calls[7].kind, "父字段选择 ESC 后应回 agent picker").toBe("select");
+		const coder7 = pickerOption(calls[7]?.options, "coder");
+		const writer7 = pickerOption(calls[7]?.options, "writer");
+		expect(coder7, "第二次 picker 应含 coder 选项").toBeDefined();
+		expect(writer7, "第二次 picker 应含 writer 选项").toBeDefined();
+		expect(coder7!, "进程级写入后 coder 选项应保留 (process) 标记").toMatch(/\(process\)/i);
+		// saved 新语义：单字段（仅 model）进程覆盖也显示 saved，且追加在
+		// (process) 之后——选项行尾不再是裸 (process)。
+		expect(coder7!, "进程级写入后 coder 选项行尾应追加 saved 片段").toMatch(/\(process\)\s*\[saved:/i);
+		expect(coder7!, "coder 选项标注应刷新为内存层新值").toContain("proc/k10");
+		expect(writer7!, "无进程覆盖的 writer 选项行尾不得有 (process) 标记").not.toMatch(/\(process\)\s*$/);
+		expect(writer7!, "无进程覆盖的 writer 选项不得含 saved 片段").not.toContain("[saved:");
+		expect((mod as any).getProcessOverrides()).toEqual({ coder: { model: "proc/k10" } });
+		expect(fs.existsSync(userFile)).toBe(false);
+		expect(fs.existsSync(workspaceFile)).toBe(false);
+	});
+
+	it("K11 should report both model and thinking fallback values when clearing a process-layer entry (clear 合并反馈：双字段回退)", async () => {
+		// Arrange: frontmatter model+thinking 都有值；进程层覆盖两者
+		writeProjectAgent("coder", "model: fm/coder-m\nthinking: low");
+		(mod as any).setProcessOverride("coder", { model: "proc/m", thinking: "high" });
+		const { agents } = discoverAgents(workspaceDir, "both");
+		const { ui, mismatches, leftover, notifyMock } = createScriptedUi([
+			{ select: "model & thinking" }, // 1. 父字段选择（合并项）→ 子流程
+			{ select: "clear model & thinking" }, // 2. 动作选择 clear（整条清除，无值步）
+			{ select: "this process" }, // 3. 写入目标 this process
+			{ select: undefined }, // 4. 父字段选择 ESC → 完全退出
+		]);
+
+		// Act
+		await runConfigFlow({ ui, cwd: workspaceDir, agents, agentName: "coder" });
+
+		// Assert: 进程 entry 整条消失；clear 反馈含 model 与 thinking 各自回退值
+		expect(mismatches).toEqual([]);
+		expect(leftover).toEqual([]);
+		expect((mod as any).getProcessOverrides(), "clear 后进程 entry 应整条消失").toEqual({});
+		expect(fs.existsSync(userFile), "clear this process 不得写 user 级文件").toBe(false);
+		expect(fs.existsSync(workspaceFile), "clear this process 不得写 project 级文件").toBe(false);
+		const clearNotify = notifyMock.mock.calls.map((args) => String(args[0])).find((s) => /cleared/i.test(s)) ?? "";
+		expect(clearNotify, "clear 反馈应说明回退到 frontmatter").toMatch(/\bfrontmatter\b/i);
+		expect(clearNotify, "clear 反馈应含 model 回退值（frontmatter fm/coder-m）").toContain("fm/coder-m");
+		expect(clearNotify, "clear 反馈应含 thinking 回退值（frontmatter low）").toContain("low");
+		expect(clearNotify, "clear 反馈不得宣称被清除的内存层 model").not.toContain("proc/m");
+		expect(clearNotify, "clear 反馈不得宣称被清除的内存层 thinking").not.toContain("high");
+	});
+});
+
+// ===========================================================================
+// S. saved（"配置文件里的原值"）片段：进程级覆盖时显示低层生效值（红阶段契约）
+// ===========================================================================
+// 语义（设计已定稿）：agent 有进程级（this process）覆盖时，在其菜单标注末尾
+// 追加 `[saved: <model> (<modelSource>) / <thinking> (<thinkingSource>)]`
+// 片段，展示"配置文件里的原值"——排除进程层后的 project > user > frontmatter
+// 链（即 computeEffectiveModelConfigs(agents, user, project) 不传进程层参数
+// 的结果）。无进程覆盖 → 不显示 saved。槽位无值 → `not set`（无来源标注）。
+// 位置：picker 总览行尾（... (process) [saved: ...]）、字段选择 model &
+// thinking 合并项标注末尾、子流程动作选择 edit model & thinking 选项标注末尾。
+// saved 是追加文本：选项经 indexOf/子串映射回 agent 本体，不进入写入值。
+describe("S. saved 原值片段：进程覆盖时显示低层生效值（红阶段契约）", () => {
+	beforeEach(() => {
+		// 测试间隔离：清空模块级内存覆盖层（S7 写/清 this process 的密闭性）。
+		(mod as any).resetProcessOverridesForTests?.();
+	});
+
+	afterEach(() => {
+		// 密闭：不留覆盖给同文件后续 describe（测试卫生）。
+		(mod as any).resetProcessOverridesForTests?.();
+	});
+
+	/** optionOf 辅助：按字段 key 词边界定位选项（与 E/K 组同款风格）。 */
+	function optionOf(options: string[] | undefined, field: string): string | undefined {
+		return (options ?? []).find((o) => new RegExp(`\\b${field}\\b`, "i").test(o));
+	}
+
+	/** 从选项提取 [saved: ...] 片段内容（未实现时返回 undefined → 断言红）。 */
+	function savedFragmentOf(option: string | undefined): string | undefined {
+		return option?.match(/\[saved:([^\]]*)\]/)?.[1];
+	}
+
+	/** setupExtension：命令注册捕获（与 H/B8/K 组同款，S 组内局部定义）。 */
+	function setupExtension() {
+		const pi = createMockPi();
+		(mod.default as any)(pi);
+		return { pi, command: pi._commandDefs.get("subagent-config") };
+	}
+
+	it("S1 should show the saved fragment with the user-level low value for process-overridden agents in the picker, and none for override-free agents (picker 总览行尾)", async () => {
+		// Arrange: coder 的 user 级 json 配 model+thinking（低层值）+ 进程级覆盖；
+		// writer 无任何覆盖（控制组：无进程覆盖 → 不显示 saved）
+		writeProjectAgent("coder");
+		writeProjectAgent("writer");
+		fs.writeFileSync(userFile, JSON.stringify({ coder: { model: "user/saved-m", thinking: "low" } }), "utf-8");
+		(mod as any).setProcessOverride("coder", { model: "proc/m", thinking: "high" });
+		const { command } = setupExtension();
+		const { ui, calls, mismatches, leftover } = createScriptedUi([{ select: undefined }]); // picker ESC → 退出
+		const ctx = { hasUI: true, mode: "tui", cwd: workspaceDir, ui };
+
+		// Act
+		await command.handler("", ctx);
+
+		// Assert: coder 选项行尾 (process) 后紧跟 [saved:，含低层 user 值 + 来源；
+		// writer（无进程覆盖）不得含 [saved:
+		expect(mismatches).toEqual([]);
+		expect(leftover).toEqual([]);
+		const options = calls[0]?.options ?? [];
+		const coderOption = options.find((o) => /\bcoder\b/.test(o));
+		const writerOption = options.find((o) => /\bwriter\b/.test(o));
+		expect(coderOption, "picker 缺 coder 选项").toBeDefined();
+		expect(writerOption, "picker 缺 writer 选项").toBeDefined();
+		expect(coderOption!, "进程覆盖 agent 的选项应含 saved 片段").toContain("[saved:");
+		expect(coderOption!, "saved 片段应紧跟 (process) 标记之后（picker 行尾位置）").toMatch(/\(process\)\s*\[saved:/i);
+		const saved = savedFragmentOf(coderOption);
+		expect(saved, "saved 片段内容应存在").toBeDefined();
+		expect(saved!, "saved 片段应含低层 model 值 + user 来源").toMatch(/user\/saved-m\s*\(\s*user\s*\)/i);
+		expect(saved!, "saved 片段应含低层 thinking 值 + user 来源").toMatch(/low\s*\(\s*user\s*\)/i);
+		expect(saved!, "saved 片段不得含进程层遮蔽 model").not.toContain("proc/m");
+		expect(saved!, "saved 片段不得含进程层遮蔽 thinking").not.toContain("high");
+		expect(writerOption!, "无进程覆盖的 agent 选项不得含 saved 片段").not.toContain("[saved:");
+	});
+
+	it("S2 should append a saved fragment to the model & thinking field option annotation", async () => {
+		// Arrange: user 级 json model+thinking 为低层值；进程级覆盖遮蔽
+		writeProjectAgent("coder");
+		fs.writeFileSync(userFile, JSON.stringify({ coder: { model: "user/saved-m", thinking: "low" } }), "utf-8");
+		(mod as any).setProcessOverride("coder", { model: "proc/m", thinking: "high" });
+		const { agents } = discoverAgents(workspaceDir, "both");
+		const { ui, calls, mismatches, leftover } = createScriptedUi([
+			{ select: undefined }, // 字段选择 ESC → 完全退出（agentName 预选）
+		]);
+
+		// Act
+		await runConfigFlow({ ui, cwd: workspaceDir, agents, agentName: "coder" });
+
+		// Assert: 字段选择 model & thinking 合并项标注含 saved 片段（低层 user 值）
+		expect(mismatches).toEqual([]);
+		expect(leftover).toEqual([]);
+		const modelOption = optionOf(calls[0]?.options, "model");
+		expect(modelOption, "字段选择应存在 model & thinking 合并项").toBeDefined();
+		expect(modelOption!, "合并项标注应含 saved 片段").toContain("[saved:");
+		const saved = savedFragmentOf(modelOption);
+		expect(saved, "saved 片段内容应存在").toBeDefined();
+		expect(saved!, "saved 片段应为低层 user model 值 + user 来源").toMatch(/user\/saved-m\s*\(\s*user\s*\)/i);
+		expect(saved!, "saved 片段应含低层 thinking 值").toContain("low");
+	});
+
+	it("S3 should append a saved fragment to the edit model & thinking action option", async () => {
+		// Arrange: user 级 json model+thinking 为低层值；进程级覆盖遮蔽
+		writeProjectAgent("coder");
+		fs.writeFileSync(userFile, JSON.stringify({ coder: { model: "user/saved-m", thinking: "low" } }), "utf-8");
+		(mod as any).setProcessOverride("coder", { model: "proc/m", thinking: "high" });
+		const { agents } = discoverAgents(workspaceDir, "both");
+		const { ui, calls, mismatches, leftover } = createScriptedUi([
+			{ select: "model & thinking" }, // 1. 字段选择（合并项）→ 子流程
+			{ select: undefined }, // 2. 动作选择 ESC → 回父字段选择
+			{ select: undefined }, // 3. 字段选择 ESC → 完全退出
+		]);
+
+		// Act
+		await runConfigFlow({ ui, cwd: workspaceDir, agents, agentName: "coder" });
+
+		// Assert: 动作选择层 edit model & thinking 选项标注含 saved 片段（低层 user 值）
+		expect(mismatches).toEqual([]);
+		expect(leftover).toEqual([]);
+		const actionCall = calls.find((c) => c.kind === "select" && (c.options ?? []).some((o) => /edit/i.test(o)));
+		expect(actionCall, "应到达子流程动作选择层").toBeDefined();
+		const editOption = (actionCall!.options ?? []).find((o) => /edit/i.test(o) && /\bmodel\b/i.test(o) && /\bthinking\b/i.test(o));
+		expect(editOption, "动作选择应含 edit model & thinking 项").toBeDefined();
+		expect(editOption!, "edit model & thinking 标注应含 saved 片段").toContain("[saved:");
+		const saved = savedFragmentOf(editOption);
+		expect(saved, "saved 片段内容应存在").toBeDefined();
+		expect(saved!, "saved 片段应为低层 user model 值 + user 来源").toMatch(/user\/saved-m\s*\(\s*user\s*\)/i);
+	});
+
+	it("S4 should render both saved slots as not set when there is no low-level value (json 与 frontmatter 都无)", async () => {
+		// Arrange: coder 只有进程级覆盖；user/project json 与 frontmatter 均无 model/thinking
+		writeProjectAgent("coder");
+		(mod as any).setProcessOverride("coder", { model: "proc/m", thinking: "high" });
+		const { agents } = discoverAgents(workspaceDir, "both");
+		const { ui, calls, mismatches, leftover } = createScriptedUi([
+			{ select: undefined }, // 字段选择 ESC → 完全退出（agentName 预选）
+		]);
+
+		// Act
+		await runConfigFlow({ ui, cwd: workspaceDir, agents, agentName: "coder" });
+
+		// Assert: 字段选择合并项含 saved 片段，且双槽位均为 not set（无来源标注）
+		expect(mismatches).toEqual([]);
+		expect(leftover).toEqual([]);
+		const modelOption = optionOf(calls[0]?.options, "model");
+		expect(modelOption, "字段选择应存在 model & thinking 合并项").toBeDefined();
+		const saved = savedFragmentOf(modelOption);
+		expect(saved, "有进程覆盖时 saved 片段应存在（低层无值也显示）").toBeDefined();
+		expect(saved!, "低层无值时双槽位应显示 not set 占位符（无来源标注）").toMatch(
+			new RegExp(`^\\s*${UNCONFIGURED_PLACEHOLDER}\\s*/\\s*${UNCONFIGURED_PLACEHOLDER}\\s*$`, "i"),
+		);
+		expect(saved!, "not set 槽位不得带来源标注").not.toMatch(/\((user|project|frontmatter)\)/i);
+	});
+
+	it("S5 should show the (frontmatter) source when the low-level value comes from the agent file itself", async () => {
+		// Arrange: user/project json 无 coder；frontmatter 配 model+thinking；进程覆盖遮蔽
+		writeProjectAgent("coder", "model: fm/coder-m\nthinking: low");
+		(mod as any).setProcessOverride("coder", { model: "proc/m", thinking: "high" });
+		const { agents } = discoverAgents(workspaceDir, "both");
+		const { ui, calls, mismatches, leftover } = createScriptedUi([
+			{ select: undefined }, // 字段选择 ESC → 完全退出（agentName 预选）
+		]);
+
+		// Act
+		await runConfigFlow({ ui, cwd: workspaceDir, agents, agentName: "coder" });
+
+		// Assert: saved 片段含 frontmatter model/thinking 值及 (frontmatter) 来源
+		expect(mismatches).toEqual([]);
+		expect(leftover).toEqual([]);
+		const modelOption = optionOf(calls[0]?.options, "model");
+		expect(modelOption, "字段选择应存在 model & thinking 合并项").toBeDefined();
+		const saved = savedFragmentOf(modelOption);
+		expect(saved, "saved 片段应存在").toBeDefined();
+		expect(saved!, "saved 片段应显示 frontmatter model 值 + (frontmatter) 来源").toMatch(/fm\/coder-m\s*\(\s*frontmatter\s*\)/i);
+		expect(saved!, "saved 片段应显示 frontmatter thinking 值 + (frontmatter) 来源").toMatch(/low\s*\(\s*frontmatter\s*\)/i);
+	});
+
+	it("S6 should map an option carrying a saved fragment back to the correct agent (saved 是追加文本，不进入写入值)", async () => {
+		// Arrange: coder 有 user 低层值 + 进程覆盖（选项带 saved 片段）；writer 无覆盖
+		writeProjectAgent("coder");
+		writeProjectAgent("writer");
+		fs.writeFileSync(userFile, JSON.stringify({ coder: { model: "user/saved-m", thinking: "low" } }), "utf-8");
+		(mod as any).setProcessOverride("coder", { model: "proc/m", thinking: "high" });
+		const { command } = setupExtension();
+		const { ui, calls, mismatches, leftover } = createScriptedUi([
+			{ select: "coder" }, // 子串命中带 saved 片段的标注选项
+			{ select: "description" },
+			{ input: "Picked via saved-annotated option" },
+			{ select: undefined }, // 写回成功 → 回字段选择；字段选择 ESC → 回 agent 选择
+			{ select: undefined }, // agent 选择 ESC → 完全退出
+		]);
+		const ctx = { hasUI: true, mode: "tui", cwd: workspaceDir, ui };
+
+		// Act
+		await command.handler("", ctx);
+
+		// Assert: picker 选项确已带 saved 片段（feature 前置钉死）；标注选项经
+		// indexOf 映射回 coder 本体；写入值 = 输入值（saved 不进入写入）
+		expect(calls[0]?.options?.some((o) => /\[saved:/.test(o)), "picker 选项应带 saved 片段").toBe(true);
+		expect(mismatches).toEqual([]);
+		expect(leftover).toEqual([]);
+		const coderFile = path.join(agentsDir, "coder.md");
+		expect(readAgent(coderFile).name, "标注选项应映射回 coder 本体").toBe("coder");
+		expect(readAgent(coderFile).description, "写入值必须为输入值，不得混入 saved 片段文本").toBe("Picked via saved-annotated option");
+	});
+
+	it("S7 should show the saved fragment after a process-layer write and hide it after clearing, within the same command session (同一会话内刷新)", async () => {
+		// Arrange: user 级低层 model+thinking；agentName 预选跳过 picker
+		writeProjectAgent("coder");
+		fs.writeFileSync(userFile, JSON.stringify({ coder: { model: "user/saved-m", thinking: "low" } }), "utf-8");
+		const userBefore = fs.readFileSync(userFile, "utf-8");
+		const { agents } = discoverAgents(workspaceDir, "both");
+		const { ui, calls, mismatches, leftover } = createScriptedUi([
+			{ select: "model & thinking" }, // calls[0] 字段选择（尚未写进程覆盖 → 无 saved）
+			{ select: "edit model & thinking" }, // calls[1] 动作选择 edit
+			{ input: "proc/m" }, // calls[2] model 值步
+			{ select: "low" }, // calls[3] thinking 值步：预选低层 current（low）并确认
+			{ select: "this process" }, // calls[4] 写入目标 this process → 写回成功 → 回字段选择
+			{ select: "model & thinking" }, // calls[5] 字段选择（进程覆盖已存在 → 应含 saved）→ 子流程
+			{ select: "clear model & thinking" }, // calls[6] 动作选择 clear（整条清除，无值步）
+			{ select: "this process" }, // calls[7] 写入目标 this process → 清除 → 回字段选择
+			{ select: undefined }, // calls[8] 字段选择 ESC → 完全退出
+		]);
+
+		// Act
+		await runConfigFlow({ ui, cwd: workspaceDir, agents, agentName: "coder" });
+
+		// Assert: 写进程前无 saved；写入后 saved 出现（低层 user 值）；clear 后 saved 消失
+		expect(mismatches).toEqual([]);
+		expect(leftover).toEqual([]);
+		const beforeOption = optionOf(calls[0]?.options, "model");
+		expect(beforeOption, "首次字段选择应存在 model & thinking 合并项").toBeDefined();
+		expect(beforeOption!, "写进程前（无进程覆盖）不得含 saved 片段").not.toContain("[saved:");
+		const afterWriteOption = optionOf(calls[5]?.options, "model");
+		expect(afterWriteOption, "写回后字段选择应存在 model & thinking 合并项").toBeDefined();
+		expect(afterWriteOption!, "进程覆盖写入后字段选择应出现 saved 片段").toContain("[saved:");
+		const saved = savedFragmentOf(afterWriteOption);
+		expect(saved, "写回后 saved 片段应存在").toBeDefined();
+		expect(saved!, "saved 片段应显示低层 user model 值 + user 来源").toMatch(/user\/saved-m\s*\(\s*user\s*\)/i);
+		const afterClearOption = optionOf(calls[8]?.options, "model");
+		expect(afterClearOption, "clear 后字段选择应存在 model & thinking 合并项").toBeDefined();
+		expect(afterClearOption!, "clear 进程覆盖后 saved 片段应消失").not.toContain("[saved:");
+		expect((mod as any).getProcessOverrides(), "clear 后进程 entry 应整条消失").toEqual({});
+		expect(fs.readFileSync(userFile, "utf-8"), "写/清 this process 不得改动 user 级文件").toBe(userBefore);
+	});
+
+	it("S8 should show the saved fragment for a single-field (model-only) process override — any process override, not just complete ones (用户需求：单字段进程覆盖也显示原值)", async () => {
+		// Arrange: user 级 json 低层 model+thinking；进程层只覆盖 model（单字段）
+		writeProjectAgent("coder");
+		fs.writeFileSync(userFile, JSON.stringify({ coder: { model: "user/saved-m", thinking: "low" } }), "utf-8");
+		(mod as any).setProcessOverride("coder", { model: "proc/m" });
+		const { agents } = discoverAgents(workspaceDir, "both");
+		const { ui, calls, mismatches, leftover } = createScriptedUi([
+			{ select: undefined }, // 字段选择 ESC → 完全退出（agentName 预选）
+		]);
+
+		// Act
+		await runConfigFlow({ ui, cwd: workspaceDir, agents, agentName: "coder" });
+
+		// Assert: 单字段（仅 model）进程覆盖也显示 saved；低层 model/thinking 与
+		// user 来源出现在 saved 片段内
+		expect(mismatches).toEqual([]);
+		expect(leftover).toEqual([]);
+		const modelOption = optionOf(calls[0]?.options, "model");
+		expect(modelOption, "字段选择应存在 model & thinking 合并项").toBeDefined();
+		expect(modelOption!, "单字段进程覆盖也应显示 saved 片段").toContain("[saved:");
+		const saved = savedFragmentOf(modelOption);
+		expect(saved, "saved 片段应存在").toBeDefined();
+		expect(saved!, "saved 片段应显示低层 user model 值 + user 来源").toMatch(/user\/saved-m\s*\(\s*user\s*\)/i);
+		expect(saved!, "saved 片段应显示低层 thinking 值").toContain("low");
 	});
 });

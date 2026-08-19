@@ -241,7 +241,7 @@ describe("取消/关闭信封正文区分 & /subagent-result 无输出提示 —
 			// Red phase: envelope body should contain user-cancel semantics
 			// Expected: "用户" and "取消" (or "/subagent-cancel")
 			// Current: "任务已被中止，未产生输出。" (no user semantics)
-			expect(envelopeContent).toMatch(/用户.*取消|取消.*用户|\/subagent-cancel/i);
+			expect(envelopeContent).toMatch(/user.*cancel|cancel.*user|\/subagent-cancel/i);
 		});
 
 		it('用户取消后信封正文不应只有笼统的「任务已被中止」', async () => {
@@ -270,8 +270,8 @@ describe("取消/关闭信封正文区分 & /subagent-result 无输出提示 —
 
 			// Red phase: should NOT have ONLY the generic message
 			// It should have user-cancel semantics instead
-			const hasGenericMessage = envelopeContent.includes("任务已被中止，未产生输出");
-			const hasUserCancelSemantics = /用户.*取消|取消.*用户|\/subagent-cancel/i.test(envelopeContent);
+			const hasGenericMessage = envelopeContent.includes("no output");
+			const hasUserCancelSemantics = /user.*cancel|cancel.*user|\/subagent-cancel/i.test(envelopeContent);
 
 			// If it has the generic message, it MUST also have user-cancel semantics
 			// (or better: should NOT have the generic message at all)
@@ -329,7 +329,7 @@ describe("取消/关闭信封正文区分 & /subagent-result 无输出提示 —
 			// Current: "任务已被中止，未产生输出。" (same as user cancel - no distinction)
 			// Note: The envelope has "- 会话: taskId" metadata line, but we're checking
 			// the BODY text after "---", not the metadata lines
-			expect(bodyText).toMatch(/会话|session/i);
+			expect(bodyText).toMatch(/session/i);
 		});
 
 		it("shutdown 信封正文（body）应与用户取消信封正文不同", async () => {
@@ -411,7 +411,7 @@ describe("取消/关闭信封正文区分 & /subagent-result 无输出提示 —
 			// Expected: mentions "取消" (cancel) and "用户" (user) and "重试" (retry)
 			// Current: no cancel discipline in promptGuidelines
 			const hasCancelGuideline = toolDef.promptGuidelines.some((g: string) =>
-				/取消|cancel/i.test(g) && /用户|user/i.test(g)
+				/cancel/i.test(g) && /user/i.test(g)
 			);
 
 			expect(hasCancelGuideline).toBe(true);
@@ -424,7 +424,7 @@ describe("取消/关闭信封正文区分 & /subagent-result 无输出提示 —
 			// Red phase: should have a guideline that says cancelled tasks should not
 			// be automatically retried without asking the user first
 			const hasNoAutoRetryGuideline = toolDef.promptGuidelines.some((g: string) =>
-				/取消|cancel/i.test(g) && /重试|retry|重新|redispatch|询问|ask/i.test(g)
+				/cancel/i.test(g) && /retry|re-dispatch|redispatch|ask/i.test(g)
 			);
 
 			expect(hasNoAutoRetryGuideline).toBe(true);
@@ -478,10 +478,10 @@ describe("取消/关闭信封正文区分 & /subagent-result 无输出提示 —
 			const notifyOutput = notifyMock.mock.calls.map((c) => String(c[0])).join("");
 
 			// Should indicate "no output" (not "no record")
-			expect(notifyOutput).toMatch(/无.*输出|no.*output|未产生/i);
+			expect(notifyOutput).toMatch(/no final output|no.*output/i);
 
 			// Should NOT say "无此任务记录" (that's for missing sessions)
-			expect(notifyOutput).not.toMatch(/无此任务记录|no.*record/i);
+			expect(notifyOutput).not.toMatch(/No task record for|no.*record/i);
 		});
 
 		it('session 文件存在但无 assistant 文本 → 提示应包含完整 session 文件路径', async () => {
@@ -529,7 +529,7 @@ describe("取消/关闭信封正文区分 & /subagent-result 无输出提示 —
 			// This should remain green: truly non-existent tasks should say "no record"
 			const notifyOutput = notifyMock.mock.calls.map((c) => String(c[0])).join("");
 
-			expect(notifyOutput).toMatch(/无.*记录|no.*record|不存在|not.*found/i);
+			expect(notifyOutput).toMatch(/No task record for|no.*record|not.*found/i);
 		});
 	});
 });
@@ -548,7 +548,7 @@ describe("插件提示词资源冲突纪律 — 红阶段测试", () => {
 		// Expected: mentions "conflict" or "same files" or similar
 		// Currently FAILS because no resource conflict guideline exists
 		const hasResourceConflictGuideline = subagentTool.promptGuidelines.some((g: string) =>
-			/conflict|same files|same code|同一文件|冲突|竞争/i.test(g)
+			/conflict|same files|same code/i.test(g)
 		);
 
 		expect(hasResourceConflictGuideline).toBe(true);
@@ -565,8 +565,8 @@ describe("插件提示词资源冲突纪律 — 红阶段测试", () => {
 		// Expected: something like "check if tasks operate on same files/code regions"
 		// Currently FAILS because no such guideline exists
 		const hasFileCheckGuideline = subagentTool.promptGuidelines.some((g: string) =>
-			/(check|verify|ensure).*(same|same files|same code|同一|冲突)/i.test(g) ||
-			/(parallel|concurrent|并行).*(same|冲突|conflict)/i.test(g)
+			/(check|verify|ensure).*(same|same files|same code)/i.test(g) ||
+			/(parallel|concurrent).*(same|conflict)/i.test(g)
 		);
 
 		expect(hasFileCheckGuideline).toBe(true);

@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.2] - 2026-08-19
+
+### Changed
+
+- `/subagent-config` merges `model` and `thinking` into a single field: the field select goes from six entries to five (`description`, `tools`, `skills`, `body`, `model & thinking`), and the merged option annotates both slot values with their sources (`model & thinking — <model> (<source>) / <thinking> (<source>)`, `not set` placeholder for unset slots). Selecting it opens the reworked model/thinking subflow:
+  - An action layer offers `edit model & thinking` (annotated with the current effective values and their sources) and `clear model & thinking (reset to frontmatter)`. The edit branch walks the model value step (`$models` select when the list is non-empty, free-text input prefilled with the effective value otherwise) → thinking value step (pi's official 7 levels plus a `not set` option; the currently effective level or the unset state is marked `(current)`; picking `not set` writes `thinking: null`, dropping the key from the entry) → write target (`this process` / `user` / `project`, the governing source marked `(current)`) → one patch writes both fields, so a UI write always produces a complete entry and can no longer accidentally shadow the other field into `not set` at a lower level. The clear branch picks a write target and removes the whole override entry, then reports the recomputed fallback for each field separately, with sources.
+  - ESC semantics simplify to one rule inside the subflow: any value-step or write-target ESC returns to the action layer (collected values discarded, zero writes), and the action-layer ESC returns to the parent flow's field select.
+- The underlying whole-key shadowing merge is unchanged: the UI now writes complete entries, so the shadowing pitfall is no longer reachable through the UI; a hand-edited JSON entry that omits a field still shadows the lower layers' entries of the same key wholesale, as before.
+- All user- and main-agent-visible UI copy is now English (previously Chinese-primary with mixed Chinese/English): the envelope status words, the dispatch receipt, envelope labels and the in-flight block, slash-command prompts, the result viewer, the whole `/subagent-config` flow, and the tool description/promptGuidelines. The unset placeholder changes from `（未配置）` to `not set`.
+
+### Added
+
+- The agent picker now marks process-level overrides: an agent with a `this process` entry gets a ` (process)` badge at the end of its picker line (`<name> (<source>) — <model> (<thinking>) (process)`), so the memory layer's presence is visible before entering the edit flow.
+- The saved fragment: when an agent has a process-level override (single-field or complete entry alike), the picker overview, the field-select `model & thinking` option, and the subflow's `edit model & thinking` option append `[saved: <model> (<source>) / <thinking> (<source>)]` showing the config-file original — the effective values recomputed without the process layer (project > user > frontmatter chain); a slot without a value renders as `not set` with no source annotation. Like the other menu annotations it is appended text that never enters a written value, and it refreshes with the live annotations after a write-back.
+
+### Fixed
+
+- Writing only one of `model`/`thinking` through `/subagent-config` could shadow the other field into `not set` at the same agent key: a single-field patch produced an entry that hid the other field's lower-level value under the whole-key merge. The merged edit always writes both fields with explicit choices, so UI writes keep entries complete and the pitfall is gone from the UI path.
+
+## [1.6.1] - 2026-08-19
+
+### Fixed
+
+- `/subagent-config` menu annotations did not refresh after a write-back: the field-select options and the agent picker's overview annotation kept the pre-edit values until the command was exited and re-entered. After every successful write-back, `editAgentConfig` now recomputes the effective view — re-reading the user/project override files plus the process memory layer — and the live field values, so the field-select annotations and the agent picker's overview (source attribution, the `this process` memory layer, clear fallbacks, and picker ordering as JSON keys update) reflect the new values immediately within the same command session, with no exit and re-entry required:
+  - Field-select options are rebuilt before every prompt, and picker options with their ordering are recomputed each round instead of once at command start, so a model/thinking write, a clear, or a text-field edit updates the annotations in place.
+  - The no-write ESC back-off paths stay deterministic: they trigger no recompute, so their options and ordering stay identical to the previous build, pinned by the existing `toEqual` regression assertions.
+
 ## [1.6.0] - 2026-08-18
 
 ### Added

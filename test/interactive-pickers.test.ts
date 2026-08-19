@@ -276,7 +276,7 @@ function insertRunningTask(taskId: string, agentName = "tester"): AsyncSubagentT
 }
 
 /** 提示"没有已结束任务"语义的匹配器（中英文均可，标签格式由实现定）。 */
-const NO_FINISHED_TASKS_PATTERN = /(没有|无)[\s\S]*(任务|记录)|no (finished|completed)/i;
+const NO_FINISHED_TASKS_PATTERN = /no finished subagent tasks|no (finished|completed)/i;
 
 describe("交互选择列表（/subagent-result & /subagent-cancel 无参数）", () => {
 	let tmpBase: string;
@@ -760,7 +760,7 @@ describe("交互选择列表（/subagent-result & /subagent-cancel 无参数）"
 			expect(customMock, "无运行中任务时不应弹选择列表").not.toHaveBeenCalled();
 			expect(notifyMock).toHaveBeenCalledTimes(1);
 			const [message, type] = notifyMock.mock.calls[0];
-			expect(String(message)).toMatch(/no running|无运行中/i);
+			expect(String(message)).toMatch(/no running/i);
 			expect(type).toBe("warning");
 		});
 
@@ -816,7 +816,7 @@ describe("交互选择列表（/subagent-result & /subagent-cancel 无参数）"
 			expect(customMock, "非 TUI 不应调用 ui.custom").not.toHaveBeenCalled();
 			expect(notifyMock).toHaveBeenCalledTimes(1);
 			const [message, type] = notifyMock.mock.calls[0];
-			expect(String(message)).toMatch(/no running|running tasks|无运行中/i);
+			expect(String(message)).toMatch(/no running|running tasks/i);
 			expect(type).toBe("warning");
 			expect(t1.status, "非 TUI 回退不应取消任何任务").toBe("running");
 			expect(t2.status, "非 TUI 回退不应取消任何任务").toBe("running");

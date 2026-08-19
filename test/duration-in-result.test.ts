@@ -350,10 +350,10 @@ describe("子 agent 返回时长 — 全流程（信封 + 同步结果）", () =
 			expect(pi.sendMessage).toHaveBeenCalled();
 			const [message] = pi._sendMessageCalls[0];
 			expect(message.customType).toBe("subagent-result");
-			expect(message.details.status).toBe("成功");
+			expect(message.details.status).toBe("succeeded");
 
 			// 既有行为：content 含「耗时: 」行（当前即绿，行格式不变）
-			expect(message.content).toContain("耗时: ");
+			expect(message.content).toContain("Duration: ");
 
 			// 新行为：结构化 details 携带运行时长
 			expect(typeof message.details.durationMs).toBe("number");
@@ -375,7 +375,7 @@ describe("子 agent 返回时长 — 全流程（信封 + 同步结果）", () =
 			// 「耗时」行展示的必须是 formatDuration(durationMs) 的输出，
 			// 即与结构化字段一致的真实运行时长（而非"派发至今"的别的值）。
 			const expected = formatDuration(message.details.durationMs);
-			expect(message.content).toContain(`耗时: ${expected}`);
+			expect(message.content).toContain(`Duration: ${expected}`);
 		});
 	});
 
@@ -394,7 +394,7 @@ describe("子 agent 返回时长 — 全流程（信封 + 同步结果）", () =
 
 			expect(pi.sendMessage).toHaveBeenCalled();
 			const [message] = pi._sendMessageCalls[0];
-			expect(message.details.status).toBe("失败");
+			expect(message.details.status).toBe("failed");
 
 			expect(typeof message.details.durationMs).toBe("number");
 			expect(Number.isFinite(message.details.durationMs)).toBe(true);
@@ -413,7 +413,7 @@ describe("子 agent 返回时长 — 全流程（信封 + 同步结果）", () =
 
 			expect(pi.sendMessage).toHaveBeenCalled();
 			const [message] = pi._sendMessageCalls[0];
-			expect(message.details.status).toBe("超时");
+			expect(message.details.status).toBe("timed out");
 
 			expect(typeof message.details.durationMs).toBe("number");
 			expect(Number.isFinite(message.details.durationMs)).toBe(true);
@@ -434,7 +434,7 @@ describe("子 agent 返回时长 — 全流程（信封 + 同步结果）", () =
 
 			expect(pi.sendMessage).toHaveBeenCalled();
 			const [message] = pi._sendMessageCalls[0];
-			expect(message.details.status).toBe("已取消");
+			expect(message.details.status).toBe("cancelled");
 
 			// result 为 null 时也应有时长（自派发时刻起算）
 			expect(typeof message.details.durationMs).toBe("number");
@@ -454,11 +454,11 @@ describe("子 agent 返回时长 — 全流程（信封 + 同步结果）", () =
 
 			expect(pi.sendMessage).toHaveBeenCalled();
 			const [message] = pi._sendMessageCalls[0];
-			expect(message.details.status).toBe("失败");
+			expect(message.details.status).toBe("failed");
 
 			// 「耗时」行展示的必须是 formatDuration(durationMs) 的输出，不得与结构化字段分叉
 			const expected = formatDuration(message.details.durationMs);
-			expect(message.content).toContain(`耗时: ${expected}`);
+			expect(message.content).toContain(`Duration: ${expected}`);
 		});
 
 		// —— 绿（锁定）：取消信封（result 为 null）content 的「耗时」行与 details.durationMs 一致
@@ -476,12 +476,12 @@ describe("子 agent 返回时长 — 全流程（信封 + 同步结果）", () =
 
 			expect(pi.sendMessage).toHaveBeenCalled();
 			const [message] = pi._sendMessageCalls[0];
-			expect(message.details.status).toBe("已取消");
+			expect(message.details.status).toBe("cancelled");
 
 			// result 为 null 时时长自派发时刻（task.startedAt）起算，仍为非负有限值
 			expect(message.details.durationMs).toBeGreaterThanOrEqual(0);
 			const expected = formatDuration(message.details.durationMs);
-			expect(message.content).toContain(`耗时: ${expected}`);
+			expect(message.content).toContain(`Duration: ${expected}`);
 		});
 
 		// —— 绿（锁定）：hard_timeout 路径的信封也携带真实时长
@@ -517,7 +517,7 @@ describe("子 agent 返回时长 — 全流程（信封 + 同步结果）", () =
 			const [message] = pi._sendMessageCalls[0];
 			// 确认走的是硬超时路径（区别于活动超时信封用例）
 			expect(message.details.stopReason).toBe("hard_timeout");
-			expect(message.details.status).toBe("超时");
+			expect(message.details.status).toBe("timed out");
 
 			expect(typeof message.details.durationMs).toBe("number");
 			expect(Number.isFinite(message.details.durationMs)).toBe(true);
@@ -602,7 +602,7 @@ describe("registerMessageRenderer 通知卡片耗时", () => {
 		return {
 			taskId: "task-card-1",
 			agent: "tester",
-			status: "成功",
+			status: "succeeded",
 			exitCode: 0,
 			usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
 			sessionId: "sess-card-1",
@@ -624,22 +624,22 @@ describe("registerMessageRenderer 通知卡片耗时", () => {
 	}
 
 	it("成功卡片含 formatDuration 输出（durationMs=154000 → 02:34）", () => {
-		const text = renderCard(makeDetails({ status: "成功", durationMs: 154_000 }));
+		const text = renderCard(makeDetails({ status: "succeeded", durationMs: 154_000 }));
 		expect(text).toContain("02:34");
 	});
 
 	it("失败卡片含 formatDuration 输出（durationMs=5000 → 00:05）", () => {
-		const text = renderCard(makeDetails({ status: "失败", exitCode: 1, durationMs: 5_000 }));
+		const text = renderCard(makeDetails({ status: "failed", exitCode: 1, durationMs: 5_000 }));
 		expect(text).toContain("00:05");
 	});
 
 	it("超时卡片含 formatDuration 输出（durationMs=65000 → 01:05）", () => {
-		const text = renderCard(makeDetails({ status: "超时", exitCode: null, durationMs: 65_000 }));
+		const text = renderCard(makeDetails({ status: "timed out", exitCode: null, durationMs: 65_000 }));
 		expect(text).toContain("01:05");
 	});
 
 	it("已取消卡片含 formatDuration 输出（durationMs=3000 → 00:03）", () => {
-		const text = renderCard(makeDetails({ status: "已取消", exitCode: null, durationMs: 3_000 }));
+		const text = renderCard(makeDetails({ status: "cancelled", exitCode: null, durationMs: 3_000 }));
 		expect(text).toContain("00:03");
 	});
 

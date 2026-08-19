@@ -209,7 +209,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			);
 
 			expect(first.isError).toBeFalsy();
-			expect(first.content[0].text).toMatch(/已派出|dispatched/i);
+			expect(first.content[0].text).toMatch(/dispatched/i);
 			expect(taskRegistry.size).toBe(1);
 
 			// Second dispatch with same sessionId — MUST be rejected
@@ -224,7 +224,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			// Expected: isError=true, message says task already exists / wait / cancel / use new id
 			expect(second.isError).toBe(true);
 			expect(second.content[0].text).toMatch(
-				/already|exist|冲突|等待|wait|cancel|取消|new.*id|不同/i,
+				/already|exist|wait|cancel|new.*id/i,
 			);
 
 			// The first task's process should still be alive (not replaced)
@@ -442,7 +442,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			// Envelope should be sent with timeout status
 			expect(pi.sendMessage).toHaveBeenCalled();
 			const [message] = pi._sendMessageCalls[0];
-			expect(message.content).toContain("超时");
+			expect(message.content).toContain("timed out");
 			expect(message.customType).toBe("subagent-result");
 		});
 
@@ -496,7 +496,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			expect(pi.sendMessage).toHaveBeenCalled();
 			const [message] = pi._sendMessageCalls[0];
 			expect(message.customType).toBe("subagent-result");
-			expect(message.content).toContain("已取消");
+			expect(message.content).toContain("cancelled");
 		});
 
 		it("should include killed_on_shutdown stopReason in details", async () => {
@@ -744,7 +744,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			expect(procB.kill).toHaveBeenCalledWith("SIGTERM");
 
 			// Assert: notify 提示含「已取消」与数量
-			expect(notifyMock).toHaveBeenCalledWith(expect.stringContaining("已取消"), "info");
+			expect(notifyMock).toHaveBeenCalledWith(expect.stringMatching(/cancelled/i), "info");
 			expect(notifyMock).toHaveBeenCalledWith(expect.stringContaining("2"), "info");
 		});
 
@@ -759,7 +759,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			await cancelAllCommand!.handler("", { ui: { notify: notifyMock } });
 
 			expect(notifyMock).toHaveBeenCalledWith(
-				expect.stringContaining("无运行中任务"),
+				expect.stringMatching(/no running subagent task/i),
 				expect.any(String),
 			);
 		});
@@ -853,7 +853,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			const envelopes = pi._sendMessageCalls.map((c: any[]) => c[0]);
 			for (const envelope of envelopes) {
 				expect(envelope.customType).toBe("subagent-result");
-				expect(envelope.content).toContain("已取消");
+				expect(envelope.content).toContain("cancelled");
 				expect(envelope.details.cancelledBy).toBe("user");
 			}
 		});
@@ -973,7 +973,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 				ctx,
 			);
 			expect(second.isError).toBeFalsy();
-			expect(second.content[0].text).toMatch(/已派出|dispatched/i);
+			expect(second.content[0].text).toMatch(/dispatched/i);
 			expect(taskRegistry.size).toBe(1);
 		});
 	});
@@ -1161,7 +1161,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			const text = result.content[0].text;
 			expect(text).toMatch(/sessionId/i);
 			expect(text).toMatch(/UUID\s?v7/i);
-			expect(text).toMatch(/receipt|resume|复用/i);
+			expect(text).toMatch(/receipt|resume/i);
 		});
 
 		it('should reject sessionId "." and ".."', async () => {
@@ -1176,7 +1176,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 				ctx,
 			);
 			expect(dotResult.isError).toBe(true);
-			expect(dotResult.content[0].text).toMatch(/not allowed|不允许|invalid|非法/i);
+			expect(dotResult.content[0].text).toMatch(/not allowed|invalid/i);
 
 			const dotDotResult = await executeTool(
 				"call-2",
@@ -1186,7 +1186,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 				ctx,
 			);
 			expect(dotDotResult.isError).toBe(true);
-			expect(dotDotResult.content[0].text).toMatch(/not allowed|不允许|invalid|非法/i);
+			expect(dotDotResult.content[0].text).toMatch(/not allowed|invalid/i);
 		});
 
 		it("should accept a UUID v7 sessionId with leading/trailing whitespace after trim normalization", async () => {
@@ -1204,7 +1204,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 
 			// Should succeed — trim() normalizes to the UUID v7
 			expect(result.isError).toBeFalsy();
-			expect(result.content[0].text).toMatch(/已派出|dispatched/i);
+			expect(result.content[0].text).toMatch(/dispatched/i);
 			// The trimmed sessionId should be used as the task key
 			expect(taskRegistry.has(validV7)).toBe(true);
 		});

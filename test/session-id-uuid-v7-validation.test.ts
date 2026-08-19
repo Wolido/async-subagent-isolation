@@ -208,7 +208,7 @@ describe("sessionId UUID v7 validation (red phase)", () => {
 			const result = await dispatch(VALID_V7_A);
 
 			expect(result.isError).toBeFalsy();
-			expect(result.content[0].text).toMatch(/已派出|dispatched/i);
+			expect(result.content[0].text).toMatch(/dispatched/i);
 			expect(result.content[0].text).toContain(VALID_V7_A);
 			expect(taskRegistry.has(VALID_V7_A)).toBe(true);
 
@@ -247,7 +247,7 @@ describe("sessionId UUID v7 validation (red phase)", () => {
 
 			expect(result.isError).toBe(true);
 			expect(result.content[0].text).toMatch(/sessionId/i);
-			expect(result.content[0].text).toMatch(/resume|复用/i);
+			expect(result.content[0].text).toMatch(/resume/i);
 		});
 
 		it('should reject arbitrary external input "auth-refactor" and state the expected UUID v7 format', async () => {
@@ -323,28 +323,28 @@ describe("sessionId UUID v7 validation (red phase)", () => {
 			const result = await dispatch("");
 
 			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toMatch(/empty|空/i);
+			expect(result.content[0].text).toMatch(/empty/i);
 		});
 
 		it("should reject a whitespace-only sessionId as empty after trim", async () => {
 			const result = await dispatch(" ");
 
 			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toMatch(/empty|空/i);
+			expect(result.content[0].text).toMatch(/empty/i);
 		});
 
 		it('should reject sessionId "." as not allowed', async () => {
 			const result = await dispatch(".");
 
 			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toMatch(/not allowed|invalid|非法|不允许/i);
+			expect(result.content[0].text).toMatch(/not allowed|invalid/i);
 		});
 
 		it('should reject sessionId ".." as not allowed', async () => {
 			const result = await dispatch("..");
 
 			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toMatch(/not allowed|invalid|非法|不允许/i);
+			expect(result.content[0].text).toMatch(/not allowed|invalid/i);
 		});
 	});
 
@@ -404,7 +404,7 @@ describe("sessionId UUID v7 validation (red phase)", () => {
 			expect(text.length).toBeLessThanOrEqual(200);
 			expect(text).toMatch(/sessionId/i);
 			expect(text).toMatch(/uuid\s?v7/i);
-			expect(text).toMatch(/resume|复用/i);
+			expect(text).toMatch(/resume/i);
 		});
 	});
 

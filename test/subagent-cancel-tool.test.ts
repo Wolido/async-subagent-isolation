@@ -373,7 +373,7 @@ describe("action=cancel 两步确认 — 红阶段测试", () => {
 			const text = result.content.map((c: any) => c.text).join("");
 			expect(text).toContain("tester");
 			expect(text).toMatch(/整理季度报表/);
-			expect(text).toMatch(/已运行|运行时长|耗时|elapsed|running for|uptime/i);
+			expect(text).toMatch(/elapsed|running for|uptime/i);
 		});
 
 		it("从未上报进度的任务，质询正文应明示「尚无进度上报」语义（新契约 2/6，RED）", async () => {
@@ -389,7 +389,7 @@ describe("action=cancel 两步确认 — 红阶段测试", () => {
 
 			// Assert
 			const text = result.content.map((c: any) => c.text).join("");
-			expect(text).toMatch(/尚无进度|未上报|没有进度|no progress|never reported/i);
+			expect(text).toMatch(/none reported yet|no progress|never reported/i);
 		});
 
 		it("已上报进度的任务，质询正文应包含最近进度距今信息（新契约 2/6，RED）", async () => {
@@ -408,9 +408,9 @@ describe("action=cancel 两步确认 — 红阶段测试", () => {
 
 			// Assert: 宽松断言"最近进度 + 时间量"语义（如"最近进度更新: 5 秒前"）
 			const text = result.content.map((c: any) => c.text).join("");
-			expect(text).toMatch(/最近进度|last progress|last activity/i);
-			expect(text).toMatch(/\d+\s*(秒|s\b)/);
-			expect(text).not.toMatch(/尚无进度/);
+			expect(text).toMatch(/last progress|last activity/i);
+			expect(text).toMatch(/\d+\s*s\b/);
+			expect(text).not.toMatch(/none reported yet/);
 		});
 
 		it("最近进度距今 ≥1 小时时应折叠为 H:MM:SS 且中英两处数值一致（长间隔分支锁定）", async () => {
@@ -431,12 +431,12 @@ describe("action=cancel 两步确认 — 红阶段测试", () => {
 			// Assert: 折叠为 H:MM:SS（formatDuration 复用），中英两处同一格式化值
 			//（反向引用锁一致），不再出现巨型秒数
 			const text = result.content.map((c: any) => c.text).join("");
-			const progressLine = text.split("\n").find((l: string) => /最近进度/.test(l));
+			const progressLine = text.split("\n").find((l: string) => /Last progress/.test(l));
 			expect(progressLine).toBeDefined();
 			expect(progressLine).toContain("1:01:05");
-			expect(progressLine).toMatch(/最近进度更新: (\d+:\d{2}:\d{2}) 前 \(last activity \1 ago\)/);
+			expect(progressLine).toMatch(/Last progress update: (\d+:\d{2}:\d{2}) ago/);
 			expect(progressLine).not.toContain("3665");
-			expect(progressLine).not.toMatch(/\d{4,}\s*(秒|s\b)/);
+			expect(progressLine).not.toMatch(/\d{4,}\s*s\b/);
 		});
 
 		it("质询正文应包含明确警告：取消将丢弃全部在途进度且不可撤销（RED）", async () => {
@@ -452,8 +452,8 @@ describe("action=cancel 两步确认 — 红阶段测试", () => {
 
 			// Assert: 宽松断言两个语义点（丢弃在途进度 + 不可撤销）
 			const text = result.content.map((c: any) => c.text).join("");
-			expect(text).toMatch(/丢弃|discard|丢失|lose|lost/i);
-			expect(text).toMatch(/不可撤销|无法撤销|irreversible|cannot be undone/i);
+			expect(text).toMatch(/discard/i);
+			expect(text).toMatch(/irreversible|cannot be undone/i);
 		});
 
 		it("质询正文应包含明确的二次调用指令（action=cancel、同一 taskId、confirm:true、reason 必填，RED）", async () => {
@@ -571,7 +571,7 @@ describe("action=cancel 两步确认 — 红阶段测试", () => {
 			expect(result.isError).toBe(true);
 			const text = result.content.map((c: any) => c.text).join("");
 			expect(text).toMatch(/reason/i);
-			expect(text).toMatch(/必填|required|missing|不能为空/i);
+			expect(text).toMatch(/required|missing/i);
 			expect(taskRegistry.get(taskId)?.status).toBe("running");
 			expect(taskRegistry.get(taskId)?.abortController.signal.aborted).toBe(false);
 			expect(proc.kill).not.toHaveBeenCalled();
@@ -649,7 +649,7 @@ describe("action=cancel 两步确认 — 红阶段测试", () => {
 			expect(message.customType).toBe("subagent-result");
 			expect(message.details.cancelledBy).toBe("agent");
 			const content: string = message.content;
-			expect(content).toMatch(/主\s*agent/);
+			expect(content).toMatch(/main\s*agent/);
 			expect(content).toContain(reason);
 		});
 
@@ -669,7 +669,7 @@ describe("action=cancel 两步确认 — 红阶段测试", () => {
 			// Assert
 			expect(result.isError).toBe(true);
 			const text = result.content.map((c: any) => c.text).join("");
-			expect(text).toMatch(/无此运行中任务|no running|not found|不存在/i);
+			expect(text).toMatch(/No running subagent task with this id|no running|not found/i);
 		});
 
 		it("confirm:true 但 reason 为非 string 类型（number/object）→ 报错且零副作用（边界锁定）", async () => {
@@ -724,7 +724,7 @@ describe("action=cancel 两步确认 — 红阶段测试", () => {
 			// Assert
 			expect(result.isError).toBe(true);
 			const text = result.content.map((c: any) => c.text).join("");
-			expect(text).toMatch(/无此运行中任务|no running|not found|不存在/i);
+			expect(text).toMatch(/No running subagent task with this id|no running|not found/i);
 		});
 	});
 
@@ -836,9 +836,9 @@ describe("action=cancel 两步确认 — 红阶段测试", () => {
 			expect(pi.sendMessage).toHaveBeenCalled();
 			const [message] = pi._sendMessageCalls[0];
 			const content: string = message.content;
-			expect(content).toMatch(/已取消/);
-			expect(content).toMatch(/主\s*agent/);
-			expect(content).not.toMatch(/请勿自动重新派发/);
+			expect(content).toMatch(/cancelled/);
+			expect(content).toMatch(/main\s*agent/);
+			expect(content).not.toMatch(/Do not automatically re-dispatch/i);
 		});
 
 		it("confirm 取消应返回成功回执，确认任务已取消（与质询回执区分）", async () => {
@@ -870,7 +870,7 @@ describe("action=cancel 两步确认 — 红阶段测试", () => {
 			expect(result.isError).toBeFalsy();
 			const text = result.content.map((c: any) => c.text).join("");
 			expect(text).toMatch(/019ffdd3-3eb5-733d-b481-a53e5292bd73/);
-			expect(text).toMatch(/cancel|取消/);
+			expect(text).toMatch(/cancel/i);
 			expect(result.details).toMatchObject({ taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd73", cancelled: true });
 			expect(result.details?.confirmRequired, "执行成功回执不得携带质询标记").toBeFalsy();
 		});
@@ -903,9 +903,9 @@ describe("action=cancel 两步确认 — 红阶段测试", () => {
 			// 并未结束（结果稍后以 [subagent-result] 通知返回）。若未来被改回共享
 			// formatActiveTasks() 的「本任务结束时」锚定，本用例会红。
 			const text = result.content.map((c: any) => c.text).join("");
-			expect(text).toMatch(/已无其他在途任务/);
-			expect(text).not.toMatch(/本任务结束/);
-			expect(text).not.toMatch(/当前无在途任务/);
+			expect(text).toMatch(/No other tasks are in flight after this cancel request/);
+			expect(text).not.toMatch(/when this task ended/);
+			expect(text).not.toMatch(/No tasks? (are|were) in flight/i);
 		});
 
 		it("confirm 取消后回执应锚定取消请求时刻并保留其余在途任务行（2 派 1 消，🟡-1 回执措辞锁定）", async () => {
@@ -944,9 +944,9 @@ describe("action=cancel 两步确认 — 红阶段测试", () => {
 			// Assert: 锚定「取消请求发出后」（锁语义：同行含 取消请求发出后 + 其余在途任务: 1），
 			// 其余在途任务行不丢失、排除被取消任务，且不得出现信封专属的「本任务结束」锚定语。
 			const text = result.content.map((c: any) => c.text).join("");
-			const anchored = text.split("\n").some((line: string) => /取消请求发出后/.test(line) && /其余在途任务: 1/.test(line));
+			const anchored = text.split("\n").some((line: string) => /after this cancel request/.test(line) && /still in flight after this cancel request: 1/.test(line));
 			expect(anchored, "回执应有锚定取消请求发出时刻的在途行（如「取消请求发出后，其余在途任务: 1」）").toBe(true);
-			expect(text).not.toMatch(/本任务结束/);
+			expect(text).not.toMatch(/when this task ended/);
 			expect(text).toContain("019ffdd3-3eb5-733d-b481-a53e5292bd82");
 			expect(text).toContain("tester");
 			expect(text).toMatch(/任务2/);
@@ -1014,7 +1014,7 @@ describe("action=cancel 两步确认 — 红阶段测试", () => {
 			expect(pi.sendMessage).toHaveBeenCalled();
 			const [message] = pi._sendMessageCalls[0];
 			const content: string = message.content;
-			expect(content).toMatch(/用户.*取消|取消.*用户|\/subagent-cancel/);
+			expect(content).toMatch(/user.*cancel|cancel.*user|\/subagent-cancel/i);
 		});
 	});
 
@@ -1039,7 +1039,7 @@ describe("action=cancel 两步确认 — 红阶段测试", () => {
 			// 错误且提示无此运行中任务（不能只是任意参数错误）
 			expect(result.isError).toBe(true);
 			const text = result.content.map((c: any) => c.text).join("");
-			expect(text).toMatch(/无此运行中任务|no running|not found|不存在/i);
+			expect(text).toMatch(/No running subagent task with this id|no running|not found/i);
 		});
 
 		it("action=cancel 传入空 taskId → 错误提示必填", async () => {
@@ -1060,7 +1060,7 @@ describe("action=cancel 两步确认 — 红阶段测试", () => {
 			const text = result.content.map((c: any) => c.text).join("");
 			// 必须指向 taskId 参数，而不是其它参数
 			expect(text).toMatch(/taskId/);
-			expect(text).toMatch(/必填|不能为空|required|missing|empty/i);
+			expect(text).toMatch(/required|missing|empty/i);
 		});
 	});
 
@@ -1072,21 +1072,21 @@ describe("action=cancel 两步确认 — 红阶段测试", () => {
 			const { toolsByName } = setupExtension();
 			const subagent = toolsByName.get("subagent");
 			expect(subagent, "subagent tool should be registered").toBeDefined();
-			expect(subagent.description).toMatch(/取消|cancel/i);
+			expect(subagent.description).toMatch(/cancel/i);
 		});
 
 		it('subagent 工具的 description 应包含"错误"或"不再需要"类引导（防滥用引导保留）', () => {
 			const { toolsByName } = setupExtension();
 			const subagent = toolsByName.get("subagent");
 			expect(subagent, "subagent tool should be registered").toBeDefined();
-			expect(subagent.description).toMatch(/错误|不再需要|wrong|no longer needed|unnecessary/i);
+			expect(subagent.description).toMatch(/wrong|no longer needed|unnecessary/i);
 		});
 
 		it("subagent 工具的 description 应包含不要因等待时间长而取消的引导（防滥用引导保留）", () => {
 			const { toolsByName } = setupExtension();
 			const subagent = toolsByName.get("subagent");
 			expect(subagent, "subagent tool should be registered").toBeDefined();
-			expect(subagent.description).toMatch(/耐心|patience|be patient|不要.*取消|Do NOT cancel/i);
+			expect(subagent.description).toMatch(/patience|be patient|Do NOT cancel/i);
 		});
 
 		it("description 的 CANCEL DISCIPLINE 应包含 confirm 两步确认指引（RED：当前描述无 confirm 语义）", () => {
@@ -1118,7 +1118,7 @@ describe("action=cancel 两步确认 — 红阶段测试", () => {
 				...((subagent.promptGuidelines as string[]) || []),
 			];
 			const hasWaitingSemantics = lines.some(
-				(l) => /等待|wait/i.test(l) && /结束回合|end (the )?turn|不发起|without (any )?tool call|no tool call/i.test(l),
+				(l) => /wait/i.test(l) && /end (the )?turn|without (any )?tool call|no tool call/i.test(l),
 			);
 			expect(hasWaitingSemantics).toBe(true);
 		});
@@ -1133,7 +1133,7 @@ describe("action=cancel 两步确认 — 红阶段测试", () => {
 			// 宽松断言：同一行/条内出现查询/催办类词与否定语义
 			//（不含 poll —— 现行描述已有 "Do NOT poll"，避免误过）
 			const hasNoQuerySemantics = lines.some(
-				(l) => /查询|催办|query|nag/i.test(l) && /不|无|没有|不存在|no |none/i.test(l),
+				(l) => /query|nag/i.test(l) && /no |none/i.test(l),
 			);
 			expect(hasNoQuerySemantics).toBe(true);
 		});
@@ -1166,7 +1166,7 @@ describe("action=cancel 两步确认 — 红阶段测试", () => {
 			const [message] = pi._sendMessageCalls[0];
 			expect(message.customType).toBe("subagent-result");
 			// 状态词为"已取消" (cancelled status word in the content)
-			expect(message.content).toMatch(/已取消/);
+			expect(message.content).toMatch(/cancelled/);
 		});
 
 		it("用户取消后 /subagent-cancel 命令仍然正常工作（单步，功能不退化）", async () => {

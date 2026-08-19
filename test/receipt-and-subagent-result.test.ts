@@ -228,7 +228,7 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 
 			expect(result.isError).toBeFalsy();
 			const receipt = result.content[0].text;
-			expect(receipt).toMatch(/^已派出/);
+			expect(receipt).toMatch(/^Dispatched/);
 			// Should contain a taskId (UUID or session id)
 			expect(receipt).toMatch(/taskId/);
 		});
@@ -308,7 +308,7 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 				...notifyMock.mock.calls.map((c) => String(c[0])),
 			].join("");
 
-			expect(allOutput).toMatch(/无|not found|不存在|没有|no.*record/i);
+			expect(allOutput).toMatch(/No task record for|not found|no.*record/i);
 		});
 
 		it("多消息 JSONL 应保留完整会话顺序（方案 A）", async () => {
@@ -909,7 +909,7 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 				...notifyMock.mock.calls.map((c) => String(c[0])),
 			].join("");
 
-			expect(allOutput).toMatch(/仍在运行|still running|任务尚未完成/);
+			expect(allOutput).toMatch(/Task still running|still running/i);
 			// Should NOT show the session file content
 			expect(allOutput).not.toContain("Partial result");
 			// Should NOT use stdout.write
@@ -980,7 +980,7 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 	// ================================================================
 	describe("/subagent-result 操作提示位置（红阶段）", () => {
 		/** 操作提示关键词（取自 footer 提示文本，任一命中即视为含提示）。 */
-		const HINT_PATTERN = /Space|翻页|关闭|滚动|首尾/;
+		const HINT_PATTERN = /Space|scroll|page|top\/bottom|close/i;
 
 		/** 用受控短文本打开查看器（内容不含提示关键词，避免误判）。 */
 		async function openShortViewer(taskId: string, text = "The answer is 4.") {

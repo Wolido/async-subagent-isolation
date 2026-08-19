@@ -252,7 +252,7 @@ describe("异步化改造 - TDD 红阶段", () => {
 
 			const text = result!.content[0].text;
 			// 回执文本应包含"已派出"或"dispatched"语义
-			expect(text).toMatch(/已派出|dispatched|queued|started/i);
+			expect(text).toMatch(/dispatched|queued|started/i);
 
 			// 回执应包含 taskId（sessionId）
 			expect(text).toContain(SESSION_ID);
@@ -301,7 +301,7 @@ describe("异步化改造 - TDD 红阶段", () => {
 			// 绿阶段：立即返回回执文本
 			expect(timedOut).toBe(false);
 			expect(result).not.toBeNull();
-			expect(result!.content[0].text).toMatch(/已派出|dispatched|queued|started/i);
+			expect(result!.content[0].text).toMatch(/dispatched|queued|started/i);
 		});
 	});
 
@@ -370,8 +370,8 @@ describe("异步化改造 - TDD 红阶段", () => {
 			expect(message.content).toContain("[subagent-result]");
 
 			// content 包含状态行
-			expect(message.content).toContain("成功");
-			expect(message.content).toContain("状态:");
+			expect(message.content).toContain("succeeded");
+			expect(message.content).toContain("Status:");
 		});
 
 		it("子进程失败后信封状态=失败", async () => {
@@ -400,7 +400,7 @@ describe("异步化改造 - TDD 红阶段", () => {
 
 			expect(pi.sendMessage).toHaveBeenCalled();
 			const [message] = pi._sendMessageCalls[0];
-			expect(message.content).toContain("失败");
+			expect(message.content).toContain("failed");
 		});
 
 		it("活动超时后信封状态=超时", async () => {
@@ -431,7 +431,7 @@ describe("异步化改造 - TDD 红阶段", () => {
 
 			expect(pi.sendMessage).toHaveBeenCalled();
 			const [message] = pi._sendMessageCalls[0];
-			expect(message.content).toContain("超时");
+			expect(message.content).toContain("timed out");
 		});
 
 		it("信封 details 携带结构化数据", async () => {
@@ -475,7 +475,7 @@ describe("异步化改造 - TDD 红阶段", () => {
 			expect(message.details).toBeDefined();
 			expect(message.details.taskId).toBe(SESSION_ID);
 			expect(message.details.agent).toBe("tester");
-			expect(message.details.status).toBe("成功");
+			expect(message.details.status).toBe("succeeded");
 			expect(message.details.sessionId).toBe(SESSION_ID);
 		});
 	});
@@ -526,11 +526,11 @@ describe("异步化改造 - TDD 红阶段", () => {
 			const content: string = message.content;
 
 			// 找到「任务:」行
-			const taskLine = content.split("\n").find((l: string) => l.includes("任务:"));
+			const taskLine = content.split("\n").find((l: string) => l.includes("Task:"));
 			expect(taskLine).toBeDefined();
 
 			// 任务描述部分应 ≤ 200 字 + 截断标记
-			const taskContent = taskLine!.replace(/^.*任务:\s*/, "");
+			const taskContent = taskLine!.replace(/^.*Task:\s*/, "");
 			expect(taskContent.length).toBeLessThanOrEqual(203); // 200 + "..."
 		});
 	});
@@ -554,7 +554,7 @@ describe("异步化改造 - TDD 红阶段", () => {
 
 			expect(result.isError).toBe(true);
 			const text = result.content[0].text;
-			expect(text).toMatch(/blocked|限制|depth/i);
+			expect(text).toMatch(/blocked|depth/i);
 
 			// 不再提及 canDelegate
 			expect(text).not.toMatch(/canDelegate/i);
@@ -641,7 +641,7 @@ describe("异步化改造 - TDD 红阶段", () => {
 			// sendMessage 应被调用，状态=已取消
 			expect(pi.sendMessage).toHaveBeenCalled();
 			const [message] = pi._sendMessageCalls[0];
-			expect(message.content).toContain("已取消");
+			expect(message.content).toContain("cancelled");
 		});
 	});
 
@@ -735,7 +735,7 @@ describe("异步化改造 - TDD 红阶段", () => {
 			const text = result.content[0].text;
 			expect(text).toContain(SESSION_ID);
 			// 不应包含异步回执语义
-			expect(text).not.toMatch(/已派出|dispatched|queued/i);
+			expect(text).not.toMatch(/dispatched|queued/i);
 		});
 
 		it("mode=print → execute 保持同步（与现状完全一致）", async () => {
@@ -757,7 +757,7 @@ describe("异步化改造 - TDD 红阶段", () => {
 			// 同步路径：返回最终结果
 			const text = result.content[0].text;
 			expect(text).toContain(SESSION_ID);
-			expect(text).not.toMatch(/已派出|dispatched|queued/i);
+			expect(text).not.toMatch(/dispatched|queued/i);
 		});
 	});
 

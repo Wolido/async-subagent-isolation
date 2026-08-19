@@ -609,6 +609,32 @@ export function updateAvailableModels(
 	return { ok: true };
 }
 
+// ===== Unconfigured placeholder + saved-fragment helpers =====
+
+/** Placeholder for an unconfigured model/thinking slot in menu annotations. */
+const UNCONFIGURED_PLACEHOLDER = "not set";
+
+/**
+ * Build the `[saved: <model> (<modelSource>) / <thinking> (<thinkingSource>)]`
+ * fragment from a no-process effective config (the "config-file original").
+ * A slot without a value renders as `not set` with no source annotation.
+ */
+function buildSavedFragment(eff: EffectiveModelConfig): string {
+	const model = eff.model !== undefined ? `${eff.model} (${eff.modelSource})` : UNCONFIGURED_PLACEHOLDER;
+	const thinking = eff.thinking !== undefined ? `${eff.thinking} (${eff.thinkingSource})` : UNCONFIGURED_PLACEHOLDER;
+	return `[saved: ${model} / ${thinking}]`;
+}
+
+/**
+ * Whether an agent's annotations should carry the saved fragment: the agent has
+ * any process-level override entry (single-field or complete). The saved
+ * fragment surfaces the config-file original (excluding the process layer) so
+ * a live tweak's replaced value stays visible.
+ */
+function agentHasSavedFragment(processOverrides: Record<string, ModelOverride>, agentName: string): boolean {
+	return Object.prototype.hasOwnProperty.call(processOverrides, agentName);
+}
+
 /** Minimal UI surface the model-config editor flow needs (structurally compatible with pi's ctx.ui). */
 export interface ModelConfigEditorUI {
 	select(title: string, options: string[]): Promise<string | undefined>;
@@ -619,17 +645,22 @@ export interface ModelConfigEditorUI {
 }
 
 /**
- * model/thinking 覆盖编辑子流程（/subagent-config 的 model/thinking 字段进
- * 入；agentName 由父流程预选，必传，不存在独立的 agent 选择步）。流程：
- * 选择字段（model/thinking/clear model/clear thinking）→ 输入/选择新值
- * （thinking 用官方 7 级别 select，写入级别值本身；model 在 $models 列表非
- * 空时从列表 select、空/未配置回退自由 input 并预填生效值）→ 选择写入目标
- * （user/project，标注当前生效来源）→ 写回 → 确认提示。
+ * model & thinking 覆盖编辑子流程（/subagent-config 的 model & thinking 合
+ * 并项进入；agentName 由父流程预选，必传，不存在独立的 agent 选择步）。
+ * 流程：动作选择层（edit model & thinking / clear model & thinking，edit
+ * 选项标注当前生效 model+thinking 与各自来源，未配置槽位全角占位符）→
+ * edit 分支：model 值步（$models 非空从列表 select、空/未配置回退自由
+ * input 并预填生效值）→ thinking 值步（官方 7 级别 select + （未配置）选
+ * 项，当前生效级别/未配置标 (current)）→ 写入目标 select（this process /
+ * user / project，标当前生效来源）→ 一次 patch 两字段写回 → 确认提示。
+ * clear 分支：写入目标 select → 整条 entry 两字段 null 清除 → 反馈重算的
+ * model/thinking 各自回退值（含来源）。合并编辑一次写入整条 entry，杜绝
+ * “只写一个字段 → 整 key 遮蔽把另一个字段变（未配置）”的坑。
  *
- * ESC 逐级回退（统一，无调用方差异）：值步 ESC → 回字段选择；写入目标
- * ESC → 回值步（clear 分支无值步 → 直接回字段选择）；字段选择 ESC → 返回
- * undefined 交回调用方（父流程继续其字段选择循环；独立调用即结束）。成功
- * 写入返回结果对象并结束流程；回退全程零写入。
+ * ESC 逐级回退（统一，无调用方差异）：edit 分支的 model 值步 ESC / thinking
+ * 值步 ESC / 写入目标 ESC、clear 分支的写入目标 ESC → 都回动作选择层（丢
+ * 弃已收集值，零写入）；动作选择 ESC → 返回 undefined 交回调用方（父流程
+ * 继续其字段选择循环；独立调用即结束）。成功写入返回结果对象并结束流程。
  */
 export async function editAgentModelConfig(deps: {
 	ui: ModelConfigEditorUI;
@@ -648,9 +679,10 @@ export async function editAgentModelConfig(deps: {
 		return undefined;
 	}
 
-	// Effective values drive the field-option annotations, the current-source
-	// marker on the write-target select, and the prefilled input initial
-	// (user/project overrides read separately for correct source attribution).
+	// Effective values drive the action-option annotations, the thinking-level
+	// (current) marker, the write-target (current) marker, and the prefilled
+	// model input initial (user/project overrides read separately for correct
+	// source attribution).
 	const effective = computeEffectiveModelConfigs(
 		agents,
 		loadModelOverridesFile(resolveModelOverridePath("user", cwd)),
@@ -658,22 +690,35 @@ export async function editAgentModelConfig(deps: {
 		getProcessOverrides(),
 	).find((v) => v.name === agentName);
 
-	const fields = ["model", "thinking", "clear model", "clear thinking"];
-	// Annotate the model/thinking options with their current effective values
-	// (appended text only; the field key stays the leading word). clear 选项
-	// 附带 reset 说明（英文 key clear/model/thinking 保持子串可见）。
-	const fieldOptions = [
-		effective?.model !== undefined ? `model — ${effective.model} (${effective.modelSource})` : "model",
-		effective?.thinking !== undefined ? `thinking — ${effective.thinking} (${effective.thinkingSource})` : "thinking",
-		"clear model (reset to frontmatter)",
-		"clear thinking (reset to frontmatter)",
+	// 动作选择层两个选项：edit 选项标注当前生效 model+thinking 与各自来源
+	// （未配置槽位占位符）；clear 选项附 reset 说明。标注为追加内容，经
+	// indexOf 映射回动作，永不进入写入值。存在进程级覆盖（单字段/双字段一致）
+	// 时 edit 选项末尾追加 saved 片段（低层生效值，与字段选择/picker 同规则）。
+	const savedEffective = computeEffectiveModelConfigs(
+		agents,
+		loadModelOverridesFile(resolveModelOverridePath("user", cwd)),
+		loadModelOverridesFile(resolveModelOverridePath("project", cwd)),
+	).find((v) => v.name === agentName);
+	const savedSuffix = agentHasSavedFragment(getProcessOverrides(), agentName) && savedEffective
+		? buildSavedFragment(savedEffective)
+		: "";
+	const actionOptions = [
+		`edit model & thinking — ${
+			effective?.model !== undefined ? `${effective.model} (${effective.modelSource})` : UNCONFIGURED_PLACEHOLDER
+		} / ${effective?.thinking !== undefined ? `${effective.thinking} (${effective.thinkingSource})` : UNCONFIGURED_PLACEHOLDER}${savedSuffix}`,
+		"clear model & thinking (reset to frontmatter)",
 	];
 
-	// Mark the write target that currently governs this field (frontmatter or
-	// unconfigured → no marker; annotation never names the other target).
-	const pickTarget = async (field: string): Promise<"process" | "user" | "project" | undefined> => {
+	// Mark the write target that currently governs the merged entry
+	// (frontmatter/unconfigured → no marker). 整 key 合并下两字段同源：生效值
+	// 来自同一覆盖层（或回退 frontmatter），故取任一非 frontmatter 来源即可。
+	const pickTarget = async (): Promise<"process" | "user" | "project" | undefined> => {
 		const currentSource =
-			field === "thinking" || field === "clear thinking" ? effective?.thinkingSource : effective?.modelSource;
+			effective?.modelSource !== undefined && effective?.modelSource !== "frontmatter"
+				? effective.modelSource
+				: effective?.thinkingSource !== undefined && effective?.thinkingSource !== "frontmatter"
+					? effective.thinkingSource
+					: undefined;
 		const targets: Array<"process" | "user" | "project"> = ["process", "user", "project"];
 		// process 选项带英文 key "this process"（与 user/project 裸 key 并列）；
 		// 经并行数组 indexOf 映射回 "process"。
@@ -684,9 +729,13 @@ export async function editAgentModelConfig(deps: {
 		return targets[targetOptions.indexOf(pickedTarget)];
 	};
 
+	// 一次 patch 两字段（model & thinking 合并编辑核心）：整条 entry 完整写
+	// 入，杜绝“只写一个字段 → 整 key 遮蔽把另一个字段变（未配置）”的坑。
+	// thinking 为 null 即清该字段（API 已支持）；clear 分支两字段 null → 整
+	// 条 entry 移除（无 entry 时 no-op）。
 	const writePatch = (
-		field: string,
-		patch: { model?: string | null; thinking?: string | null },
+		isClear: boolean,
+		patch: { model: string | null; thinking: string | null },
 		target: "process" | "user" | "project",
 	): unknown => {
 		let filePath: string | undefined;
@@ -702,107 +751,106 @@ export async function editAgentModelConfig(deps: {
 			ui.notify(`Agent "${agentName}": ${result.error}`, "error");
 			return undefined;
 		}
-		const isClear = field === "clear model" || field === "clear thinking";
 		if (isClear) {
-			// Clear 完成反馈 = 清除目标 entry 该字段后【重算】的生效值（含来源）：
-			// 写盘后重读 user/project 覆盖记录（内存层含 getProcessOverrides），
-			// 按运行时整 key 合并重算视图（process > project > user，未配字段回退
-			// frontmatter）。frontmatter 字样仅当重算来源确为 frontmatter（或回退
-			// 链已到 frontmatter 仍无值 → 未配置语义）。
-			const key = field === "clear model" ? "model" : "thinking";
-			const srcKey = field === "clear model" ? "modelSource" : "thinkingSource";
+			// Clear 完成反馈 = 清除目标整条 entry 后【重算】的 model 与 thinking
+			// 各自回退值（含来源）：写盘后重读 user/project 覆盖记录（内存层含
+			// getProcessOverrides），按运行时整 key 合并重算视图（process >
+			// project > user，未配字段回退 frontmatter）。frontmatter 字样仅当
+			// 重算来源确为 frontmatter（或回退链已到 frontmatter 仍无值 → 未配
+			// 置语义）。
 			const recomputed = computeEffectiveModelConfigs(
 				agents,
 				loadModelOverridesFile(resolveModelOverridePath("user", cwd)),
 				loadModelOverridesFile(resolveModelOverridePath("project", cwd)),
 				getProcessOverrides(),
 			).find((v) => v.name === agentName);
-			const value = recomputed?.[key];
-			const source = recomputed?.[srcKey];
-			const fallbackText =
-				value !== undefined
-					? `${value} (${source})`
-					: "not configured (未配置)";
-			const sourceText =
-				value !== undefined ? (source === "frontmatter" ? "frontmatter" : source) : "frontmatter";
+			const modelFallback =
+				recomputed?.model !== undefined
+					? `${recomputed.model} (${recomputed.modelSource})`
+					: `${UNCONFIGURED_PLACEHOLDER} (frontmatter)`;
+			const thinkingFallback =
+				recomputed?.thinking !== undefined
+					? `${recomputed.thinking} (${recomputed.thinkingSource})`
+					: `${UNCONFIGURED_PLACEHOLDER} (frontmatter)`;
 			ui.notify(
 				target === "process"
-					? `Agent "${agentName}": ${key} override cleared from this process (memory only) — falls back to ${sourceText}: ${fallbackText}.`
-					: `Agent "${agentName}": ${key} override cleared from ${target}-level config (${filePath}) — falls back to ${sourceText}: ${fallbackText}.`,
+					? `Agent "${agentName}": model & thinking override cleared from this process (memory only) — falls back to model: ${modelFallback}, thinking: ${thinkingFallback}.`
+					: `Agent "${agentName}": model & thinking override cleared from ${target}-level config (${filePath}) — falls back to model: ${modelFallback}, thinking: ${thinkingFallback}.`,
 				"info",
 			);
-			return { agentName, field: key, value: null, scope: target, filePath };
+			return { agentName, field: "model & thinking", model: null, thinking: null, scope: target, filePath };
 		}
 		ui.notify(
 			target === "process"
-				? `Agent "${agentName}": ${field} override written to this process (memory only — no file written; disappears when the process exits).`
-				: `Agent "${agentName}": ${field} override written to ${target}-level config (${filePath}).`,
+				? `Agent "${agentName}": model & thinking override written to this process (memory only — no file written; disappears when the process exits).`
+				: `Agent "${agentName}": model & thinking override written to ${target}-level config (${filePath}).`,
 			"info",
 		);
-		return { agentName, field, value: patch.model ?? patch.thinking ?? null, scope: target, filePath };
+		return { agentName, field: "model & thinking", model: patch.model, thinking: patch.thinking, scope: target, filePath };
 	};
 
-	// 字段选择层循环：值步/写入目标步的 ESC 回退到本层重新提问。
+	// 动作选择层循环：edit/clear 分支的任一步 ESC → 回本层（丢弃已收集值，
+	// 零写入）；动作选择 ESC → 返回 undefined 交回调用方。
 	while (true) {
-		const pickedField = await ui.select(`Agent "${agentName}" — select field to edit`, fieldOptions);
-		if (pickedField === undefined) return undefined; // 字段选择 ESC → 交回调用方
-		const field: string | undefined = fields[fieldOptions.indexOf(pickedField)];
-		if (field === undefined) return undefined;
+		const pickedAction = await ui.select(`Agent "${agentName}" — select action`, actionOptions);
+		if (pickedAction === undefined) return undefined; // 动作选择 ESC → 交回调用方
+		const actionIndex = actionOptions.indexOf(pickedAction);
+		if (actionIndex < 0) return undefined;
 
-		if (field === "clear model" || field === "clear thinking") {
-			// Clear 无值步：写入目标 ESC → 回字段选择（clear 未执行）。
-			const target = await pickTarget(field);
+		if (actionIndex === 1) {
+			// clear 分支（无值步）：写入目标 ESC → 回动作选择（clear 未执行）。
+			const target = await pickTarget();
 			if (target === undefined) continue;
-			const patch = field === "clear model" ? { model: null } : { thinking: null };
-			const written = writePatch(field, patch, target);
+			const written = writePatch(true, { model: null, thinking: null }, target);
 			if (written !== undefined) return written;
 			return undefined; // 写失败：错误已提示，结束流程
 		}
 
-		// 值步层循环：写入目标 ESC 回退到本层（重输入值覆盖先前收集值）。
-		while (true) {
-			let patch: { model?: string; thinking?: string };
-			if (field === "model") {
-				// $models: a non-empty list turns the value step into a select over
-				// the list (the chosen model ID itself is written); an empty list
-				// falls back to free-text input prefilled with the current
-				// effective model (empty string when none).
-				const available = loadAvailableModels(cwd).models;
-				let value: string | undefined;
-				if (available.length > 0) {
-					value = await ui.select(`Agent "${agentName}" — select model`, available);
-				} else {
-					value = await ui.input(
-						`Agent "${agentName}" — new model`,
-						"provider/model-id",
-						effective?.model ?? "",
-					);
-				}
-				if (value === undefined) break; // 值步 ESC → 回字段选择
-				if (value.trim() === "") {
+		// edit 分支：model 值步 → thinking 值步 → 写入目标 → 一次 patch 两字段。
+		let modelValue: string | undefined;
+		const available = loadAvailableModels(cwd).models;
+		if (available.length > 0) {
+			// $models: a non-empty list turns the value step into a select over
+			// the list (the chosen model ID itself is written); an empty list
+			// falls back to free-text input prefilled with the current effective
+			// model (empty string when none).
+			modelValue = await ui.select(`Agent "${agentName}" — select model`, available);
+		} else {
+			while (true) {
+				modelValue = await ui.input(
+					`Agent "${agentName}" — new model`,
+					"provider/model-id",
+					effective?.model ?? "",
+				);
+				if (modelValue === undefined) break; // 值步 ESC → 回动作选择
+				if (modelValue.trim() === "") {
 					// Invalid value is rejected at the UI layer: error + re-ask the value step.
 					ui.notify(`Agent "${agentName}": model must be a non-empty string — nothing written.`, "error");
 					continue;
 				}
-				patch = { model: value.trim() };
-			} else {
-				// Mark exactly the current effective level with "(current)" (appended).
-				const levels = [...THINKING_LEVELS];
-				const levelOptions = levels.map((l) => (l === effective?.thinking ? `${l} (current)` : l));
-				const pickedLevel = await ui.select(`Agent "${agentName}" — select thinking level`, levelOptions);
-				if (pickedLevel === undefined) break; // 值步 ESC → 回字段选择
-				const level = levels[levelOptions.indexOf(pickedLevel)];
-				if (level === undefined) break;
-				patch = { thinking: level };
+				modelValue = modelValue.trim();
+				break;
 			}
-
-			const target = await pickTarget(field);
-			if (target === undefined) continue; // 写入目标 ESC → 回值步
-			const written = writePatch(field, patch, target);
-			if (written !== undefined) return written;
-			return undefined; // 写失败：错误已提示，结束流程
 		}
-		// break 落到此处 = 值步 ESC → 外层字段选择循环继续
+		if (modelValue === undefined) continue; // model 值步 ESC → 回动作选择
+
+		// thinking 值步：官方 7 级别 select（当前生效级别标 (current)）+ 未配置
+		// 选项（thinking 未配置时标 (current)）。选 7 级 → thinking=级别；选未配
+		// 置选项 → thinking=null（清字段）。
+		const levels = [...THINKING_LEVELS];
+		const levelOptions = [
+			...levels.map((l) => (l === effective?.thinking ? `${l} (current)` : l)),
+			effective?.thinking === undefined ? `${UNCONFIGURED_PLACEHOLDER} (current)` : UNCONFIGURED_PLACEHOLDER,
+		];
+		const pickedLevel = await ui.select(`Agent "${agentName}" — select thinking level`, levelOptions);
+		if (pickedLevel === undefined) continue; // thinking 值步 ESC → 回动作选择
+		const thinkingValue: string | null = levels[levelOptions.indexOf(pickedLevel)] ?? null;
+
+		const target = await pickTarget();
+		if (target === undefined) continue; // 写入目标 ESC → 回动作选择（丢弃已收集值）
+		const written = writePatch(false, { model: modelValue, thinking: thinkingValue }, target);
+		if (written !== undefined) return written;
+		return undefined; // 写失败：错误已提示，结束流程
 	}
 }
 
@@ -927,7 +975,7 @@ function adaptModelConfigEditorUI(ui: ExtensionContext["ui"]): ModelConfigEditor
 				selectList.onSelect = (item) => done(item.value);
 				selectList.onCancel = () => done(undefined);
 				container.addChild(selectList);
-				container.addChild(new Text(theme.fg("dim", "↑↓ 选择 · Enter 确认 · Esc/q 退出"), 1, 0));
+				container.addChild(new Text(theme.fg("dim", "↑↓ navigate · Enter confirm · Esc/q quit"), 1, 0));
 				container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
 				return {
 					render: (w) => container.render(w),
@@ -1003,10 +1051,11 @@ function orderAgentsForPicker(
 /**
  * Unified config flow (/subagent-config 的唯一入口): agent picker（每个
  * 选项带生效 model/thinking 总览标注；含 $models 列表管理入口）→ 选中后
- * 直接进入字段选择（无详情 notify；信息获取靠字段选项标注）→ 6 字段（name
- * 只读身份标识不可编辑；description/tools/skills/body/model/thinking，选项
- * 标注当前值）→ 编辑 → 写回 → 提示。description 提示 /reload（注入花名册
- * 被 before_agent_start 缓存）；tools/skills/body/model/thinking 即时生效。
+ * 直接进入字段选择（无详情 notify；信息获取靠字段选项标注）→ 5 字段（name
+ * 只读身份标识不可编辑；description/tools/skills/body/model & thinking，
+ * 选项标注当前值；model & thinking 合并为一项，一次编辑一次写入）→ 编辑
+ * → 写回 → 提示。description 提示 /reload（注入花名册被 before_agent_start
+ * 缓存）；tools/skills/body/model & thinking 即时生效。
  *
  * 连续编辑语义：每个字段写回成功后回字段选择，可在一个流程内修改多个字
  * 段；本函数不返回写回结果，仅在用户逐级 ESC 后结束。
@@ -1027,13 +1076,31 @@ export async function editAgentConfig(deps: {
 	const { ui, cwd, agents } = deps;
 	const editBody = deps.editBody ?? ((filePath: string) => editAgentBodyWithEditor({ filePath }));
 
-	// 字段选项标注共用的生效视图：一次计算悬挂复用（user/project 覆盖从各
-	// 自文件读取，生效视图的来源归属与 dispatch 一致：project 按整 key 遮蔽
-	// user）。回退不产生写入，故循环期间视图始终有效。
-	const userOverrides = loadModelOverridesFile(resolveModelOverridePath("user", cwd));
-	const projectOverrides = loadModelOverridesFile(resolveModelOverridePath("project", cwd));
-	const effectiveView = computeEffectiveModelConfigs(agents, userOverrides, projectOverrides, getProcessOverrides());
+	// 字段选项标注共用的生效视图：入口计算一次，写回成功后经 refreshView 重
+	// 算（重读 user/project 覆盖文件 + 进程内存层，来源归属与 dispatch 一
+	// 致：project 按整 key 遮蔽 user）。无写入的 ESC 回退不触发重算 → 选项
+	// 保持确定不变。
+	let userOverrides = loadModelOverridesFile(resolveModelOverridePath("user", cwd));
+	let projectOverrides = loadModelOverridesFile(resolveModelOverridePath("project", cwd));
+	let effectiveView = computeEffectiveModelConfigs(agents, userOverrides, projectOverrides, getProcessOverrides());
+	// saved 视图 = 排除进程层后的生效链（project > user > frontmatter），供
+	// 进程级覆盖时的 [saved: ...] 标注读取低层原值。
+	let savedView = computeEffectiveModelConfigs(agents, userOverrides, projectOverrides);
 	const effectiveOf = (name: string) => effectiveView.find((v) => v.name === name);
+	const savedOf = (name: string) => savedView.find((v) => v.name === name);
+	// 写回成功后的生效视图刷新（model/thinking 及 clear 经子流程写回成功后调
+	// 用）。effectiveOf 闭包读 let 变量，重算后所有标注立即见新值（含来源）。
+	const refreshView = (): void => {
+		userOverrides = loadModelOverridesFile(resolveModelOverridePath("user", cwd));
+		projectOverrides = loadModelOverridesFile(resolveModelOverridePath("project", cwd));
+		effectiveView = computeEffectiveModelConfigs(agents, userOverrides, projectOverrides, getProcessOverrides());
+		savedView = computeEffectiveModelConfigs(agents, userOverrides, projectOverrides);
+	};
+
+	// 文本字段（description/tools/skills/body）的 live 内存副本：写回成功后
+	// 就地更新，标注即时刷新且跨 editFields 调用存活（ESC 回退后再进同一
+	// agent 仍见新值）；picker 只取 name/source/model/thinking，不受影响。
+	const liveAgents = new Map<string, AgentConfig>(agents.map((a) => [a.name, { ...a }]));
 
 	/**
 	 * 字段选择层循环（预选 agent 的编辑循环）：每个字段编辑完成（写回成功）
@@ -1041,23 +1108,34 @@ export async function editAgentConfig(deps: {
 	 * （调用方回上一层：agent 选择 / 完全退出）。
 	 */
 	const editFields = async (agent: AgentConfig): Promise<void> => {
-		const effective = effectiveOf(agent.name);
-		const bodySummary = agent.systemPrompt.replace(/\s+/g, " ").trim();
+		const live = liveAgents.get(agent.name) ?? agent;
 		// Field select annotated with current values (appended text only; the
 		// field key stays the leading word). Mapping back goes through the
 		// parallel arrays' index, so annotations never leak into the written value.
 		// name 是只读身份标识（不可编辑）；字段顺序使 description 为首项。
-		const fields = ["description", "tools", "skills", "body", "model", "thinking"] as const;
+		const fields = ["description", "tools", "skills", "body", "model & thinking"] as const;
 		const truncate = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n)}…` : s);
-		const fieldOptions: string[] = [
-			`description — ${truncate(agent.description.replace(/\s+/g, " ").trim(), 60)}`,
-			`tools — ${agent.tools && agent.tools.length > 0 ? agent.tools.join(", ") : "(all)"}`,
-			`skills — ${agent.skills && agent.skills.length > 0 ? agent.skills.join(", ") : "(default)"}`,
-			`body — ${truncate(bodySummary, 60) || "(empty)"}`,
-			effective?.model !== undefined ? `model — ${effective.model} (${effective.modelSource})` : "model",
-			effective?.thinking !== undefined ? `thinking — ${effective.thinking} (${effective.thinkingSource})` : "thinking",
-		];
 		while (true) {
+			// fieldOptions 每次提问前基于当前生效视图 + live 字段值重算：任何
+			// 写回成功后回到本层，标注立即反映新值（无写入则结果与上次一致）。
+			const effective = effectiveOf(agent.name);
+			const saved = savedOf(agent.name);
+			const bodySummary = live.systemPrompt.replace(/\s+/g, " ").trim();
+			// 存在进程级覆盖（单字段/双字段一致）时模型槽位标注末尾追加 saved 片段
+			// （低层原值 + 来源，经 refreshView 实时刷新）。
+			const savedSuffix =
+				agentHasSavedFragment(getProcessOverrides(), agent.name) && saved
+					? buildSavedFragment(saved)
+					: "";
+			const fieldOptions: string[] = [
+				`description — ${truncate(live.description.replace(/\s+/g, " ").trim(), 60)}`,
+				`tools — ${live.tools && live.tools.length > 0 ? live.tools.join(", ") : "(all)"}`,
+				`skills — ${live.skills && live.skills.length > 0 ? live.skills.join(", ") : "(default)"}`,
+				`body — ${truncate(bodySummary, 60) || "(empty)"}`,
+				// model & thinking 合并为一项：同一选项含两 key、两槽位值与各自来
+				// 源（未配置槽位占位符）；经 indexOf 映射回 fields，永不进入写入值。
+				`model & thinking — ${effective?.model !== undefined ? `${effective.model} (${effective.modelSource})` : UNCONFIGURED_PLACEHOLDER} / ${effective?.thinking !== undefined ? `${effective.thinking} (${effective.thinkingSource})` : UNCONFIGURED_PLACEHOLDER}${savedSuffix}`,
+			];
 			const pickedField = await ui.select(`Agent "${agent.name}" — select field to edit`, fieldOptions);
 			if (pickedField === undefined) return; // 字段选择 ESC → 回上一层（agent 选择 / 完全退出）
 			const fieldIndex = fieldOptions.indexOf(pickedField);
@@ -1067,7 +1145,7 @@ export async function editAgentConfig(deps: {
 			switch (field) {
 				case "description": {
 					// Prefill with the current value so the user edits on top of it.
-					const value = await ui.input(`Agent "${agent.name}" — new description`, agent.description, agent.description);
+					const value = await ui.input(`Agent "${agent.name}" — new description`, live.description, live.description);
 					if (value === undefined) continue; // 编辑 ESC → 回字段选择
 					const result = updateAgentFile(agent.filePath, { description: value });
 					if (!result.ok) {
@@ -1078,6 +1156,7 @@ export async function editAgentConfig(deps: {
 						`Agent "${agent.name}": description updated. Run /reload to rebuild the injected agent list.`,
 						"info",
 					);
+					live.description = value.trim(); // 写回成功 → live 副本即时刷新（与落盘一致）
 					continue; // 写回成功 → 回字段选择（可继续修改其它字段）
 				}
 				case "tools":
@@ -1086,8 +1165,8 @@ export async function editAgentConfig(deps: {
 					// key is absent — the caller never null-checks initial).
 					const value = await ui.input(
 						`Agent "${agent.name}" — ${field} (comma-separated, empty clears the key)`,
-						agent[field]?.join(", "),
-						agent[field]?.join(", ") ?? "",
+						live[field]?.join(", "),
+						live[field]?.join(", ") ?? "",
 					);
 					if (value === undefined) continue; // 编辑 ESC → 回字段选择
 					const patch = field === "tools" ? { tools: value } : { skills: value };
@@ -1097,6 +1176,9 @@ export async function editAgentConfig(deps: {
 						continue;
 					}
 					ui.notify(`Agent "${agent.name}": ${field} updated — takes effect immediately.`, "info");
+					// 写回成功 → live 副本按与落盘一致的解析结果刷新（空串清 key → undefined）
+					const items = parseListField(value) ?? [];
+					live[field] = items.length > 0 ? items : undefined;
 					continue; // 写回成功 → 回字段选择
 				}
 				case "body": {
@@ -1112,14 +1194,26 @@ export async function editAgentConfig(deps: {
 						continue;
 					}
 					ui.notify(`Agent "${agent.name}": body updated — takes effect immediately.`, "info");
+					// 保存成功：流程拿不到新正文文本 → 重读 agent 文件刷新 live 副本
+					// （读失败保持原副本不崩溃）。
+					const reread = readAgentFile(agent.filePath);
+					if (reread.ok) {
+						live.description = reread.description;
+						live.tools = reread.tools;
+						live.skills = reread.skills;
+						live.systemPrompt = reread.body;
+					}
 					continue; // 保存成功 → 回字段选择
 				}
 				default: {
-					// model / thinking: delegate to the stage-2 subflow (its own field
-					// select offers model/thinking/clear model/clear thinking). 子流
-					// 程字段选择 ESC 返回 undefined、写回成功返回结果对象——两种结果
+					// model & thinking 合并项: delegate to the stage-2 subflow (its
+					// own action layer offers edit / clear model & thinking). 子流程
+					// 动作选择 ESC 返回 undefined、写回成功返回结果对象——两种结果
 					// 都回本字段选择（可继续修改其它字段，不退出、不重启子流程）。
-					await editAgentModelConfig({ ui, cwd, agents, agentName: agent.name });
+					// 写回成功（含 clear）→ refreshView 重算生效视图，本层标注即时
+					// 刷新（含来源）；ESC/失败不刷新（无写入，选项保持确定不变）。
+					const written = await editAgentModelConfig({ ui, cwd, agents, agentName: agent.name });
+					if (written !== undefined) refreshView();
 					continue;
 				}
 			}
@@ -1146,13 +1240,26 @@ export async function editAgentConfig(deps: {
 	// （orderAgentsForPicker，未配置的 agent 按发现顺序追加在后）；排序只作
 	// 用于显示层，indexOf 映射作用于排序后的数组。picker 还携带 $models 列
 	// 表管理入口。
-	const orderedAgents = orderAgentsForPicker(agents, userOverrides, projectOverrides);
-	const agentOptions = orderedAgents.map((a) => {
-		const eff = effectiveOf(a.name);
-		return `${a.name} (${a.source}) — ${eff?.model ?? "（未配置）"} (${eff?.thinking ?? "（未配置）"})`;
-	});
-	const pickerOptions = [...agentOptions, MODELS_LIST_ENTRY_LABEL];
 	while (true) {
+		// 每次回到 picker 基于刷新后的视图与覆盖文件重算（标注与排序随 json
+		// key 变化自动更新；无写入的 ESC 回退不触发 → 结果与上次一致）。
+		const orderedAgents = orderAgentsForPicker(agents, userOverrides, projectOverrides);
+		const processOverrides = getProcessOverrides();
+		const agentOptions = orderedAgents.map((a) => {
+			const eff = effectiveOf(a.name);
+			const saved = savedOf(a.name);
+			// 进程内存级覆盖标识：该 agent 存在 process entry 时选项行尾追加
+			// (process)（格式 `<name> (<source>) — <model> (<thinking>) (process)`）；
+			// 无进程覆盖时格式不变（标记在行尾，首 token 提取不受影响）。
+			const hasProcessOverride = Object.prototype.hasOwnProperty.call(processOverrides, a.name);
+			const processBadge = hasProcessOverride ? " (process)" : "";
+			// saved 片段：存在进程级覆盖（单字段/双字段一致）时紧跟 (process) 标
+			// 记，展示低层原值（savedOf 读排除进程层后的视图；写回/clear 后经
+			// refreshView 刷新）。
+			const savedSuffix = hasProcessOverride && saved ? buildSavedFragment(saved) : "";
+			return `${a.name} (${a.source}) — ${eff?.model ?? UNCONFIGURED_PLACEHOLDER} (${eff?.thinking ?? UNCONFIGURED_PLACEHOLDER})${processBadge}${savedSuffix}`;
+		});
+		const pickerOptions = [...agentOptions, MODELS_LIST_ENTRY_LABEL];
 		const picked = await ui.select("Configure subagent — select agent", pickerOptions);
 		if (picked === undefined) return undefined; // 顶层 ESC → 完全退出
 		if (picked === MODELS_LIST_ENTRY_LABEL) {
@@ -2100,8 +2207,8 @@ export function extractSessionTranscript(filePath: string): string | null {
 	const sections: string[] = [];
 	// Plain-text section labels (not markdown headings): headings would invoke
 	// theme closures that throw when the global theme is uninitialized (tests).
-	if (taskText) sections.push(`任务原文\n\n${taskText}`);
-	sections.push(`会话记录\n\n${entries.join("\n\n")}`);
+	if (taskText) sections.push(`Original task\n\n${taskText}`);
+	sections.push(`Conversation log\n\n${entries.join("\n\n")}`);
 	return sections.join("\n\n");
 }
 
@@ -2124,7 +2231,7 @@ function validateSessionId(sessionId: unknown): string | null {
 	if (trimmed === "") return "Invalid sessionId: must not be empty";
 	if (trimmed === "." || trimmed === "..") return `Invalid sessionId: "${trimmed}" is not allowed`;
 	if (!UUID_V7_PATTERN.test(trimmed))
-		return "Invalid sessionId: expected a lowercase UUID v7 from a previous receipt. Only pass sessionId to resume (复用) an earlier taskId; omit it to generate a new one.";
+		return "Invalid sessionId: expected a lowercase UUID v7 from a previous receipt. Only pass sessionId to resume an earlier taskId; omit it to generate a new one.";
 	return null;
 }
 
@@ -2670,10 +2777,10 @@ const MAX_SUBAGENT_DEPTH = 1;
 
 /** Envelope status words for a finished async subagent task. */
 export const STATUS_WORDS = {
-	success: "成功",
-	failure: "失败",
-	timeout: "超时",
-	cancelled: "已取消",
+	success: "succeeded",
+	failure: "failed",
+	timeout: "timed out",
+	cancelled: "cancelled",
 } as const;
 
 export type SubagentTaskStatus = keyof typeof STATUS_WORDS;
@@ -2757,9 +2864,9 @@ export function truncateTaskDescription(task: string, maxLen = 200): string {
  */
 export function formatActiveTasks(): string {
 	const running = [...taskRegistry.values()].filter((t) => t.status === "running");
-	if (running.length === 0) return "本任务结束时无其他在途任务。";
+	if (running.length === 0) return "No other tasks were in flight when this task ended.";
 	const lines = running.map((t) => `- ${t.taskId} (${t.agentName}): ${truncateTaskDescription(t.task)}`);
-	return `本任务结束时，其他在途任务: ${running.length}\n${lines.join("\n")}`;
+	return `Other tasks in flight when this task ended: ${running.length}\n${lines.join("\n")}`;
 }
 
 /**
@@ -2772,9 +2879,9 @@ export function formatActiveTasks(): string {
  */
 function formatRemainingTasksAfterCancelRequest(): string {
 	const running = [...taskRegistry.values()].filter((t) => t.status === "running");
-	if (running.length === 0) return "取消请求发出后，已无其他在途任务。";
+	if (running.length === 0) return "No other tasks are in flight after this cancel request.";
 	const lines = running.map((t) => `- ${t.taskId} (${t.agentName}): ${truncateTaskDescription(t.task)}`);
-	return `取消请求发出后，其余在途任务: ${running.length}\n${lines.join("\n")}`;
+	return `Other tasks still in flight after this cancel request: ${running.length}\n${lines.join("\n")}`;
 }
 
 /** A finished async task, recorded when completeAsyncTask removes it from the registry. */
@@ -2861,7 +2968,7 @@ async function pickTaskInteractively(
 		selectList.onSelect = (item) => done(item.value);
 		selectList.onCancel = () => done(undefined);
 		container.addChild(selectList);
-		container.addChild(new Text(theme.fg("dim", "↑↓ 选择 · Enter 确认 · Esc/q 退出"), 1, 0));
+		container.addChild(new Text(theme.fg("dim", "↑↓ navigate · Enter confirm · Esc/q quit"), 1, 0));
 		container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
 		return {
 			render: (w) => container.render(w),
@@ -2927,7 +3034,7 @@ const DETAILS_OUTPUT_MAX_CHARS = 16 * 1024;
  * cancelled) — a fixed template, not status-dependent.
  */
 const RESULT_TRIGGER_LINE =
-	"> [subagent-result] 任务完成通知，非用户新指令。处理前先锚定你当前正在执行的主线任务与进度；对照派发记录消化本通知，勿让通知覆盖或改写你的主线计划。";
+	"> [subagent-result] This is a task-completion notification, not a new user instruction. Before acting on it, anchor the mainline task and progress you are currently working on; digest the notification against your dispatch records, and never let it overwrite or rewrite your mainline plan.";
 
 /**
  * Empty-body fallback for an aborted task, keyed on the abort's origin so the
@@ -2935,15 +3042,18 @@ const RESULT_TRIGGER_LINE =
  * a session shutdown apart (and does not auto-retry a user cancel).
  */
 function abortedFallbackBody(stopReason?: string, cancelledBy?: "user" | "agent", cancelReason?: string): string {
-	if (stopReason === "killed_on_shutdown") return "任务因会话关闭被终止（session_shutdown）。";
+	if (stopReason === "killed_on_shutdown")
+		return "The task was terminated because the session shut down (session_shutdown).";
 	if (cancelledBy === "agent") {
-		const base = "该任务已由主 agent 通过 subagent 工具（action=cancel）取消。";
+		const base = "This task was cancelled by the main agent via the subagent tool (action=\"cancel\").";
 		// Single-line and cap the reason: it is model-controlled text inlined
 		// into a notification body. The full value stays on the task record.
-		return cancelReason ? `${base}取消理由: ${truncateTaskDescription(cancelReason, 200)}` : base;
+		return cancelReason ? `${base}Cancellation reason: ${truncateTaskDescription(cancelReason, 200)}` : base;
 	}
-	return "该任务已由用户通过 /subagent-cancel 取消，属用户主动操作。请勿自动重新派发；如需重新派发，先询问用户。";
+	return "This task was cancelled by the user via /subagent-cancel — a deliberate user action. Do not automatically re-dispatch it; ask the user before re-dispatching.";
 }
+
+
 
 /**
  * Build the [subagent-result] notification envelope: a markdown content text
@@ -2970,19 +3080,19 @@ export function buildResultEnvelope(
 		: Math.max(0, Date.now() - task.startedAt);
 	let body = output;
 	if (!body && result) body = result.errorMessage || result.stderr.trim();
-	// Only genuine failures are labelled "内部错误"; a user cancel or session
-	// shutdown rejection is an expected abort, so it gets a note carrying the
-	// abort's origin (user cancel vs session shutdown).
-	if (!body && errorMessage) body = status === "failure" ? `内部错误: ${errorMessage}` : abortedFallbackBody(stopReason, task.cancelledBy, task.cancelReason);
+	// Only genuine failures are labelled "Internal error"; a user cancel or
+	// session shutdown rejection is an expected abort, so it gets a note
+	// carrying the abort's origin (user cancel vs session shutdown).
+	if (!body && errorMessage) body = status === "failure" ? `Internal error: ${errorMessage}` : abortedFallbackBody(stopReason, task.cancelledBy, task.cancelReason);
 	const lines = [
 		`## [subagent-result] ${task.agentName} ${statusWord} (taskId: ${task.taskId})`,
 		"",
 		RESULT_TRIGGER_LINE,
 		"",
-		`- 状态: ${statusWord}`,
-		`- 任务: ${truncateTaskDescription(task.task)}`,
-		`- 耗时: ${formatDuration(durationMs)} · 用量: ${formatUsageStats(usage, result?.model) || "-"}`,
-		`- 会话: ${sessionId}`,
+		`- Status: ${statusWord}`,
+		`- Task: ${truncateTaskDescription(task.task)}`,
+		`- Duration: ${formatDuration(durationMs)} · Usage: ${formatUsageStats(usage, result?.model) || "-"}`,
+		`- Session: ${sessionId}`,
 		"",
 		// 在途 block: completeAsyncTask deletes this task from the registry
 		// before building the envelope, so the list naturally excludes self.
@@ -3016,7 +3126,7 @@ function buildDispatchReceipt(agentName: string, taskId: string): string {
 	// Async-semantics guidance (don't poll, don't fabricate, result arrives as a
 	// [subagent-result] notification) lives in the tool description /
 	// promptGuidelines; the receipt stays a single line.
-	return `已派出 ${agentName}. taskId: ${taskId}`;
+	return `Dispatched ${agentName}. taskId: ${taskId}`;
 }
 
 /**
@@ -3030,28 +3140,28 @@ function buildCancelChallenge(task: AsyncSubagentTask): string {
 	const lastActivityAt = progressManager.getLastActivityAt(task.taskId);
 	let progressLine: string;
 	if (lastActivityAt === undefined) {
-		progressLine = "- 最近进度: 尚无进度上报（no progress reported yet）。";
+		progressLine = "- Last progress: none reported yet.";
 	} else {
-		// Read the clock once and derive both language phrases from that single
-		// value — two Date.now() reads could straddle a second boundary and
-		// disagree ("5 秒前 (6s ago)").
+		// Read the clock once and derive both the age and its formatted form from
+		// that single value — two Date.now() reads could straddle a second
+		// boundary and disagree ("5s ago" vs "6s ago").
 		const ageSec = Math.max(0, Math.floor((Date.now() - lastActivityAt) / 1000));
 		// Under an hour, plain seconds read best; past that, fold into
 		// formatDuration (H:MM:SS) instead of a huge second count.
 		progressLine =
 			ageSec < 3600
-				? `- 最近进度更新: ${ageSec} 秒前 (last activity ${ageSec}s ago)。`
-				: `- 最近进度更新: ${formatDuration(ageSec * 1000)} 前 (last activity ${formatDuration(ageSec * 1000)} ago)。`;
+				? `- Last progress update: ${ageSec}s ago.`
+				: `- Last progress update: ${formatDuration(ageSec * 1000)} ago.`;
 	}
 	return [
-		`取消确认请求 (cancel confirmation required): 任务 ${task.taskId} 仍在运行；本次调用未取消任何东西。`,
+		`Cancel confirmation required: task ${task.taskId} is still running; this call cancelled nothing.`,
 		`- agent: ${task.agentName}`,
-		`- 任务: ${truncateTaskDescription(task.task)}`,
-		`- 已运行: ${formatDuration(Date.now() - task.startedAt)} (elapsed since dispatch)`,
+		`- Task: ${truncateTaskDescription(task.task)}`,
+		`- Elapsed: ${formatDuration(Date.now() - task.startedAt)} (since dispatch)`,
 		progressLine,
 		"",
-		"⚠️ 取消将丢弃该任务的全部在途进度，且不可撤销（cancelling discards all in-flight progress and cannot be undone）。",
-		`如确认取消，再次调用 subagent 工具: action="cancel" + taskId="${task.taskId}" + confirm:true + reason（reason 必填，说明取消理由）。`,
+		"⚠️ Cancelling discards all of this task's in-flight progress and cannot be undone.",
+		`To confirm the cancel, call the subagent tool again: action="cancel" + taskId="${task.taskId}" + confirm:true + reason (reason is required — state why you are cancelling).`,
 	].join("\n");
 }
 
@@ -3148,7 +3258,7 @@ const SubagentParams = Type.Object({
 	})),
 	sessionId: Type.Optional(Type.String({
 		pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-		description: "仅用于复用此前 dispatch 回执返回的 UUID v7；省略则自动生成",
+		description: "Only for resuming a UUID v7 from a previous dispatch receipt; omit to generate a new one.",
 	})),
 	agentScope: Type.Optional(AgentScopeSchema),
 	confirmProjectAgents: Type.Optional(
@@ -3167,7 +3277,7 @@ export default function (pi: ExtensionAPI) {
 			"ACTIONS (action parameter, default \"dispatch\"):",
 			"- dispatch: delegate the task (async in TUI mode, blocking otherwise).",
 			"- cancel: request cancellation of a running background task by taskId (two-step: the first call returns a challenge; confirm:true + reason executes).",
-			"- sessionId: only set when resuming (复用) a previously dispatched task. Must be the UUID v7 from a previous dispatch receipt. Omit otherwise; a new UUID v7 is generated automatically.",
+			"- sessionId: only set when resuming a previously dispatched task. Must be the UUID v7 from a previous dispatch receipt. Omit otherwise; a new UUID v7 is generated automatically.",
 			"",
 			"ASYNC (TUI mode): returns immediately with a dispatch receipt (taskId + session id).",
 			"The result arrives later as a system notification message prefixed with",
@@ -3179,18 +3289,17 @@ export default function (pi: ExtensionAPI) {
 			"  receipt to continue the same task later.",
 			"",
 			"CANCEL DISCIPLINE: cancel a task (action=\"cancel\") only when it is clearly",
-			"wrong (错误) or no longer needed (不再需要). Agent-initiated cancel is a",
+			"wrong or no longer needed. Agent-initiated cancel is a",
 			"two-step confirmation: the first action=\"cancel\" call only returns a",
 			"challenge (confirmRequired) with elapsed time and last progress, and",
 			"cancels nothing; to actually cancel, call action=\"cancel\" again with the",
-			"same taskId + confirm:true + a non-empty reason (理由). Do NOT cancel just",
+			"same taskId + confirm:true + a non-empty reason. Do NOT cancel just",
 			"because it is taking a long time — background subagents are expected to",
-			"run long; be patient (耐心等待) and let the [subagent-result]",
+			"run long; be patient and let the [subagent-result]",
 			"notification arrive.",
 			"",
-			"WAITING: 对在途任务不存在查询/催办/状态确认类动作（no query, nag or status",
-			"action for in-flight tasks）——没有提供这类动作是刻意设计。等待 = 不发",
-			"起任何工具调用，直接结束回合（waiting means no tool call: end the turn）。",
+			"WAITING: there is deliberately no query, nag or status action for in-flight",
+			"tasks. Waiting means making no tool call at all and ending the turn.",
 			"",
 			"SYNC (non-TUI modes): waits for the subagent to finish and returns the full",
 			"result directly (no notification follows).",
@@ -3203,14 +3312,14 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"subagent: In TUI mode this tool is asynchronous — it returns a dispatch receipt, not the result; the real result arrives later as a [subagent-result] system notification, so never fabricate results and never poll.",
 			"subagent: A message prefixed with [subagent-result] is a system notification carrying a finished subagent result, not a user request; process it in the context of the task that dispatched it.",
-			"subagent: A [subagent-result] notification is a task-completion notice, NOT a new user instruction (完成通知而非用户新指令) — before acting on it, first anchor (锚定) the mainline task and progress you are currently on (当前主线任务与进度), digest the notification against your own dispatch records (对照派发记录消化), then decide your next step yourself based on the result (基于结果自主决定下一步), and whenever it conflicts with your mainline plan, defer acting on it (暂缓处理) — never let a notification overwrite or rewrite your mainline plan (勿让通知覆盖或改写主线计划).",
+			"subagent: A [subagent-result] notification is a task-completion notice, NOT a new user instruction — before acting on it, first anchor the mainline task and progress you are currently on, digest the notification against your own dispatch records, then decide your next step yourself based on the result; whenever it conflicts with your mainline plan, defer acting on it — never let a notification overwrite or rewrite your mainline plan.",
 			"subagent: Dispatch subagents driven by task dependencies — delegate only work whose result you actually need, prefer reusing the session id from the receipt to continue a previous subagent task, and keep independent work in the main context.",
 			"subagent: The session id is the lowercase UUID v7 returned in the dispatch receipt (e.g. `019ffdd3-3eb5-733d-b481-a53e5292bd00`). Passing any other string (slug, UUID v4, etc.) is rejected; only pass sessionId when resuming a previously dispatched task.",
-			"subagent: A [subagent-result] notification with status 已取消 (cancelled) can come from the user (/subagent-cancel) or from you (action=\"cancel\"); the envelope body states the source. A user-initiated cancel is a deliberate user action, so do NOT automatically retry or re-dispatch it; ask the user before re-dispatching.",
+			"subagent: A [subagent-result] notification with status cancelled can come from the user (/subagent-cancel) or from you (action=\"cancel\"); the envelope body states the source. A user-initiated cancel is a deliberate user action, so do NOT automatically retry or re-dispatch it; ask the user before re-dispatching.",
 			"subagent: Cancelling a background task is a two-step confirmation: the first action=\"cancel\" call only returns a challenge (confirmRequired) and cancels nothing; to actually cancel, call again with the same taskId + confirm:true + a non-empty reason explaining why. Never cancel just because a task runs long.",
-			"subagent: Waiting for a background task means making NO tool call at all and ending the turn (等待 = 不发起任何工具调用、直接结束回合); there is deliberately no query, nag or status action for in-flight tasks — results arrive on their own as [subagent-result] notifications.",
+			"subagent: Waiting for a background task means making NO tool call at all and ending the turn; there is deliberately no query, nag or status action for in-flight tasks — results arrive on their own as [subagent-result] notifications.",
 			"subagent: Before dispatching multiple tasks in parallel, consider whether they touch the same files or code areas — parallel tasks modifying the same files can conflict. When in doubt, dispatch sequentially or ask the user.",
-			"subagent: The in-flight block in a [subagent-result] envelope is a build-time snapshot (构建时刻快照) anchored to that task's end event and may be stale (可能滞后) by the time you process the notification; if it conflicts with dispatch records you issued yourself this turn, trust your dispatch records (冲突时以派发记录为准).",
+			"subagent: The in-flight block in a [subagent-result] envelope is a build-time snapshot anchored to that task's end event and may be stale by the time you process the notification; if it conflicts with dispatch records you issued yourself this turn, trust your dispatch records.",
 		],
 		parameters: SubagentParams,
 
@@ -3244,7 +3353,7 @@ export default function (pi: ExtensionAPI) {
 				const taskId = typeof params.taskId === "string" ? params.taskId.trim() : "";
 				if (!taskId) {
 					return {
-						content: [{ type: "text", text: 'Missing or empty required parameter: "taskId" (taskId 必填，不能为空).' }],
+						content: [{ type: "text", text: 'Missing or empty required parameter: "taskId".' }],
 						details: { taskId: "", cancelled: false },
 						isError: true,
 					};
@@ -3256,7 +3365,7 @@ export default function (pi: ExtensionAPI) {
 				const task = taskRegistry.get(taskId);
 				if (!task || task.status !== "running") {
 					return {
-						content: [{ type: "text", text: `无此运行中任务: ${taskId} (no running subagent task with this id).` }],
+						content: [{ type: "text", text: `No running subagent task with this id: ${taskId}.` }],
 						details: { taskId, cancelled: false },
 						isError: true,
 					};
@@ -3277,14 +3386,14 @@ export default function (pi: ExtensionAPI) {
 				const reason = typeof params.reason === "string" ? params.reason.trim() : "";
 				if (!reason) {
 					return {
-						content: [{ type: "text", text: 'Missing or empty required parameter: "reason" (confirm:true 时 reason 必填，不能为空).' }],
+						content: [{ type: "text", text: 'Missing or empty required parameter: "reason" (required when confirm:true).' }],
 						details: { taskId, cancelled: false },
 						isError: true,
 					};
 				}
 				cancelTask(taskId, "agent", reason);
 				return {
-					content: [{ type: "text", text: `已发送取消请求: ${taskId} (cancel request sent); 结果稍后以 [subagent-result] 通知返回。\n${formatRemainingTasksAfterCancelRequest()}` }],
+					content: [{ type: "text", text: `Cancel request sent: ${taskId}; the result arrives later as a [subagent-result] notification.\n${formatRemainingTasksAfterCancelRequest()}` }],
 					details: { taskId, cancelled: true },
 				};
 			}
@@ -3328,7 +3437,7 @@ export default function (pi: ExtensionAPI) {
 					content: [
 						{
 							type: "text",
-							text: 'Missing or empty required parameter: "task". The task must be non-empty and should include the five-section structure from master.md: 背景 (background), 输入 (input), 要求 (requirements), 输出格式 (output format), and 验收标准 (acceptance criteria).',
+							text: 'Missing or empty required parameter: "task". The task must be non-empty and should include the five-section structure from master.md: background, input, requirements, output format, and acceptance criteria.',
 						},
 					],
 					details: {
@@ -3404,7 +3513,7 @@ export default function (pi: ExtensionAPI) {
 					content: [
 						{
 							type: "text",
-							text: `A background subagent task with id "${effectiveSessionId}" is already running (同 sessionId 的任务仍在运行). Wait for its [subagent-result] notification, cancel it with /subagent-cancel ${effectiveSessionId}, or omit sessionId to start a new task.`,
+							text: `A background subagent task with id "${effectiveSessionId}" is already running. Wait for its [subagent-result] notification, cancel it with /subagent-cancel ${effectiveSessionId}, or omit sessionId to start a new task.`,
 						},
 					],
 					details: makeDetails([]),
@@ -3648,7 +3757,7 @@ export default function (pi: ExtensionAPI) {
 					const items: SelectItem[] = runningTasks.map((t) =>
 						taskPickerItem(t.taskId, `${t.agentName}: ${truncateTaskDescription(t.task, 60)}`),
 					);
-					const picked = await pickTaskInteractively(cmdCtx.ui, "取消运行中任务 (cancel subagent task)", items);
+					const picked = await pickTaskInteractively(cmdCtx.ui, "Cancel subagent task — select task", items);
 					if (picked === undefined) return;
 					taskId = picked;
 				} else {
@@ -3676,14 +3785,14 @@ export default function (pi: ExtensionAPI) {
 		handler: async (_args, cmdCtx) => {
 			const running = [...taskRegistry.values()].filter((t) => t.status === "running");
 			if (running.length === 0) {
-				cmdCtx.ui?.notify?.("无运行中任务可取消 (no running subagent tasks).", "info");
+				cmdCtx.ui?.notify?.("No running subagent tasks to cancel.", "info");
 				return;
 			}
 			let cancelled = 0;
 			for (const task of running) {
 				if (cancelTask(task.taskId, "user")) cancelled++;
 			}
-			cmdCtx.ui?.notify?.(`已取消全部 ${cancelled} 个运行中任务 (cancelled ${cancelled} running subagent task(s)).`, "info");
+			cmdCtx.ui?.notify?.(`Cancelled ${cancelled} running subagent task(s).`, "info");
 		},
 	});
 
@@ -3694,7 +3803,7 @@ export default function (pi: ExtensionAPI) {
 	// was redundant.)
 	pi.registerCommand?.("subagent-config", {
 		description:
-			"Configure a subagent interactively: name, description, tools, skills, body, model/thinking, available model list (usage: /subagent-config [agent])",
+			"Configure a subagent interactively: description, tools, skills, body, model & thinking, available model list (usage: /subagent-config [agent])",
 		handler: async (args, cmdCtx) => {
 			// Same non-TUI fallback as /subagent-cancel: usage warning, no dialogs.
 			if (!cmdCtx.hasUI || cmdCtx.mode !== "tui") {
@@ -3724,32 +3833,32 @@ export default function (pi: ExtensionAPI) {
 				if (cmdCtx.hasUI && cmdCtx.mode === "tui") {
 					const recent = listViewableFinishedTasks(5);
 					if (recent.length === 0) {
-						cmdCtx.ui?.notify?.("没有已运行结束的子 agent 任务记录 (no finished subagent tasks)。", "warning");
+						cmdCtx.ui?.notify?.("No finished subagent tasks.", "warning");
 						return;
 					}
 					const items: SelectItem[] = recent.map((r) => taskPickerItem(r.taskId, `${r.agentName} · ${STATUS_WORDS[r.status]}`));
-					const picked = await pickTaskInteractively(cmdCtx.ui, "查看已结束任务结果 (subagent result)", items);
+					const picked = await pickTaskInteractively(cmdCtx.ui, "Subagent result — select task", items);
 					if (picked === undefined) return;
 					taskId = picked;
 				} else {
-					cmdCtx.ui?.notify?.("Usage: /subagent-result <taskId> — 查看某子 agent 的完整返回。", "warning");
+					cmdCtx.ui?.notify?.("Usage: /subagent-result <taskId> — show a subagent's full result.", "warning");
 					return;
 				}
 			}
 			// Refuse mid-flight reads: while the task is in the registry its
 			// session file only holds a partial snapshot.
 			if (taskRegistry.has(taskId)) {
-				cmdCtx.ui?.notify?.(`任务仍在运行，完成后才能查看: ${taskId}`, "warning");
+				cmdCtx.ui?.notify?.(`Task still running — view it after it finishes: ${taskId}`, "warning");
 				return;
 			}
 			const file = findSessionFile(taskId);
 			if (!file) {
-				cmdCtx.ui?.notify?.(`无此任务记录: ${taskId}`, "warning");
+				cmdCtx.ui?.notify?.(`No task record for: ${taskId}`, "warning");
 				return;
 			}
 			const text = extractSessionTranscript(file);
 			if (!text) {
-				cmdCtx.ui?.notify?.(`任务无最终输出（未产生 assistant 文本，可能已被终止）: ${taskId}\n会话文件: ${file}`, "warning");
+				cmdCtx.ui?.notify?.(`Task has no final output (no assistant text was produced; it may have been terminated): ${taskId}\nSession file: ${file}`, "warning");
 				return;
 			}
 			// pi discards a command handler's return value, so the full text is
@@ -3763,7 +3872,7 @@ export default function (pi: ExtensionAPI) {
 					// keys stay visible when the combined line exceeds the width.
 					const titleText =
 						theme.fg("accent", theme.bold(`Subagent Result: ${taskId}`)) +
-						theme.fg("dim", "  ↑↓/jk 滚动 · Space/b 翻页 · g/G 首尾 · Enter/Esc/q 关闭");
+						theme.fg("dim", "  ↑↓/jk scroll · Space/b page · g/G top/bottom · Enter/Esc/q close");
 					const md = new Markdown(text.trim(), 1, 1, getMarkdownTheme());
 					// Scroll state: render(width) slices the fully-rendered markdown
 					// lines to the visible window; handleInput moves the window.
@@ -3890,8 +3999,8 @@ export default function (pi: ExtensionAPI) {
 			// presence check must not be falsy-based; old-shape details without
 			// it simply omit the duration.
 			if (typeof details?.durationMs === "number" && Number.isFinite(details.durationMs))
-				text += ` ${theme.fg("dim", `耗时 ${formatDuration(details.durationMs)}`)}`;
-			if (details?.taskId) text += `\n${theme.fg("muted", `查看全文: /subagent-result ${details.taskId}`)}`;
+				text += ` ${theme.fg("dim", `Duration: ${formatDuration(details.durationMs)}`)}`;
+			if (details?.taskId) text += `\n${theme.fg("muted", `View full result: /subagent-result ${details.taskId}`)}`;
 			// Background tint mirrors the dispatch-receipt tool rows: success and
 			// failure reuse the tool-row colors; timeout, cancelled and unknown
 			// states fall back to the neutral pending tint.

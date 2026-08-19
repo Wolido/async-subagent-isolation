@@ -155,20 +155,20 @@ async function raceWithTimeout<T>(
 const CLOCK_TIME = /\d{1,2}:\d{2}(:\d{2})?/;
 
 /** 旧绝对句式（S2 要求移除）。 */
-const ABSOLUTE_EMPTY_WORDING = /当前无在途任务/;
+const ABSOLUTE_EMPTY_WORDING = /No tasks? (are|were) (currently )?in flight/i;
 
 /**
  * 绝对化"此刻"语义（防绝对句式换皮回潮）：同行出现"当前/目前/now"类
  * 时间副词 + 在途语义即违规。按行判定，不误伤跨行合法内容。
  */
-const ABSOLUTE_NOW_SEMANTICS = /当前|目前|此刻|now|currently/i;
+const ABSOLUTE_NOW_SEMANTICS = /now|currently/i;
 
 /**
  * 从信封正文提取在途块："- 会话:" 元信息行与 "---" 分隔线之间即
  * formatActiveTasks() 的输出（buildResultEnvelope 固定结构）。
  */
 function extractInFlightBlock(content: string): string {
-	const m = content.match(/- 会话:[^\n]*\n+([\s\S]*?)\n+---/);
+	const m = content.match(/- Session:[^\n]*\n+([\s\S]*?)\n+---/);
 	return m ? m[1] : "";
 }
 
@@ -182,16 +182,16 @@ function extractInFlightBlock(content: string): string {
  */
 function hasEventAnchoredLine(block: string, empty: boolean): boolean {
 	return block.split("\n").some((line) => {
-		const anchored = /本任务|该任务|此任务|本信封/.test(line) && /结束|完成/.test(line) && /在途/.test(line);
+		const anchored = /this task/.test(line) && /ended|finished|completed/.test(line) && /in[- ]flight/.test(line);
 		if (!anchored) return false;
-		const negated = /无|没有|再无/.test(line);
+		const negated = /no |none/i.test(line);
 		return empty ? negated : !negated;
 	});
 }
 
 /** 在途块不得含绝对化"此刻"语义行（当前/目前/now + 在途）。 */
 function hasAbsoluteNowLine(block: string): boolean {
-	return block.split("\n").some((line) => ABSOLUTE_NOW_SEMANTICS.test(line) && /在途/.test(line));
+	return block.split("\n").some((line) => ABSOLUTE_NOW_SEMANTICS.test(line) && /in[- ]flight/.test(line));
 }
 
 describe("[subagent-result] 通知投递模式与在途块措辞（S1/S2/S3 红阶段）", () => {
@@ -394,8 +394,8 @@ describe("[subagent-result] 通知投递模式与在途块措辞（S1/S2/S3 红�
 			//   (a) 在途块是构建时刻快照、可能滞后 的语义
 			//   (b) 与本回合亲手发出的派发记录冲突时以派发记录为准 的语义
 			// 按条目匹配（每条一个语义点），不跨条目拼接——防止跨条目假绿。
-			const SNAPSHOT_SEMANTICS = /快照|构建时刻|构建时|滞后|可能过期|过期|snapshot|stale|out.?of.?date|build[- ]time|as of/i;
-			const DISPATCH_PREVAILS = /派发记录|以.{0,20}为准|为准|派发.*优先|dispatch record|prevail|take precedence|override|trust .{0,20}dispatch/i;
+			const SNAPSHOT_SEMANTICS = /snapshot|stale|out.?of.?date|build[- ]time|as of/i;
+			const DISPATCH_PREVAILS = /dispatch record|prevail|take precedence|override|trust .{0,20}dispatch/i;
 			const hasRule = guidelines.some((g) => SNAPSHOT_SEMANTICS.test(g) && DISPATCH_PREVAILS.test(g));
 			expect(
 				hasRule,

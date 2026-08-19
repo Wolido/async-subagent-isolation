@@ -152,11 +152,11 @@ async function raceWithTimeout<T>(
 /** 时钟时间模式（H:MM:SS 或 MM:SS）——在途块刻意不含任何时间信息。 */
 const CLOCK_TIME = /\d{1,2}:\d{2}(:\d{2})?/;
 /** 旧绝对句式（S2 要求移除）。 */
-const ABSOLUTE_EMPTY_WORDING = /当前无在途任务/;
+const ABSOLUTE_EMPTY_WORDING = /No tasks? (are|were) (currently )?in flight/i;
 
 /** 从信封正文提取在途块（"- 会话:" 行与 "---" 分隔线之间即 formatActiveTasks() 输出）。 */
 function extractInFlightBlock(content: string): string {
-	const m = content.match(/- 会话:[^\n]*\n+([\s\S]*?)\n+---/);
+	const m = content.match(/- Session:[^\n]*\n+([\s\S]*?)\n+---/);
 	return m ? m[1] : "";
 }
 
@@ -167,9 +167,9 @@ function extractInFlightBlock(content: string): string {
  */
 function hasEventAnchoredLine(block: string, empty: boolean): boolean {
 	return block.split("\n").some((line) => {
-		const anchored = /本任务|该任务|此任务|本信封/.test(line) && /结束|完成/.test(line) && /在途/.test(line);
+		const anchored = /this task/.test(line) && /ended|finished|completed/.test(line) && /in[- ]flight/.test(line);
 		if (!anchored) return false;
-		const negated = /无|没有|再无/.test(line);
+		const negated = /no |none/i.test(line);
 		return empty ? negated : !negated;
 	});
 }
@@ -287,7 +287,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 
 			expect(timedOut).toBe(false);
 			expect(result!.isError).toBeFalsy();
-			expect(result!.content[0].text).toMatch(/^已派出/);
+			expect(result!.content[0].text).toMatch(/^Dispatched/);
 			expect(result!.content[0].text).toContain("019ffdd3-3eb5-733d-b481-a53e5292bd60");
 		});
 
@@ -306,7 +306,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 
 			expect(timedOut).toBe(false);
 			expect(result!.isError).toBeFalsy();
-			expect(result!.content[0].text).toMatch(/^已派出/);
+			expect(result!.content[0].text).toMatch(/^Dispatched/);
 			expect(result!.content[0].text).toContain("019ffdd3-3eb5-733d-b481-a53e5292bd61");
 		});
 
@@ -394,7 +394,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 			// Assert: 拒绝，且回执不得暴露在途列表信息
 			expect(result.isError).toBe(true);
 			const text = result.content.map((c: any) => c.text).join("");
-			expect(text).not.toMatch(/在途任务|当前无在途任务/);
+			expect(text).not.toMatch(/in[- ]flight/i);
 			expect(text).not.toContain("019ffdd3-3eb5-733d-b481-a53e5292bd62");
 			expect(text).not.toContain("019ffdd3-3eb5-733d-b481-a53e5292bd63");
 			expect(text).not.toMatch(/调研 XX 方案/);
@@ -412,7 +412,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 			expect(result.isError).toBe(true);
 			const text = result.content.map((c: any) => c.text).join("");
 			// S2 措辞迁移后本守卫仍需有效：旧绝对句与新版事件锚定措辞均不得出现
-			expect(text).not.toMatch(/当前无在途任务|本任务结束|在途任务/);
+			expect(text).not.toMatch(/in[- ]flight|when this task ended/i);
 		});
 
 		it("action=status 不得产生 details.activeTasks 字段（RED）", async () => {
@@ -546,9 +546,9 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 			const content: string = message.content;
 			// 必须是取消信封（状态=已取消）且正文标明由主 agent 取消，
 			// 且不得是用户取消文案（来源区分）
-			expect(content).toMatch(/已取消/);
-			expect(content).toMatch(/主\s*agent/);
-			expect(content).not.toMatch(/请勿自动重新派发/);
+			expect(content).toMatch(/cancelled/);
+			expect(content).toMatch(/main\s*agent/);
+			expect(content).not.toMatch(/Do not automatically re-dispatch/i);
 		});
 
 		it("action=cancel（confirm:true + reason）成功应返回含 taskId 与取消确认的回执", async () => {
@@ -575,7 +575,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 			expect(result.isError).toBeFalsy();
 			const text = result.content.map((c: any) => c.text).join("");
 			expect(text).toMatch(/019ffdd3-3eb5-733d-b481-a53e5292bd68/);
-			expect(text).toMatch(/cancel|取消/);
+			expect(text).toMatch(/cancel/i);
 			expect(result.details).toMatchObject({ taskId: "019ffdd3-3eb5-733d-b481-a53e5292bd68", cancelled: true });
 		});
 
@@ -593,7 +593,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 
 			expect(result.isError).toBe(true);
 			const text = result.content.map((c: any) => c.text).join("");
-			expect(text).toMatch(/无此运行中任务|no running|不存在|not found/i);
+			expect(text).toMatch(/No running subagent task with this id|no running|not found/i);
 		});
 
 		it("action=cancel 空 taskId → 错误提示必填（RED）", async () => {
@@ -611,7 +611,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 			expect(result.isError).toBe(true);
 			const text = result.content.map((c: any) => c.text).join("");
 			expect(text).toMatch(/taskId/);
-			expect(text).toMatch(/必填|不能为空|required|missing|empty/i);
+			expect(text).toMatch(/required|missing|empty/i);
 		});
 
 		it("深度限制应拦截 action=cancel（depth=1 子 agent 取消应收到深度拦截错误，RED：当前 cancel 绕过深度检查）", async () => {
@@ -630,7 +630,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 			// 子 agent 不应执行取消，而应收到深度拦截错误
 			expect(result.isError).toBe(true);
 			const text = result.content.map((c: any) => c.text).join("");
-			expect(text).toMatch(/depth|深度|blocked|限制/);
+			expect(text).toMatch(/depth|blocked/i);
 		});
 	});
 
@@ -651,7 +651,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 			);
 
 			const receipt = result.content[0].text;
-			expect(receipt).toMatch(/^已派出/);
+			expect(receipt).toMatch(/^Dispatched/);
 			expect(receipt).toMatch(/taskId/);
 			expect(receipt).not.toMatch(/Do not treat|poll|fabricate/i);
 		});
@@ -676,8 +676,8 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 			const [message] = pi._sendMessageCalls[0];
 			const content: string = message.content;
 			expect(content).toContain("[subagent-result]");
-			expect(content).toContain("状态:");
-			expect(content).toContain("任务:");
+			expect(content).toContain("Status:");
+			expect(content).toContain("Task:");
 			// 契约迁移（S2 事件锚定措辞）：本例完成唯一任务后在途为空，空在途块应为
 			// 锚定本任务结束事件的限定表述，不再用绝对句"当前无在途任务"，不含时钟
 			// 时间。当前实现仍为旧绝对句 → 本断言在实现完成前 RED。
@@ -820,7 +820,7 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 			// 子 agent 仍被深度门禁拦截，但文案枚举段不得再出现 status
 			expect(result.isError).toBe(true);
 			const text = result.content.map((c: any) => c.text).join("");
-			expect(text).toMatch(/depth|深度|blocked|限制/);
+			expect(text).toMatch(/depth|blocked/i);
 			expect(text).not.toContain("status");
 		});
 	});

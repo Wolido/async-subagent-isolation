@@ -63,7 +63,7 @@ describe("renderResult — cancel 回执无 results 字段（#1 修复，契约�
 	it("action=cancel 的 result 渲染不抛 TypeError 且有文本输出（契约锁定：实现已满足）", () => {
 		// Arrange: action=cancel 成功回执的真实返回形状 —— details 只有 taskId/cancelled
 		const cancelResult = {
-			content: [{ type: "text", text: "已发送取消请求: task-1 (cancel request sent); 结果稍后以 [subagent-result] 通知返回。" }],
+			content: [{ type: "text", text: "Cancel request sent: task-1; the result will be returned later as a [subagent-result] notification." }],
 			details: { taskId: "task-1", cancelled: true },
 		};
 
@@ -79,7 +79,7 @@ describe("renderResult — cancel 回执无 results 字段（#1 修复，契约�
 	it("cancel 失败回执（details 亦无 results）渲染不抛 TypeError 且透传回执正文（契约锁定：实现已满足）", () => {
 		// Arrange: action=cancel 失败路径返回形状 —— isError + details.taskId/cancelled:false
 		const cancelErrorResult = {
-			content: [{ type: "text", text: "无此运行中任务: ghost (no running subagent task with this id)." }],
+			content: [{ type: "text", text: "No running subagent task with this id: ghost." }],
 			details: { taskId: "ghost", cancelled: false },
 			isError: true,
 		};
@@ -91,7 +91,7 @@ describe("renderResult — cancel 回执无 results 字段（#1 修复，契约�
 		// 而非仅"非空"——既锁内容，也锁不落入 "(no subagent result)" 兜底占位
 		const lines = render().render(80);
 		const text = lines.join("\n");
-		expect(text).toContain("无此运行中任务");
+		expect(text).toContain("No running subagent task with this id");
 		expect(text).toContain("ghost");
 		expect(text).not.toContain("(no subagent result)");
 	});
@@ -101,7 +101,7 @@ describe("renderResult — cancel 回执无 results 字段（#1 修复，契约�
 		// renderResult 的文本回退对任意无 results details 生效，本用例防御实现动渲染
 		// 管线时破窗（质询回执绝不能落入富渲染分支或 "(no subagent result)" 占位）。
 		const challengeResult = {
-			content: [{ type: "text", text: "取消确认请求: task-1 正在运行（tester）。取消将丢弃全部在途进度，不可撤销。如确认，请再次调用 action=\"cancel\" + 同一 taskId + confirm:true + reason。" }],
+			content: [{ type: "text", text: "Cancel confirmation required: task task-1 is still running (tester). Cancelling discards all in-flight progress and cannot be undone. To confirm, call action=\"cancel\" again with the same taskId + confirm:true + reason." }],
 			details: { taskId: "task-1", cancelled: false, confirmRequired: true },
 		};
 
@@ -111,7 +111,7 @@ describe("renderResult — cancel 回执无 results 字段（#1 修复，契约�
 		const lines = render().render(80);
 		const text = lines.join("\n");
 		expect(text).toContain("task-1");
-		expect(text).toContain("取消确认请求");
+		expect(text).toContain("Cancel confirmation required");
 		expect(text).not.toContain("(no subagent result)");
 	});
 });

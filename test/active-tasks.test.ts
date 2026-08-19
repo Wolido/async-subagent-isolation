@@ -145,11 +145,11 @@ async function raceWithTimeout<T>(
 /** 时钟时间模式（H:MM:SS 或 MM:SS）——在途块刻意不含任何时间信息。 */
 const CLOCK_TIME = /\d{1,2}:\d{2}(:\d{2})?/;
 /** 旧绝对句式（S2 要求移除）。 */
-const ABSOLUTE_EMPTY_WORDING = /当前无在途任务/;
+const ABSOLUTE_EMPTY_WORDING = /No tasks? (are|were) (currently )?in flight/i;
 
 /** 从信封正文提取在途块（"- 会话:" 行与 "---" 分隔线之间即 formatActiveTasks() 输出）。 */
 function extractInFlightBlock(content: string): string {
-	const m = content.match(/- 会话:[^\n]*\n+([\s\S]*?)\n+---/);
+	const m = content.match(/- Session:[^\n]*\n+([\s\S]*?)\n+---/);
 	return m ? m[1] : "";
 }
 
@@ -160,9 +160,9 @@ function extractInFlightBlock(content: string): string {
  */
 function hasEventAnchoredLine(block: string, empty: boolean): boolean {
 	return block.split("\n").some((line) => {
-		const anchored = /本任务|该任务|此任务|本信封/.test(line) && /结束|完成/.test(line) && /在途/.test(line);
+		const anchored = /this task/.test(line) && /ended|finished|completed/.test(line) && /in[- ]flight/.test(line);
 		if (!anchored) return false;
-		const negated = /无|没有|再无/.test(line);
+		const negated = /no |none/i.test(line);
 		return empty ? negated : !negated;
 	});
 }
@@ -286,7 +286,7 @@ describe("在途任务台账", () => {
 			expect(result.isError).toBe(true);
 			const text = result.content.map((c: any) => c.text).join("");
 			expect(text).toMatch(/Invalid action/);
-			expect(text).not.toMatch(/在途任务|当前无在途任务/);
+			expect(text).not.toMatch(/in[- ]flight/i);
 			expect(text).not.toContain("019ffdd3-3eb5-733d-b481-a53e5292bd11");
 			expect(text).not.toContain("019ffdd3-3eb5-733d-b481-a53e5292bd12");
 			expect(text).not.toMatch(/调研 XX 方案/);
@@ -369,7 +369,7 @@ describe("在途任务台账", () => {
 			expect(result.isError).toBe(true);
 			const text = result.content.map((c: any) => c.text).join("");
 			expect(text).toMatch(/Invalid action/);
-			expect(text).not.toMatch(/当前无在途任务|本任务结束|在途任务/);
+			expect(text).not.toMatch(/in[- ]flight|when this task ended/i);
 		});
 	});
 
@@ -509,7 +509,7 @@ describe("在途任务台账", () => {
 
 			// Assert: return value should contain remaining active tasks
 			const text = result.content.map((c: any) => c.text).join("");
-			expect(text).toMatch(/在途任务/);
+			expect(text).toMatch(/in[- ]flight/i);
 			expect(text).toContain("019ffdd3-3eb5-733d-b481-a53e5292bd18");
 			expect(text).toContain("tester");
 			expect(text).toMatch(/任务2/);
@@ -586,8 +586,8 @@ describe("在途任务台账", () => {
 			expect(content).toContain("[subagent-result]");
 			expect(content).toContain("019ffdd3-3eb5-733d-b481-a53e5292bd1b"); // taskId
 			expect(content).toContain("tester"); // agent name
-			expect(content).toContain("状态:"); // status field
-			expect(content).toContain("任务:"); // task field
+			expect(content).toContain("Status:"); // status field
+			expect(content).toContain("Task:"); // task field
 			expect(content).toMatch(/回归测试任务/); // task description
 			
 			// 在途块仍存在，但措辞已迁移（S2 事件锚定）：空在途为锚定本任务结束

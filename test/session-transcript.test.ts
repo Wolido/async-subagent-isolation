@@ -123,7 +123,7 @@ describe("/subagent-result 完整会话记录（方案 A，红阶段）", () => 
 			const { getRendered } = await runHandler(taskId);
 
 			// Assert: 渲染内容应包含"任务原文"标签
-			expect(getRendered()).toContain("任务原文");
+			expect(getRendered()).toContain("Original task");
 		});
 
 		it("查看器应显示任务文本「重构认证中间件」（当前只显示最终文本 → 红）", async () => {
@@ -391,7 +391,7 @@ describe("/subagent-result 完整会话记录（方案 A，红阶段）", () => 
 
 			// Assert: 应提示无最终输出（不抛异常）
 			const allOutput = notifyMock.mock.calls.map((c) => String(c[0])).join("");
-			expect(allOutput).toMatch(/无最终输出|未产生/);
+			expect(allOutput).toMatch(/no final output/i);
 		});
 	});
 });
