@@ -241,13 +241,13 @@ Dispatched coder. taskId: 01912345-6789-7abc-8def-0123456789ab
 
 ## 示例 agents
 
-仓库 [`examples/pi/agent/agents/`](https://github.com/Wolido/subagent-isolation/tree/main/examples/pi/agent/agents) 提供三个可直接参考的 agent：
+仓库 [`examples/pi/agent/agents/`](https://github.com/Wolido/async-subagent-isolation/tree/main/examples/pi/agent/agents) 提供三个可直接参考的 agent：
 
 | Agent | 作用 | 可用工具 | 加载的 skill |
 |-------|------|----------|-------------|
-| [`coder`](https://github.com/Wolido/subagent-isolation/blob/main/examples/pi/agent/agents/coder.md) | 写代码、改代码、跑验证 | `read, write, edit, bash, grep, find, ls` | `systematic-debugging` |
-| [`reviewer`](https://github.com/Wolido/subagent-isolation/blob/main/examples/pi/agent/agents/reviewer.md) | 只读评审，输出可操作的反馈 | `read, grep, find, ls` | _(无)_ |
-| [`writer`](https://github.com/Wolido/subagent-isolation/blob/main/examples/pi/agent/agents/writer.md) | 写文档、改 README、生成 commit message | `read, write, edit, grep, find, ls` | `writing-clearly-and-concisely` |
+| [`coder`](https://github.com/Wolido/async-subagent-isolation/blob/main/examples/pi/agent/agents/coder.md) | 写代码、改代码、跑验证 | `read, write, edit, bash, grep, find, ls` | `systematic-debugging` |
+| [`reviewer`](https://github.com/Wolido/async-subagent-isolation/blob/main/examples/pi/agent/agents/reviewer.md) | 只读评审，输出可操作的反馈 | `read, grep, find, ls` | _(无)_ |
+| [`writer`](https://github.com/Wolido/async-subagent-isolation/blob/main/examples/pi/agent/agents/writer.md) | 写文档、改 README、生成 commit message | `read, write, edit, grep, find, ls` | `writing-clearly-and-concisely` |
 
 复制到 `~/.pi/agent/agents/`（用户级）或 `.pi/agents/`（项目级，同名时 project 覆盖 user）即可使用，可按需修改或新建。修改或新建 agent 文件后运行 `/reload`，刷新注入主 agent 提示词的子 agent 清单（见“配置管理”一节）。
 

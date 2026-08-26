@@ -241,13 +241,13 @@ User runs /subagent-result <taskId> to read the full output
 
 ## Example agents
 
-The GitHub repo ships three ready-to-reference agents in [`examples/pi/agent/agents/`](https://github.com/Wolido/subagent-isolation/tree/main/examples/pi/agent/agents):
+The GitHub repo ships three ready-to-reference agents in [`examples/pi/agent/agents/`](https://github.com/Wolido/async-subagent-isolation/tree/main/examples/pi/agent/agents):
 
 | Agent | Purpose | Tools | Skill |
 |-------|---------|-------|-------|
-| [`coder`](https://github.com/Wolido/subagent-isolation/blob/main/examples/pi/agent/agents/coder.md) | Write, modify, and validate code | `read, write, edit, bash, grep, find, ls` | `systematic-debugging` |
-| [`reviewer`](https://github.com/Wolido/subagent-isolation/blob/main/examples/pi/agent/agents/reviewer.md) | Read-only review with actionable feedback | `read, grep, find, ls` | _(none)_ |
-| [`writer`](https://github.com/Wolido/subagent-isolation/blob/main/examples/pi/agent/agents/writer.md) | Write docs, READMEs, commit messages | `read, write, edit, grep, find, ls` | `writing-clearly-and-concisely` |
+| [`coder`](https://github.com/Wolido/async-subagent-isolation/blob/main/examples/pi/agent/agents/coder.md) | Write, modify, and validate code | `read, write, edit, bash, grep, find, ls` | `systematic-debugging` |
+| [`reviewer`](https://github.com/Wolido/async-subagent-isolation/blob/main/examples/pi/agent/agents/reviewer.md) | Read-only review with actionable feedback | `read, grep, find, ls` | _(none)_ |
+| [`writer`](https://github.com/Wolido/async-subagent-isolation/blob/main/examples/pi/agent/agents/writer.md) | Write docs, READMEs, commit messages | `read, write, edit, grep, find, ls` | `writing-clearly-and-concisely` |
 
 Copy the ones you need into `~/.pi/agent/agents/` (user-scoped) or `.pi/agents/` (project-scoped; project overrides user on name collisions). Feel free to modify them or create your own. After modifying or adding agent files, run `/reload` to refresh the subagent roster injected into the main agent's prompt (see "Configuration management").
 
