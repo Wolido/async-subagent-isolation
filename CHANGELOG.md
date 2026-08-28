@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-08-28
+
+### Added
+
+- Structured pre-dispatch validation of the agent process launch: before `spawn`, the `cwd` and the executable are probed and failures surface as typed errors — `CWD_MISSING` (directory does not exist), `CWD_NOT_DIR` (path exists but is not a directory), `CWD_INACCESSIBLE` (directory cannot be accessed), and `EXEC_MISSING` (launch command not executable) — each carrying `errno` plus `command`/`cwd`/`cwdExists` fields and a message naming the `cwd` source (the dispatch argument or the session cwd) and the suggested next step.
+- `SubagentResultDetails` gains an `errorMessage` field holding the recorded failure cause (truncated with a truncation marker), present on failed tasks whose run recorded an upstream error; the field is additive, so consumers of previous versions are unaffected.
+
+### Changed
+
+- A missing `cwd` is now a hard error (`CWD_MISSING`) and the directory is never auto-created — if it is genuinely needed, create it first and re-dispatch. The `cwd` parameter now expands `~/…` and bare `~` to the home directory and resolves relative paths against the session cwd; `~user/…` is not expanded and is treated as missing.
+- The success criteria for a finished run are tightened, and the same predicate now decides the async terminal status, the sync-mode `isError` flag, and the result rendering, so the two paths can no longer disagree. A run counts as `succeeded` only when all of the following hold: exit code 0, the last assistant message has a normal terminal `stopReason` (`length` and `deferred` now count as failure because the answer was cut off or postponed), and the last assistant message carries non-empty text. In particular, a subagent that exits cleanly but produces no final output was previously recorded as a success and now reports failed.
+- Error events no longer kill the subprocess immediately: the extension waits for pi's auto-retry to finish (up to 3 retries with 2s/4s/8s backoff by default) before deciding the terminal state. Transient rate limits that pi can recover from are no longer escalated to permanent failures; the trade-off is that failure feedback for a genuinely failing run arrives 2–14 seconds later than before.
+- The subprocess stderr is now presented verbatim as a `- Stderr:` metadata line in the `[subagent-result]` envelope (trimmed, capped to the last 1000 characters) instead of being passed off as the answer body; `details.output` carries only the real final text. Previously, stderr noise such as the per-dispatch `Warning: No project session found…` line could impersonate the result when the run produced no output.
+- The `cwd` description in the `subagent` tool schema now states that the directory must already exist and is never auto-created, matching the enforced behavior.
+
+### Fixed
+
+- A nonexistent `cwd` previously reached `spawn` unchecked, and Node's resulting message printed the executable path (`spawn <node path> ENOENT`), which read like a Node/Homebrew installation fault; the structured preflight now reports the actual missing directory with its source and next step.
+- A long-lived pi process holding a stale `process.execPath` after a Homebrew node upgrade no longer fails with an opaque spawn error: the launch now reports `EXEC_MISSING` and advises restarting pi.
+- Upstream errors such as 429 rate_limit / engine overloaded now reach the main agent: the recorded `errorMessage` appears on the envelope's `- Error:` line and in `details.errorMessage` (truncated with a marker when overlong), covering both `message_end(error)` and `auto_retry_end{finalError}` sources. Previously the cause was displaced by the previous round's greeting text or stderr noise, so the main agent could not see why the run failed.
+
 ## [1.6.2] - 2026-08-19
 
 ### Changed
