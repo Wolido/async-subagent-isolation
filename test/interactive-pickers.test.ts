@@ -348,6 +348,10 @@ describe("交互选择列表（/subagent-result & /subagent-cancel 无参数）"
 	 * Completion order = call order; the session file's mtime is set to match
 	 * (n increases), so in-memory and directory-scan data sources observe the
 	 * same finish ordering.
+	 *
+	 * Note: this helper only needs the task to leave the registry; it does NOT
+	 * depend on the terminal status being success or failure, so we intentionally
+	 * keep endProcess(0) without a message_end to minimize fixture churn.
 	 */
 	async function finishTask(n: number): Promise<string> {
 		const taskId = makeTaskId(n);

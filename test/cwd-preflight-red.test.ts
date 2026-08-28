@@ -106,6 +106,20 @@ function createSuccessfulProc(): ChildProcess {
 	proc.exitCode = null;
 	proc.signalCode = null;
 	queueMicrotask(() => {
+		proc.stdout.emit(
+			"data",
+			Buffer.from(
+				JSON.stringify({
+					type: "message_end",
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "success output" }],
+						stopReason: "end_turn",
+						usage: { input: 10, output: 5, totalTokens: 15 },
+					},
+				}) + "\n",
+			),
+		);
 		proc.stdout.emit("end");
 		proc.emit("exit", 0, null);
 	});
@@ -698,7 +712,7 @@ describe("E. Structured output: isError result exposes diagnostic fields", () =>
 		const result = await f.runSubagent(f.defaultCwd);
 
 		expect(result.isError).toBe(undefined);
-		expect(result.details?.results?.[0].stopReason).toBeUndefined();
+		expect(result.details?.results?.[0].exitCode).toBe(0);
 		expect(result.details?.results?.[0].errorMessage).toBeUndefined();
 	});
 });

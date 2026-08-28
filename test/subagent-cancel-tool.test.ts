@@ -696,7 +696,7 @@ describe("action=cancel 两步确认 — 红阶段测试", () => {
 		});
 
 		it("质询后任务自然结束，再以 confirm:true + reason 确认 → 报「无此运行中任务」（存在性校验优先，边界锁定）", async () => {
-			const { executeSubagentTool, executeCancelTool } = setupExtension();
+			const { executeSubagentTool, executeCancelTool, pi } = setupExtension();
 			const ctx = createMockTuiCtx(defaultCwd);
 			const taskId = "019ffdd3-3eb5-733d-b481-a53e5292bdc3";
 
@@ -707,10 +707,13 @@ describe("action=cancel 两步确认 — 红阶段测试", () => {
 			const challenge = await executeCancelTool!("call-1", { taskId }, undefined, undefined, ctx);
 			expect(challenge.details?.confirmRequired).toBe(true);
 
-			// 质询与确认之间任务自然结束（exit 0 → completeAsyncTask → 出 registry）
+			// 质询与确认之间任务自然结束（exit 0 → completeAsyncTask → 出 registry）。
+			// 本用例验证「确认时任务已不在 registry」的存在性校验，不依赖终态；
+			// endProcess(0) 仅用于触发 completeAsyncTask。
 			endProcess(proc, 0);
 			await vi.advanceTimersByTimeAsync(1000);
 			expect(taskRegistry.has(taskId)).toBe(false);
+			expect(pi.sendMessage).toHaveBeenCalled();
 
 			// Act: 第二步确认——存在性校验优先于 confirm/reason，报无此运行中任务
 			const result = await executeCancelTool!(

@@ -1938,6 +1938,24 @@ function getFinalOutput(messages: Message[]): string {
 	return "";
 }
 
+/**
+ * N2(c): the result answer is the LAST assistant message's non-empty text —
+ * never an earlier turn's. When the final assistant turn errored or produced
+ * only thinking/tool calls, earlier text is stale and must not masquerade as
+ * the answer. Returns "" when the run ended without final text.
+ */
+function getLastAssistantText(messages: Message[]): string {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const msg = messages[i];
+		if (msg.role !== "assistant") continue;
+		for (const part of msg.content) {
+			if (part.type === "text" && part.text.trim()) return part.text;
+		}
+		return "";
+	}
+	return "";
+}
+
 type DisplayItem = { type: "text"; text: string } | { type: "toolCall"; name: string; args: Record<string, any> };
 
 function getDisplayItems(messages: Message[]): DisplayItem[] {
@@ -2816,8 +2834,41 @@ async function runSingleAgent(
 						) {
 							currentResult.stopReason = msg.stopReason;
 						}
-						if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
 						if (msg.stopReason === "error" || msg.errorMessage) {
+							// N3: a failed turn is not terminal. pi may auto-retry inside
+							// this same process (agent_end{willRetry:true} ->
+							// auto_retry_start -> ...), so only record the cause and keep
+							// waiting — no kill, no finalize. The activity timer stays
+							// armed (resetActivityTimer above + the stdout data handler),
+							// so a process that goes silent after the error still ends as
+							// activity_timeout, never as a permanent "running".
+							if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
+						} else {
+							// A healthy assistant turn after a recovered retry clears the
+							// recorded error, so a retried run can still finalize as
+							// success (finalize maps a lingering errorMessage to exit 1).
+							currentResult.errorMessage = undefined;
+						}
+					}
+					emitProgress();
+				}
+
+				if (event.type === "agent_end") {
+					if (event.willRetry) {
+						// willRetry === true: pi is about to auto-retry inside this
+						// same process — nothing is final yet. The retry's own delay
+						// may exceed the activity window, so the inactivity net is
+						// suspended (not re-armed) until genuine stdout/stderr
+						// activity resumes; a provisional activity_timeout recorded
+						// while the failed turn awaited this decision is revoked.
+						suspendActivityTimerForRetry();
+					} else {
+						resetActivityTimer();
+						// willRetry === false is NOT a failure signal by itself (it
+						// also fires on normal success), so only an already-recorded
+						// error state finalizes as failure here; a clean agent_end is
+						// left for the natural process exit.
+						if (currentResult.stopReason === "error" || currentResult.errorMessage) {
 							try {
 								proc.kill("SIGKILL");
 							} catch {
@@ -2828,7 +2879,36 @@ async function runSingleAgent(
 							return;
 						}
 					}
-					emitProgress();
+				}
+
+				if (event.type === "auto_retry_start") {
+					// Retry cycle starting; the process stays alive — wait for the
+					// retried turn. The retry delay (delayMs) can exceed the
+					// activity window, so the inactivity net is suspended (not
+					// re-armed); genuine activity re-arms it via the stdout/stderr
+					// data handlers.
+					suspendActivityTimerForRetry();
+				}
+
+				if (event.type === "auto_retry_end") {
+					if (event.success === false) {
+						resetActivityTimer();
+						// Retries exhausted: finalError is the authoritative cause.
+						if (event.finalError) currentResult.errorMessage = String(event.finalError);
+						try {
+							proc.kill("SIGKILL");
+						} catch {
+							/* ignore ESRCH */
+						}
+						emitProgress();
+						finalize(1);
+						return;
+					}
+					// success === true: the run continues; the recovered turn's
+					// message_end clears the recorded error. Suspend the inactivity
+					// net until that activity arrives (same reasoning as
+					// auto_retry_start).
+					suspendActivityTimerForRetry();
 				}
 			};
 			const processLine = (line: string) => {
@@ -2848,6 +2928,18 @@ async function runSingleAgent(
 				);
 				if (activityMs > 0) {
 					activityTimer = setTimeout(() => {
+						// A failed turn still awaiting pi's retry decision
+						// (stopReason === "error" / errorMessage recorded, no
+						// agent_end or auto_retry_end yet) makes the timeout
+						// PROVISIONAL: SIGKILL still reclaims a genuinely hung
+						// process (and the exit it guarantees finalizes the task as
+						// timed out), but finalization is deferred to that exit so
+						// a retry-lifecycle event observed before it can revoke the
+						// provisional stopReason (see suspendActivityTimerForRetry).
+						// Any other silence finalizes immediately — the process is
+						// hung mid-work and must never run forever.
+						const awaitingRetryDecision =
+							currentResult.stopReason === "error" || !!currentResult.errorMessage;
 						currentResult.stopReason = "activity_timeout";
 						const elapsed = Date.now() - lastActivityAt;
 						const phase = currentResult.phase;
@@ -2858,9 +2950,31 @@ async function runSingleAgent(
 						} catch {
 							/* ignore ESRCH */
 						}
-						finalize(1);
+						if (!awaitingRetryDecision) finalize(1);
 					}, activityMs);
 				}
+			};
+
+			/**
+			 * Retry-lifecycle events (agent_end{willRetry:true},
+			 * auto_retry_start, auto_retry_end{success:true}) prove the process
+			 * is alive but are followed by pi's own retry delay, which may exceed
+			 * the activity window. Suspend the inactivity net until genuine
+			 * stdout/stderr activity re-arms it (the data handlers call
+			 * resetActivityTimer), and revoke a provisional activity_timeout
+			 * stopReason recorded while the failed turn awaited pi's retry
+			 * decision.
+			 */
+			const suspendActivityTimerForRetry = () => {
+				// Same guard as resetActivityTimer: after resolution, once abort
+				// started teardown, or after the process exited, touching the
+				// timer/stopReason is meaningless (abort 后不得再动计时器).
+				if (resolved || wasAborted || exitCodeValue !== null) return;
+				if (activityTimer) {
+					clearTimeout(activityTimer);
+					activityTimer = undefined;
+				}
+				if (currentResult.stopReason === "activity_timeout") currentResult.stopReason = undefined;
 			};
 
 			const setupHardTimer = () => {
@@ -3230,8 +3344,34 @@ function getTaskStatus(result: SingleResult): SubagentTaskStatus {
 	const stopReason = result.stopReason;
 	if (stopReason === "aborted" || stopReason === "killed_on_shutdown") return "cancelled";
 	if (stopReason === "activity_timeout" || stopReason === "hard_timeout") return "timeout";
-	if (result.exitCode !== 0 || stopReason === "error") return "failure";
-	return "success";
+	return isTaskFailure(result) ? "failure" : "success";
+}
+
+/**
+ * The single "did this run fail" predicate (N2 three-layer success criteria,
+ * inverted): (a) a clean exit with no recorded error, (b) a normal terminal
+ * stopReason ("error"/abort/timeout are terminal failures; "length"/"deferred"
+ * mean the answer was cut off or postponed), (c) non-empty text on the LAST
+ * assistant message. Exit 0 alone never proves success.
+ *
+ * Shared by all three success/failure call sites — the async terminal status
+ * (getTaskStatus), the sync execute() isError flag and the renderResult icon —
+ * so they can never drift into disagreeing about the same run.
+ */
+function isTaskFailure(result: SingleResult): boolean {
+	const stopReason = result.stopReason;
+	if (result.exitCode !== 0) return true;
+	if (
+		stopReason === "error" ||
+		stopReason === "aborted" ||
+		stopReason === "killed_on_shutdown" ||
+		stopReason === "activity_timeout" ||
+		stopReason === "hard_timeout"
+	)
+		return true;
+	if (result.errorMessage) return true;
+	if (stopReason === "length" || stopReason === "deferred") return true;
+	return !getLastAssistantText(result.messages);
 }
 
 /** Structured payload carried by the subagent-result message's details field. */
@@ -3253,6 +3393,13 @@ export interface SubagentResultDetails {
 	usage: UsageStats;
 	sessionId: string;
 	output: string;
+	/**
+	 * Truncated failure cause (ERROR_MESSAGE_MAX_CHARS), present only on failed
+	 * tasks whose run recorded an errorMessage (message_end(error) or
+	 * auto_retry_end{finalError}). Also inlined as the envelope's `- Error:`
+	 * meta line.
+	 */
+	errorMessage?: string;
 }
 
 /**
@@ -3261,6 +3408,38 @@ export interface SubagentResultDetails {
  * huge result is not stored twice at full length.
  */
 const DETAILS_OUTPUT_MAX_CHARS = 16 * 1024;
+
+/**
+ * Cap for the failure cause surfaced through the result envelope (meta `- Error:`
+ * line and details.errorMessage). Long provider payloads are truncated with a
+ * visible marker; the prefix is preserved so the error stays identifiable.
+ */
+export const ERROR_MESSAGE_MAX_CHARS = 2000;
+
+/** Truncate an over-long error message, keeping the identifying prefix. */
+function truncateErrorMessage(message: string): string {
+	if (message.length <= ERROR_MESSAGE_MAX_CHARS) return message;
+	return `${message.slice(0, ERROR_MESSAGE_MAX_CHARS)}\n... (truncated)`;
+}
+
+/**
+ * Cap for the stderr tail surfaced through the envelope's `- Stderr:` meta
+ * line on otherwise clueless failures (no errorMessage, no output).
+ */
+const STDERR_TAIL_MAX_CHARS = 1000;
+
+/**
+ * Compact stderr tail for the envelope's `- Stderr:` meta line: trimmed and
+ * capped to the last STDERR_TAIL_MAX_CHARS. The stderr text is presented
+ * verbatim — no content rewriting of any kind (no prefix stripping, no
+ * log-level normalization), so the main agent sees exactly what the
+ * subprocess wrote.
+ */
+function summarizeStderrTail(stderr: string): string {
+	const trimmed = stderr.trim();
+	if (!trimmed) return "";
+	return trimmed.length > STDERR_TAIL_MAX_CHARS ? trimmed.slice(-STDERR_TAIL_MAX_CHARS) : trimmed;
+}
 
 /**
  * Fixed trigger line inserted into every [subagent-result] envelope right
@@ -3306,7 +3485,10 @@ export function buildResultEnvelope(
 	errorMessage?: string,
 ): { content: string; details: SubagentResultDetails } {
 	const statusWord = STATUS_WORDS[status];
-	const output = result ? getFinalOutput(result.messages) : "";
+	// details.output / body carry only the real final-turn assistant text
+	// (N2/N4): never an earlier turn's stale text, never the errorMessage,
+	// never raw stderr — those must not masquerade as the answer.
+	const output = result ? getLastAssistantText(result.messages) : "";
 	const usage: UsageStats =
 		result?.usage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
 	const sessionId = result?.sessionId ?? task.taskId;
@@ -3316,8 +3498,23 @@ export function buildResultEnvelope(
 	const durationMs = result
 		? Math.max(0, (result.finishedAt ?? Date.now()) - result.startedAt)
 		: Math.max(0, Date.now() - task.startedAt);
+	// N1: surface the recorded failure cause (message_end errorMessage or
+	// auto_retry_end finalError, both stored on result.errorMessage) in the
+	// meta-info area and in details.errorMessage, truncated with a marker.
+	const exposedError =
+		status === "failure" && result?.errorMessage ? truncateErrorMessage(result.errorMessage) : undefined;
+	// N4 follow-up: a failure with neither a recorded cause nor final text
+	// would otherwise end in a bare "(no output)" with zero clues (e.g. a
+	// subprocess that wrote a fatal error to stderr and died without any
+	// message_end). Surface the stderr TAIL as a labelled `- Stderr:` meta
+	// line — never as the body, never in details.output (stderr must not
+	// masquerade as the answer, N4), and never next to a `- Error:` line (a
+	// recorded errorMessage takes precedence, N1).
+	const stderrTail =
+		status === "failure" && !exposedError && !output && result?.stderr
+			? summarizeStderrTail(result.stderr)
+			: "";
 	let body = output;
-	if (!body && result) body = result.errorMessage || result.stderr.trim();
 	// Only genuine failures are labelled "Internal error"; a user cancel or
 	// session shutdown rejection is an expected abort, so it gets a note
 	// carrying the abort's origin (user cancel vs session shutdown).
@@ -3330,6 +3527,10 @@ export function buildResultEnvelope(
 		`- Status: ${statusWord}`,
 		`- Task: ${truncateTaskDescription(task.task)}`,
 		`- Duration: ${formatDuration(durationMs)} · Usage: ${formatUsageStats(usage, result?.model) || "-"}`,
+		// The `- Error:` line sits inside the meta-info area, after Status and
+		// before the `- Session:` anchor the in-flight block extraction relies on.
+		...(exposedError ? [`- Error: ${exposedError}`] : []),
+		...(stderrTail ? [`- Stderr: ${stderrTail}`] : []),
 		`- Session: ${sessionId}`,
 		"",
 		// 在途 block: completeAsyncTask deletes this task from the registry
@@ -3355,6 +3556,7 @@ export function buildResultEnvelope(
 				output.length > DETAILS_OUTPUT_MAX_CHARS
 					? `${output.slice(0, DETAILS_OUTPUT_MAX_CHARS)}\n... (truncated; full output in content)`
 					: output,
+			errorMessage: exposedError,
 		},
 	};
 }
@@ -3835,7 +4037,13 @@ export default function (pi: ExtensionAPI) {
 					ctx.model,
 					modelOverrides,
 				);
-				const isError = result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
+				// N2 on the sync path too: exit 0 without non-empty text on the LAST
+				// assistant message is a fake success (silent no-answer run, errored
+				// final turn, truncated/deferred answer, …) — report failure with the
+				// full diagnostics instead. The predicate is shared with the async
+				// terminal status (getTaskStatus) and the renderer (renderResult), so
+				// sync and async can never disagree about the same run.
+				const isError = isTaskFailure(result);
 				if (isError) {
 					const diagnostics = formatSubagentDiagnostics(result) + `\n\n[subagent session: ${result.sessionId}]`;
 					return {
@@ -3844,7 +4052,7 @@ export default function (pi: ExtensionAPI) {
 						isError: true,
 					};
 				}
-				const rawOutput = getFinalOutput(result.messages);
+				const rawOutput = getLastAssistantText(result.messages);
 				const outputText = rawOutput
 					? `${rawOutput}\n\n[subagent session: ${result.sessionId}]`
 					: `[subagent session: ${result.sessionId}]`;
@@ -3901,7 +4109,10 @@ export default function (pi: ExtensionAPI) {
 
 			if (details.mode === "single" && details.results.length === 1) {
 				const r = details.results[0];
-				const isError = r.exitCode !== 0 || r.stopReason === "error" || r.stopReason === "aborted";
+				// Shared failure predicate (isTaskFailure): the icon must match the
+				// status the async envelope / sync isError would report for the same
+				// run — e.g. exit 0 + stopReason "length" renders ✗, not ✓.
+				const isError = isTaskFailure(r);
 				const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
 				const displayItems = getDisplayItems(r.messages);
 				const finalOutput = getFinalOutput(r.messages);

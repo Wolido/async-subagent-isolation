@@ -262,6 +262,23 @@ describe("[subagent-result] 通知投递模式与在途块措辞（S1/S2/S3 红�
 			await dispatchTask(executeSubagentTool!, "call-1", "test task", "019ffdd3-3eb5-733d-b481-a53e5292c001");
 
 			// Act: 子进程成功退出 → completeAsyncTask → pi.sendMessage
+			// 注入含 text 的 message_end，使本用例继续覆盖「成功路径」
+			//（N2 后 exit 0 但无终态文本会判 failed）。
+			allProcs[0].stdout.emit(
+				"data",
+				Buffer.from(
+					JSON.stringify({
+						type: "message_end",
+						message: {
+							role: "assistant",
+							content: [{ type: "text", text: "子 agent 成功结果" }],
+							stopReason: "end_turn",
+							usage: { input: 10, output: 5, totalTokens: 15 },
+						},
+					}) + "\n",
+				),
+			);
+			await vi.advanceTimersByTimeAsync(0);
 			endProcess(allProcs[0], 0);
 			await vi.advanceTimersByTimeAsync(1000);
 
@@ -338,6 +355,22 @@ describe("[subagent-result] 通知投递模式与在途块措辞（S1/S2/S3 红�
 			await dispatchTask(executeSubagentTool!, "call-1", "测试任务", "019ffdd3-3eb5-733d-b481-a53e5292c002");
 
 			// Act
+			// 注入含 text 的 message_end，使本用例继续覆盖「成功路径」
+			allProcs[0].stdout.emit(
+				"data",
+				Buffer.from(
+					JSON.stringify({
+						type: "message_end",
+						message: {
+							role: "assistant",
+							content: [{ type: "text", text: "任务完成" }],
+							stopReason: "end_turn",
+							usage: { input: 10, output: 5, totalTokens: 15 },
+						},
+					}) + "\n",
+				),
+			);
+			await vi.advanceTimersByTimeAsync(0);
 			endProcess(allProcs[0], 0);
 			await vi.advanceTimersByTimeAsync(1000);
 
@@ -360,6 +393,22 @@ describe("[subagent-result] 通知投递模式与在途块措辞（S1/S2/S3 红�
 			expect(taskRegistry.size).toBe(2);
 
 			// Act: 完成第一个任务
+			// 注入含 text 的 message_end，使本用例继续覆盖「成功路径」
+			allProcs[0].stdout.emit(
+				"data",
+				Buffer.from(
+					JSON.stringify({
+						type: "message_end",
+						message: {
+							role: "assistant",
+							content: [{ type: "text", text: "任务1完成" }],
+							stopReason: "end_turn",
+							usage: { input: 10, output: 5, totalTokens: 15 },
+						},
+					}) + "\n",
+				),
+			);
+			await vi.advanceTimersByTimeAsync(0);
 			endProcess(allProcs[0], 0);
 			await vi.advanceTimersByTimeAsync(1000);
 
@@ -401,6 +450,31 @@ describe("[subagent-result] 通知投递模式与在途块措辞（S1/S2/S3 红�
 				hasRule,
 				"promptGuidelines 应有条目同时含「在途块是构建时刻快照、可能滞后」与「冲突时以派发记录为准」语义",
 			).toBe(true);
+		});
+	});
+
+	// ================================================================
+	// N2 语义迁移：exit 0 但无终态文本必须判 failed
+	// ================================================================
+	describe("N2 语义迁移：exit 0 + 无终态文本 ⇒ failed", () => {
+		it("TUI 异步路径 exit 0 且无 message_end 文本时信封状态应为 failed（RED）", async () => {
+			const { executeSubagentTool, pi } = setupExtension();
+			const ctx = createMockTuiCtx(defaultCwd);
+			const executePromise = executeSubagentTool!(
+				"call-1",
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292be01" },
+				undefined,
+				undefined,
+				ctx,
+			);
+			await raceWithTimeout(executePromise, 200);
+
+			endProcess(allProcs[0], 0);
+			await vi.advanceTimersByTimeAsync(1000);
+
+			expect(pi.sendMessage).toHaveBeenCalled();
+			const [message] = pi._sendMessageCalls[0];
+			expect(message.details.status).toBe("failed");
 		});
 	});
 });

@@ -669,12 +669,30 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 			);
 			await raceWithTimeout(executePromise, 200);
 
+			// 注入含 text 的 message_end，确保本用例真的覆盖「成功路径」；
+			// 其断言验证的是信封结构，终态必须为 succeeded。
+			allProcs[0].stdout.emit(
+				"data",
+				Buffer.from(
+					JSON.stringify({
+						type: "message_end",
+						message: {
+							role: "assistant",
+							content: [{ type: "text", text: "回归测试成功" }],
+							stopReason: "end_turn",
+							usage: { input: 10, output: 5, totalTokens: 15 },
+						},
+					}) + "\n",
+				),
+			);
+			await vi.advanceTimersByTimeAsync(0);
 			endProcess(allProcs[0], 0);
 			await vi.advanceTimersByTimeAsync(1000);
 
 			expect(pi.sendMessage).toHaveBeenCalled();
 			const [message] = pi._sendMessageCalls[0];
 			const content: string = message.content;
+			expect(message.details.status).toBe("succeeded");
 			expect(content).toContain("[subagent-result]");
 			expect(content).toContain("Status:");
 			expect(content).toContain("Task:");

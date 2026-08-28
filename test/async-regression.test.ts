@@ -276,11 +276,29 @@ describe("异步化回归测试 & B1 红阶段", () => {
 
 			expect(taskRegistry.size).toBe(1);
 
-			// Complete the task successfully
+			// Complete the task successfully: inject a message_end with text so this
+			// really tests the success path under N2.
+			allProcs[0].stdout.emit(
+				"data",
+				Buffer.from(
+					JSON.stringify({
+						type: "message_end",
+						message: {
+							role: "assistant",
+							content: [{ type: "text", text: "success" }],
+							stopReason: "end_turn",
+							usage: { input: 10, output: 5, totalTokens: 15 },
+						},
+					}) + "\n",
+				),
+			);
+			await vi.advanceTimersByTimeAsync(0);
 			endProcess(allProcs[0], 0);
 			await vi.advanceTimersByTimeAsync(1000);
 
 			expect(taskRegistry.size).toBe(0);
+			const result = await executePromise;
+			expect(result.isError).toBeFalsy();
 		});
 
 		it("should remove task from registry after cancel", async () => {
@@ -368,14 +386,17 @@ describe("异步化回归测试 & B1 红阶段", () => {
 				throw new Error("Session already destroyed");
 			});
 
-			// Complete the task — this triggers completeAsyncTask which calls sendMessage
+			// Complete the task — this triggers completeAsyncTask which calls sendMessage.
+			// 本用例验证 sendMessage 抛错时的降级行为，不依赖终态成功/失败；
+			// 保持 endProcess(0) 无 message_end 是为了最小化改动。
 			endProcess(allProcs[0], 0);
 
 			// Should not throw or produce unhandled rejection
 			await vi.advanceTimersByTimeAsync(1000);
 
-			// Registry should still be cleaned up
+			// Registry should still be cleaned up and completeAsyncTask was attempted
 			expect(taskRegistry.size).toBe(0);
+			expect(pi.sendMessage).toHaveBeenCalled();
 		});
 
 		it("should not crash when sendMessage throws after session_shutdown", async () => {
@@ -660,25 +681,28 @@ describe("异步化回归测试 & B1 红阶段", () => {
 		it("should emit warning when cancelling an already-completed task", async () => {
 			const { pi, executeTool } = setupExtension();
 			const ctx = createMockTuiCtx(defaultCwd);
+			const sessionId = "019ffdd3-3eb5-733d-b481-a53e5292bd2d";
 
 			// Dispatch a task
 			const executePromise = executeTool(
 				"call-1",
-				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd2d" },
+				{ agent: "tester", task: "test task", sessionId },
 				undefined,
 				undefined,
 				ctx,
 			);
 			await raceWithTimeout(executePromise, 200);
 
-			// Complete it
+			// Complete it: 本用例验证「已结束任务再取消」的告警，不依赖终态；
+			// endProcess(0) 仅用于触发 completeAsyncTask 使任务出 registry。
 			endProcess(allProcs[0], 0);
 			await vi.advanceTimersByTimeAsync(1000);
-
+			expect(taskRegistry.has(sessionId)).toBe(false);
+			expect(pi.sendMessage).toHaveBeenCalled();
 			// Now try to cancel it — should warn since it's been removed from registry
 			const cancelCommand = pi._commandDefs.get("subagent-cancel");
 			const notifyMock = vi.fn();
-			await cancelCommand.handler("019ffdd3-3eb5-733d-b481-a53e5292bd2d", { ui: { notify: notifyMock } });
+			await cancelCommand.handler(sessionId, { ui: { notify: notifyMock } });
 
 			expect(notifyMock).toHaveBeenCalledWith(
 				expect.stringContaining("019ffdd3-3eb5-733d-b481-a53e5292bd2d"),
@@ -945,13 +969,14 @@ describe("异步化回归测试 & B1 红阶段", () => {
 	// ================================================================
 	describe("T3: B1 修复后回归 — 同 sessionId 冲突被拒", () => {
 		it("should allow dispatch after previous task with same sessionId completes", async () => {
-			const { executeTool } = setupExtension();
+			const { pi, executeTool } = setupExtension();
 			const ctx = createMockTuiCtx(defaultCwd);
+			const sessionId = "019ffdd3-3eb5-733d-b481-a53e5292bd32";
 
 			// First dispatch
 			const first = await executeTool(
 				"call-1",
-				{ agent: "tester", task: "first task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd32" },
+				{ agent: "tester", task: "first task", sessionId },
 				undefined,
 				undefined,
 				ctx,
@@ -959,15 +984,17 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			expect(first.isError).toBeFalsy();
 			expect(taskRegistry.size).toBe(1);
 
-			// Complete the first task
+			// Complete the first task: 本用例验证同 sessionId 复用，不依赖终态；
+			// endProcess(0) 仅用于触发 completeAsyncTask 使任务出 registry。
 			endProcess(allProcs[0], 0);
 			await vi.advanceTimersByTimeAsync(1000);
 			expect(taskRegistry.size).toBe(0);
+			expect(pi.sendMessage).toHaveBeenCalled();
 
 			// Second dispatch with same sessionId should succeed (no conflict)
 			const second = await executeTool(
 				"call-2",
-				{ agent: "tester", task: "second task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd32" },
+				{ agent: "tester", task: "second task", sessionId },
 				undefined,
 				undefined,
 				ctx,

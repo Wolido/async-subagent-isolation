@@ -380,13 +380,32 @@ describe("[subagent-result] 信封触行文与通知消化流程（T1/T2 红阶�
 			await dispatchTask(executeSubagentTool!, "call-1", "集成验证触行文", "019ffdd3-3eb5-733d-b481-a53e5292d010");
 
 			// Act：子进程成功退出 → completeAsyncTask → pi.sendMessage
+			// 注入含 text 的 message_end，确保本用例真的覆盖「成功路径」（N2 后 exit 0
+			// 但无终态文本会判 failed）。
+			allProcs[0].stdout.emit(
+				"data",
+				Buffer.from(
+					JSON.stringify({
+						type: "message_end",
+						message: {
+							role: "assistant",
+							content: [{ type: "text", text: "success result" }],
+							stopReason: "end_turn",
+							usage: { input: 10, output: 5, totalTokens: 15 },
+						},
+					}) + "\n",
+				),
+			);
+			await vi.advanceTimersByTimeAsync(0);
 			endProcess(allProcs[0], 0);
 			await vi.advanceTimersByTimeAsync(1000);
 
 			// Assert：实际投递的信封含逐字触行文，位置/段间契约同单元级
 			expect(pi.sendMessage).toHaveBeenCalled();
-			const content: string = pi._sendMessageCalls[0][0].content;
+			const [message, _options] = pi._sendMessageCalls[0];
+			const content: string = message.content;
 			expectTriggerLine(content);
+			expect(message.details.status).toBe("succeeded");
 		});
 
 		it("should include the verbatim trigger line in the delivered user-cancel envelope（result=null 路径，RED）", async () => {

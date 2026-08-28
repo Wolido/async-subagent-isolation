@@ -83,6 +83,20 @@ function createSuccessfulProc() {
 	proc.exitCode = null;
 	proc.signalCode = null;
 	queueMicrotask(() => {
+		proc.stdout.emit(
+			"data",
+			Buffer.from(
+				JSON.stringify({
+					type: "message_end",
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "success output" }],
+						stopReason: "end_turn",
+						usage: { input: 10, output: 5, totalTokens: 15 },
+					},
+				}) + "\n",
+			),
+		);
 		proc.stdout.emit("end");
 		proc.emit("exit", 0, null);
 	});

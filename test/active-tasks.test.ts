@@ -403,6 +403,22 @@ describe("在途任务台账", () => {
 			expect(taskRegistry.size).toBe(2);
 
 			// Act: complete the first task
+			// 注入含 text 的 message_end，使本用例继续覆盖「成功路径」
+			allProcs[0].stdout.emit(
+				"data",
+				Buffer.from(
+					JSON.stringify({
+						type: "message_end",
+						message: {
+							role: "assistant",
+							content: [{ type: "text", text: "任务1完成" }],
+							stopReason: "end_turn",
+							usage: { input: 10, output: 5, totalTokens: 15 },
+						},
+					}) + "\n",
+				),
+			);
+			await vi.advanceTimersByTimeAsync(0);
 			endProcess(allProcs[0], 0);
 			await vi.advanceTimersByTimeAsync(1000);
 
@@ -442,6 +458,22 @@ describe("在途任务台账", () => {
 			expect(taskRegistry.size).toBe(1);
 
 			// Act: complete the task
+			// 注入含 text 的 message_end，使本用例继续覆盖「成功路径」
+			allProcs[0].stdout.emit(
+				"data",
+				Buffer.from(
+					JSON.stringify({
+						type: "message_end",
+						message: {
+							role: "assistant",
+							content: [{ type: "text", text: "任务完成" }],
+							stopReason: "end_turn",
+							usage: { input: 10, output: 5, totalTokens: 15 },
+						},
+					}) + "\n",
+				),
+			);
+			await vi.advanceTimersByTimeAsync(0);
 			endProcess(allProcs[0], 0);
 			await vi.advanceTimersByTimeAsync(1000);
 
@@ -574,6 +606,22 @@ describe("在途任务台账", () => {
 			await raceWithTimeout(executePromise, 200);
 
 			// Act: complete the task
+			// 注入含 text 的 message_end，使本用例继续覆盖「成功路径」
+			allProcs[0].stdout.emit(
+				"data",
+				Buffer.from(
+					JSON.stringify({
+						type: "message_end",
+						message: {
+							role: "assistant",
+							content: [{ type: "text", text: "回归测试完成" }],
+							stopReason: "end_turn",
+							usage: { input: 10, output: 5, totalTokens: 15 },
+						},
+					}) + "\n",
+				),
+			);
+			await vi.advanceTimersByTimeAsync(0);
 			endProcess(allProcs[0], 0);
 			await vi.advanceTimersByTimeAsync(1000);
 
@@ -636,6 +684,31 @@ describe("在途任务台账", () => {
 			expect(hasEventAnchoredLine(block, true), "空在途块应有锚定本任务结束事件的限定陈述").toBe(true);
 			expect(block).not.toMatch(ABSOLUTE_EMPTY_WORDING);
 			expect(block).not.toMatch(CLOCK_TIME);
+		});
+	});
+
+	// ================================================================
+	// N2 语义迁移：exit 0 但无终态文本必须判 failed
+	// ================================================================
+	describe("N2 语义迁移：exit 0 + 无终态文本 ⇒ failed", () => {
+		it("exit 0 且无 message_end 文本时信封状态应为 failed（RED）", async () => {
+			const { executeSubagentTool, pi } = setupExtension();
+			const ctx = createMockTuiCtx(defaultCwd);
+			const executePromise = executeSubagentTool!(
+				"call-1",
+				{ agent: "tester", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292be02" },
+				undefined,
+				undefined,
+				ctx,
+			);
+			await raceWithTimeout(executePromise, 200);
+
+			endProcess(allProcs[0], 0);
+			await vi.advanceTimersByTimeAsync(1000);
+
+			expect(pi.sendMessage).toHaveBeenCalled();
+			const [message] = pi._sendMessageCalls[0];
+			expect(message.details.status).toBe("failed");
 		});
 	});
 });
