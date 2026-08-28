@@ -161,6 +161,213 @@ function isDirectory(p: string): boolean {
 	}
 }
 
+// ===== Subagent spawn preflight (cwd / command validation) =====
+
+export type PreflightCode = "CWD_MISSING" | "CWD_NOT_DIR" | "EXEC_MISSING" | "CWD_INACCESSIBLE";
+
+export interface PreflightResult {
+	ok: boolean;
+	code?: PreflightCode | null;
+	message?: string;
+	fields?: {
+		command?: string;
+		cwd?: string;
+		cwdExists?: boolean;
+		source?: "param" | "session";
+	};
+}
+
+/**
+ * Normalize the requested subagent cwd. Lenient on spelling, strict on
+ * existence (existence is checked separately by preflightSpawn):
+ * - "~/x" -> homedir/x, "~" -> homedir (injected for testability)
+ * - relative -> resolved against sessionCwd (the session cwd, NOT process.cwd())
+ * - absolute -> path.normalize
+ * - no paramCwd (or empty / whitespace-only) -> sessionCwd verbatim (byte-identical to legacy behavior)
+ */
+export function resolveAgentCwd(opts: {
+	paramCwd?: string;
+	sessionCwd: string;
+	homedir: string;
+}): { cwd: string; source: "param" | "session" } {
+	const { paramCwd, sessionCwd, homedir } = opts;
+	// 空串与纯空白一律视同"未传参数"：不谎报 source=param，也不把空白拼成真实目录名。
+	if (paramCwd === undefined || paramCwd.trim() === "") return { cwd: sessionCwd, source: "session" };
+	let cwd: string;
+	if (paramCwd === "~") cwd = homedir;
+	else if (paramCwd.startsWith("~/")) cwd = path.join(homedir, paramCwd.slice(2));
+	else if (path.isAbsolute(paramCwd)) cwd = path.normalize(paramCwd);
+	else cwd = path.resolve(sessionCwd, paramCwd);
+	return { cwd, source: "param" };
+}
+
+/** Facts gathered by (a)sync fs probes; decision itself is pure. */
+interface PreflightFacts {
+	command: string;
+	cwd: string;
+	source?: "param" | "session";
+	/** true = 任一 cwd 探针（checkExists/isDir）抛错。"探测失败"与"探测为否"
+	 *  是两种不同事实，必须独立记录——压成同一个（cwdErrno=undefined）正是
+	 *  ENOENT-vs-EACCES 误判与 fail-open 的根因。 */
+	cwdProbeFailed?: boolean;
+	/** errno of a failed cwd probe, recorded verbatim (e.g. "ENOENT", "EACCES");
+	 *  "EUNKNOWN" when the throw carried no `.code` — 可辨识占位值，不冒充任何
+	 *  真实 errno。 */
+	cwdErrno?: string;
+	cwdExists: boolean;
+	/** undefined when the isDir probe was not reached or itself threw
+	 *  （未探测/探测失败 ≠ 探针确定为 false）。 */
+	cwdIsDir?: boolean;
+	/** undefined when the exec check does not apply (non-absolute command). */
+	executable?: boolean;
+	/** errno of the failed exec probe, surfaced verbatim in the EXEC_MISSING message. */
+	execErrno?: string;
+}
+
+function decidePreflight(f: PreflightFacts): PreflightResult {
+	// 判定优先级是刻意的：cwd 先判、command 后判——两者同时异常时只报 cwd。
+	const fields = { command: f.command, cwd: f.cwd, source: f.source };
+	if (f.cwdProbeFailed === true) {
+		// 探针抛错 = "我无法判定"，绝不能读作"探针确定为否"。errno 分类（全局
+		// 仅此一处）：ENOENT/ENOTDIR 带原生语义（路径上无此物 / 父级分量是文件）
+		// ——checkExists 先 true、随后 isDir 抛 ENOENT 属两次探测之间目录被删
+		// （TOCTOU），此时"不存在"才是诚实且可行动的答案；其余 errno
+		// （EACCES/ELOOP/ENAMETOOLONG/…）与"无 errno 的抛错"（记作 EUNKNOWN）=
+		// 无法判定存在性，绝不谎称"不存在"。
+		if (f.cwdErrno === "ENOENT" || f.cwdErrno === "ENOTDIR") {
+			return {
+				ok: false,
+				code: "CWD_MISSING",
+				message: `[CWD_MISSING] 子代理工作目录不存在: ${f.cwd}（来源: ${f.source === "session" ? "session cwd" : "agent cwd 参数"}）。不会自动创建该目录；如确需使用，请先创建该目录后重试。`,
+				fields: { ...fields, cwdExists: false },
+			};
+		}
+		// CWD_INACCESSIBLE 语义 = "目录存在但无法访问"，故 fields.cwdExists 恒为 true。
+		return {
+			ok: false,
+			code: "CWD_INACCESSIBLE",
+			message: `[CWD_INACCESSIBLE] 子代理工作目录存在但无法访问: ${f.cwd}（errno=${f.cwdErrno ?? "EUNKNOWN"}）。请检查目录权限/链接环路后重试。`,
+			fields: { ...fields, cwdExists: true },
+		};
+	}
+	if (!f.cwdExists) {
+		// checkExists 未抛错且返回 false = 探针确定"不存在"（非探测失败）。
+		return {
+			ok: false,
+			code: "CWD_MISSING",
+			message: `[CWD_MISSING] 子代理工作目录不存在: ${f.cwd}（来源: ${f.source === "session" ? "session cwd" : "agent cwd 参数"}）。不会自动创建该目录；如确需使用，请先创建该目录后重试。`,
+			fields: { ...fields, cwdExists: false },
+		};
+	}
+	if (f.cwdIsDir === false) {
+		return {
+			ok: false,
+			code: "CWD_NOT_DIR",
+			message: `[CWD_NOT_DIR] 子代理工作目录已存在但不是目录: ${f.cwd}。请改为传入一个目录路径。`,
+			fields: { ...fields, cwdExists: true },
+		};
+	}
+	if (f.executable === false) {
+		return {
+			ok: false,
+			code: "EXEC_MISSING",
+			message: `[EXEC_MISSING] 子代理启动命令不可执行: ${f.command}（errno=${f.execErrno ?? "EUNKNOWN"}）。长生命周期 pi 进程持有的 node 路径可能已因 Homebrew 升级被删除，请重启 pi 后重试。`,
+			fields: { ...fields, cwdExists: true },
+		};
+	}
+	// 正向判定：ok:true 只在 cwdIsDir === true（探针确定"是目录"）时成立。
+	// `!== false` 是 bug——探针抛错留下的 undefined 不是"是"。
+	if (f.cwdIsDir === true) {
+		return { ok: true };
+	}
+	// 兜底（按采集逻辑不可达：cwdExists 为 true 且探针未抛错时 isDir 必写下
+	// boolean）。存在仅为保证任何事实组合都 fail-closed，绝不静默放行。
+	return {
+		ok: false,
+		code: "CWD_INACCESSIBLE",
+		message: `[CWD_INACCESSIBLE] 子代理工作目录存在但无法访问: ${f.cwd}（errno=${f.cwdErrno ?? "EUNKNOWN"}）。请检查目录权限/链接环路后重试。`,
+		fields: { ...fields, cwdExists: true },
+	};
+}
+
+/**
+ * Pre-spawn validation (async contract form). Returns a structured result
+ * instead of throwing so callers can propagate code/fields through the
+ * normal result channel. fs checks are injected for testability.
+ *
+ * 公共 API：注入式事实采集的官方接缝，供需要自定义探针的调用方（含测
+ * 试）使用。纯适配器：只负责"await 注入的探针采集事实、如实记录 errno 与
+ * 探测失败 → 交给 decidePreflight → 返回"，内部无任何独立判定分支（判定逻
+ * 辑全局仅 decidePreflight 一处）。生产路径走同步入口 preflightSpawnSync
+ * 以保证 spawn 时序（异步入口曾因引入 microtask 导致 107 个既有用例失败）。
+ * The executable check applies only to absolute command paths — bare names
+ * like "pi" resolve via PATH at spawn time and must not be access()-checked.
+ */
+export async function preflightSpawn(opts: {
+	command: string;
+	cwd: string;
+	source?: "param" | "session";
+	checkExists: (p: string) => Promise<boolean>;
+	isDir: (p: string) => Promise<boolean>;
+	hasExec: (p: string) => Promise<boolean>;
+}): Promise<PreflightResult> {
+	const facts: PreflightFacts = { command: opts.command, cwd: opts.cwd, source: opts.source, cwdExists: false };
+	try {
+		facts.cwdExists = await opts.checkExists(opts.cwd);
+	} catch (err) {
+		// 探针抛错 = 探测失败（独立事实），无 .code 时记可辨识占位值 EUNKNOWN。
+		facts.cwdProbeFailed = true;
+		facts.cwdErrno = (err as NodeJS.ErrnoException).code ?? "EUNKNOWN";
+	}
+	if (facts.cwdExists) {
+		try {
+			facts.cwdIsDir = await opts.isDir(opts.cwd);
+		} catch (err) {
+			facts.cwdProbeFailed = true;
+			facts.cwdErrno = (err as NodeJS.ErrnoException).code ?? "EUNKNOWN";
+		}
+	}
+	if (facts.cwdExists && facts.cwdIsDir === true && path.isAbsolute(opts.command)) {
+		try {
+			facts.executable = await opts.hasExec(opts.command);
+		} catch (err) {
+			facts.executable = false;
+			facts.execErrno = (err as NodeJS.ErrnoException).code;
+		}
+	}
+	return decidePreflight(facts);
+}
+
+/**
+ * Synchronous preflight for runSingleAgent: spawn must stay reachable
+ * within the same synchronous segment as before the preflight existed
+ * (async fs probes would delay spawn past callers that assert immediately).
+ * 纯适配器：statSync/accessSync 采集事实（如实记录 errno）→ decidePreflight
+ * 统一判定，内部无独立判定分支。
+ */
+function preflightSpawnSync(input: { command: string; cwd: string; source?: "param" | "session" }): PreflightResult {
+	const facts: PreflightFacts = { command: input.command, cwd: input.cwd, source: input.source, cwdExists: false };
+	try {
+		const stat = fs.statSync(input.cwd);
+		facts.cwdExists = true;
+		facts.cwdIsDir = stat.isDirectory();
+	} catch (err) {
+		// 与异步入口同一纪律：抛错 = 探测失败，无 .code 时记 EUNKNOWN。
+		facts.cwdProbeFailed = true;
+		facts.cwdErrno = (err as NodeJS.ErrnoException).code ?? "EUNKNOWN";
+	}
+	if (facts.cwdExists && facts.cwdIsDir === true && path.isAbsolute(input.command)) {
+		try {
+			fs.accessSync(input.command, fs.constants.X_OK);
+			facts.executable = true;
+		} catch (err) {
+			facts.executable = false;
+			facts.execErrno = (err as NodeJS.ErrnoException).code;
+		}
+	}
+	return decidePreflight(facts);
+}
+
 function findNearestProjectAgentsDir(cwd: string): string | null {
 	let currentDir = cwd;
 	while (true) {
@@ -1706,6 +1913,10 @@ interface SingleResult {
 	startedAt: number;
 	/** Wall-clock finish, set when the run resolves; absent while running. */
 	finishedAt?: number;
+	/** Preflight failure code, set when the run was rejected before spawn. */
+	preflightCode?: PreflightCode;
+	/** Structured preflight failure context (command/cwd/cwdExists/source). */
+	preflightFields?: PreflightResult["fields"];
 }
 
 interface SubagentDetails {
@@ -2308,9 +2519,11 @@ async function runSingleAgent(
 	if (effectiveThinking) args.push("--thinking", effectiveThinking);
 	if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
 
-	// Effective working directory: agent-specific cwd > session default.
-	// Used both for resolving relative skill paths and as the spawned process cwd.
-	const effectiveCwd = cwd ?? defaultCwd;
+	// Effective working directory: agent-specific cwd (normalized) > session
+	// default. Used both for resolving relative skill paths and as the spawned
+	// process cwd. When no cwd param is given this is defaultCwd verbatim.
+	const cwdResolution = resolveAgentCwd({ paramCwd: cwd, sessionCwd: defaultCwd, homedir: os.homedir() });
+	const effectiveCwd = cwdResolution.cwd;
 
 	// MODIFIED: inject per-agent skill isolation
 	const skillWarnings: string[] = [];
@@ -2398,6 +2611,28 @@ async function runSingleAgent(
 		}
 
 		args.push(`Task: ${task}`);
+
+		// Preflight: validate the normalized cwd and the executable BEFORE
+		// spawning, so a missing cwd surfaces as a structured CWD_MISSING error
+		// instead of the misleading raw `spawn <execPath> ENOENT`.
+		const invocation = getPiInvocation(args);
+		// Synchronous on purpose: keeps spawn reachable within the same
+		// synchronous segment as before this preflight existed.
+		const preflight = preflightSpawnSync({
+			command: invocation.command,
+			cwd: effectiveCwd,
+			source: cwdResolution.source,
+		});
+		if (!preflight.ok) {
+			currentResult.exitCode = 1;
+			currentResult.errorMessage = preflight.message;
+			currentResult.stderr += `${preflight.message}\n`;
+			currentResult.preflightCode = preflight.code ?? undefined;
+			currentResult.preflightFields = preflight.fields;
+			currentResult.finishedAt = Date.now();
+			return currentResult;
+		}
+
 		let wasAborted = false;
 
 		const POST_EXIT_GRACE_MS = 500;
@@ -2406,7 +2641,6 @@ async function runSingleAgent(
 		const DEFAULT_HARD_TIMEOUT_MS = 0;
 
 		const exitCode = await new Promise<number>((resolve) => {
-			const invocation = getPiInvocation(args);
 			const currentDepth = parseEnvInt(process.env.PI_SUBAGENT_DEPTH, 0);
 			const proc = spawn(invocation.command, invocation.args, {
 				cwd: effectiveCwd,
@@ -2695,7 +2929,11 @@ async function runSingleAgent(
 			});
 
 			proc.on("error", (err) => {
-				currentResult.stderr += `[async-subagent-isolation] process error: ${err?.message ?? String(err)}\n`;
+				// A raw spawn ENOENT blames the executable path even when the real
+				// cause is a missing cwd — attach the structured context so the
+				// message can no longer be misread as "node is broken".
+				const cwdExists = isDirectory(effectiveCwd);
+				currentResult.stderr += `[async-subagent-isolation] process error: ${err?.message ?? String(err)} (command: ${invocation.command}, cwd: ${effectiveCwd}, cwdExists: ${cwdExists})\n`;
 				finalize(1);
 			});
 
@@ -3264,7 +3502,12 @@ const SubagentParams = Type.Object({
 	confirmProjectAgents: Type.Optional(
 		Type.Boolean({ description: "Prompt before running project-local agents. Default: false.", default: false }),
 	),
-	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
+	cwd: Type.Optional(
+		Type.String({
+			description:
+				'Working directory for the agent process. Must be an existing directory: a nonexistent path is a hard error (reported as [CWD_MISSING]) and is never auto-created — create it first if needed. Only "~/…" and bare "~" are expanded to the home directory; "~user/…" is not supported and errors as CWD_MISSING. Relative paths resolve against the session cwd.',
+		}),
+	),
 });
 
 export default function (pi: ExtensionAPI) {
