@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [1.8.0] - 2026-08-30
+
+### Changed
+
+- The model-facing prompt surface drops every `sessionId` construction hint: the parameter description, the tool description's `- sessionId:` line, and the `promptGuidelines` entry no longer mention `UUID v7`, `lowercase`, `slug`, or `UUID v4`, and state only the two dispatch rules (omit `sessionId` to auto-generate a fresh id; pass it only to resume the id from a previous dispatch receipt). The literal example id previously embedded in `promptGuidelines` is removed: it was shape-valid and passed every check, so a model copying it verbatim could land on and resume someone else's real session.
+- The `sessionId` reuse section of `ADVANCED.md` / `ADVANCED.en.md` gains two notes: the rejection message itself states the dispatch rules, and the lowercase UUID v7 requirement is documented as this plugin's internal discipline — the single canonical form for registry keys and session directories — alongside pi's actual acceptance behavior (`assertValidSessionId` only requires `[A-Za-z0-9._-]` with alphanumeric ends; a `--session-id` that matches an existing session is silently opened for resume, and a miss creates a new session under that id after a warning). The human-facing docs keep the shape details; the de-shaping applies to the model-facing surface only.
+
+### Fixed
+
+- An illegal `sessionId` no longer fails at the schema layer with a bare `must match pattern "<regex>"` error that dragged the full `Received arguments` JSON into the model-visible text. pi's `validateToolArguments` runs before `execute()`, so with the `pattern` in place the plugin's rule-bearing rejection (`validateSessionId`) was unreachable on the production path. The format `pattern` is removed from the `sessionId` schema declaration, and format-class illegal values now reach `execute()` and are rejected there with the rule-bearing message. Format strictness is unchanged: `UUID_V7_PATTERN` and the `validateSessionId` branches are untouched — slugs, uppercase ids, UUID v4, wrong version nibbles, empty strings, and `.`/`..` are all still rejected — the path-traversal guard in `getSubagentSessionDir` remains the last line of defense, and no new validation (such as a session-existence check) was added.
+- The model-visible rejection for an illegal `sessionId` no longer describes the id's shape: the message is now `Invalid sessionId: pass sessionId only to resume the id from a previous dispatch receipt; omit it to generate a new one.`, replacing the previous wording that contained `expected a lowercase UUID v7`. Any "what the value should look like" hint invites the model to fabricate a compliant id, and pi silently creates a new session for a format-valid but nonexistent id (a stderr warning only, no error back to the model), so shape information is a pure attack surface with zero legitimate use.
+
 ## [1.7.0] - 2026-08-28
 
 ### Added

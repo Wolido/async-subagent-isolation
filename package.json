@@ -1,6 +1,6 @@
 {
   "name": "@wolido/async-subagent-isolation",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "Fix context rot and context pollution in long AI agent sessions. Subagents run in isolated processes; the main agent stays read-only and context stays clean.",
   "license": "MIT",
   "author": "Wolido",
