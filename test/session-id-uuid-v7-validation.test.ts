@@ -1,9 +1,9 @@
 /**
- * TDD red phase: sessionId must be a UUID v7 (or omitted)
+ * TDD red phase: sessionId must be a valid resume id (or omitted)
  *
  * Contract under test (defined here, implemented by coder):
  *
- *   The ONLY legitimate reason to pass `sessionId` is to resume the UUID v7
+ *   The ONLY legitimate reason to pass `sessionId` is to resume the id
  *   returned by a previous dispatch receipt. Therefore validateSessionId must
  *   accept exactly the uuidv7() output shape and reject everything else:
  *
@@ -18,9 +18,10 @@
  *     and session directory names (no case-normalization ambiguity).
  *   - Empty / whitespace-only / "." / ".." keep their existing rejections.
  *   - The rejection message must name the parameter ("sessionId") and state
- *     the only-legitimate-use semantics (resume a previous dispatch receipt's
- *     UUID v7; "resume" or 复用), stay under 200 chars, and not leak
- *     implementation details (regex source, file paths).
+ *     the only-legitimate-use semantics (resume a previous dispatch receipt;
+ *     "resume" or 复用), stay under 200 chars, and not leak implementation
+ *     details or id construction hints (no "UUID v7", "lowercase", "UUID v4",
+ *     "slug", regex source, file paths).
  *
  * All tests in this file are EXPECTED TO FAIL (red) until coder tightens
  * validateSessionId (src/index.ts L895-902) and the schema pattern /
@@ -250,12 +251,13 @@ describe("sessionId UUID v7 validation (red phase)", () => {
 			expect(result.content[0].text).toMatch(/resume/i);
 		});
 
-		it('should reject arbitrary external input "auth-refactor" and state the expected UUID v7 format', async () => {
+		it('should reject arbitrary external input "auth-refactor" and state the resume-from-receipt semantics', async () => {
 			const result = await dispatch("auth-refactor");
 
 			expect(result.isError).toBe(true);
 			expect(result.content[0].text).toMatch(/sessionId/i);
-			expect(result.content[0].text).toMatch(/uuid\s?v7/i);
+			expect(result.content[0].text).toMatch(/resume|receipt/i);
+			expect(result.content[0].text).not.toMatch(/\buuid\s?v7\b/i);
 		});
 	});
 
@@ -403,7 +405,7 @@ describe("sessionId UUID v7 validation (red phase)", () => {
 			const text: string = result.content[0].text;
 			expect(text.length).toBeLessThanOrEqual(200);
 			expect(text).toMatch(/sessionId/i);
-			expect(text).toMatch(/uuid\s?v7/i);
+			expect(text).not.toMatch(/\buuid\s?v7\b/i);
 			expect(text).toMatch(/resume/i);
 		});
 	});

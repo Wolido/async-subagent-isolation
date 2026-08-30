@@ -373,6 +373,10 @@ widget 行中的 taskId 可直接复制，用于 `/subagent-result` 查看结果
 
 派发回执中直接包含 `taskId`(即 session ID)。`[subagent-result]` 通知信封的 `- Session:` 行也携带 sessionId--复用即可。无需等待子 agent 完成就已经拿到了。
 
+> **报错即规则**：非法的 `sessionId`（如 slug、大写 UUID、UUID v4）会被拒绝，且报错文本本身就写明两条派发规则——不传则自动生成新的 UUID v7；传它的唯一正当用途是复用上一次派发回执中的 id。
+
+> **准入门槛差异**：本插件要求小写 UUID v7 属自身内部纪律（注册表键与会话目录的单一规范形态），并非 pi 的准入门槛。pi 自身的 `assertValidSessionId`（`pi-coding-agent/dist/core/session-manager.js:15-19`）只要求字符集 `[A-Za-z0-9._-]`、首尾为字母数字；`dist/main.js:337-345` 对 `--session-id` 的处理是“命中既有会话即静默 open 续写，未命中则打一条 Warning 后按该 id 新建”。因此绕过本插件校验越界时，后果由 pi 侧行为决定（命中既有会话即静默续写）。
+
 ## 环境变量
 
 以下变量会自动传播到每个子 agent 进程：

@@ -1172,7 +1172,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 	// N5: validateSessionId 回归防护
 	// ================================================================
 	describe("N5: validateSessionId 回归防护", () => {
-		it("should reject non-UUID sessionId with the UUID v7 contract", async () => {
+		it("should reject non-UUID sessionId with the resume-from-receipt contract", async () => {
 			const { executeTool } = setupExtension();
 			const ctx = createMockTuiCtx(defaultCwd);
 
@@ -1187,7 +1187,8 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			expect(result.isError).toBe(true);
 			const text = result.content[0].text;
 			expect(text).toMatch(/sessionId/i);
-			expect(text).toMatch(/UUID\s?v7/i);
+			expect(text).not.toMatch(/\bUUID\s?v7\b/i);
+			expect(text).not.toMatch(/lowercase/i);
 			expect(text).toMatch(/receipt|resume/i);
 		});
 

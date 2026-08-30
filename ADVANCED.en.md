@@ -373,6 +373,10 @@ To continue the same isolated session, pass the `sessionId`:
 
 The dispatch receipt contains the `taskId` (which is the session ID). The `[subagent-result]` envelope also carries the sessionId on the `- Session:` line — just reuse it. No need to wait for the subagent to finish; you already have the session ID from the receipt.
 
+> **The error states the rules**: an illegal `sessionId` (a slug, an uppercase UUID, a UUID v4, …) is rejected with a message that itself spells out both dispatch rules — omit `sessionId` to auto-generate a fresh UUID v7, and pass it only to resume the id from a previous dispatch receipt.
+
+> **Admission-threshold difference**: this plugin's lowercase-UUID-v7 requirement is its own internal discipline (a single canonical form for registry keys and session directories), not pi's admission gate. pi's own `assertValidSessionId` (`pi-coding-agent/dist/core/session-manager.js:15-19`) only requires the character set `[A-Za-z0-9._-]` with alphanumeric first/last characters; `dist/main.js:337-345` handles `--session-id` as "silently open and resume on an exact hit, otherwise print a Warning and create a new session with that id". So if you bypass this plugin's validation, the consequences are defined by pi's behavior (an exact hit silently resumes the existing session).
+
 ## Environment variables
 
 These variables are propagated into every subagent process automatically:
