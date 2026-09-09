@@ -360,7 +360,7 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 			return Array.from({ length: lineCount }, (_, i) => `Line ${i + 1}: This is test content.`).join("\n");
 		}
 
-		it("长文本应按 down 键后 render 输出发生变化（发生滚动）", async () => {
+		it("长文本应按 up 键后 render 输出发生变化（从末尾向上滚动）", async () => {
 			const { pi } = loadExtension();
 			const commandDef = pi._commandDefs.get("subagent-result");
 			expect(commandDef).toBeDefined();
@@ -382,9 +382,11 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 
 			// Capture initial render (no scroll)
 			const initialRender = getRendered();
+			// 打开即定位到末尾（结果优先）：末行立即可见
+			expect(initialRender).toContain("Line 200");
 
-			// Simulate pressing down arrow key
-			handleInput("\x1b[B"); // down arrow
+			// Simulate pressing up arrow key（从末尾向上滚 → 输出变化）
+			handleInput("\x1b[A"); // up arrow
 
 			// Re-render after scroll
 			const afterScrollRender = getRendered();
@@ -393,7 +395,7 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 			expect(afterScrollRender).not.toBe(initialRender);
 		});
 
-		it("连续按 down 后再按 up 应能回到顶部", async () => {
+		it("连续按 up 后再按 down 应能回到末尾", async () => {
 			const { pi } = loadExtension();
 			const commandDef = pi._commandDefs.get("subagent-result");
 			expect(commandDef).toBeDefined();
@@ -414,26 +416,27 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 			await commandDef.handler(taskId, ctx);
 
 			const initialRender = getRendered();
+			// 打开即定位到末尾
+			expect(initialRender).toContain("Line 200");
 
-			// Scroll down 10 times
+			// Scroll up 10 times from the end
+			for (let i = 0; i < 10; i++) {
+				handleInput("\x1b[A"); // up arrow
+			}
+			const scrolledUpRender = getRendered();
+			expect(scrolledUpRender).not.toBe(initialRender);
+
+			// Scroll down 10 times to return to the end
 			for (let i = 0; i < 10; i++) {
 				handleInput("\x1b[B"); // down arrow
 			}
 			const scrolledDownRender = getRendered();
 
-			// Scroll up 10 times to return to top
-			for (let i = 0; i < 10; i++) {
-				handleInput("\x1b[A"); // up arrow
-			}
-			const scrolledUpRender = getRendered();
-
-			// Should be back to initial state
-			expect(scrolledUpRender).toBe(initialRender);
-			// And different from scrolled-down state
-			expect(scrolledDownRender).not.toBe(initialRender);
+			// Should be back to the end state
+			expect(scrolledDownRender).toBe(initialRender);
 		});
 
-		it("PageDown 键应能翻页", async () => {
+		it("PageUp 键应能翻页（从末尾向上翻）", async () => {
 			const { pi } = loadExtension();
 			const commandDef = pi._commandDefs.get("subagent-result");
 			expect(commandDef).toBeDefined();
@@ -454,14 +457,16 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 			await commandDef.handler(taskId, ctx);
 
 			const initialRender = getRendered();
+			// 打开即定位到末尾
+			expect(initialRender).toContain("Line 200");
 
-			// Press PageDown
-			handleInput("\x1b[6~"); // PageDown
+			// Press PageUp（从末尾向上翻一页）
+			handleInput("\x1b[5~"); // PageUp
 
-			const afterPageDownRender = getRendered();
+			const afterPageUpRender = getRendered();
 
 			// Output should have changed (scrolled by a page)
-			expect(afterPageDownRender).not.toBe(initialRender);
+			expect(afterPageUpRender).not.toBe(initialRender);
 		});
 
 		it("Home 键应跳到开头", async () => {
@@ -485,22 +490,19 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 			await commandDef.handler(taskId, ctx);
 
 			const initialRender = getRendered();
+			// 打开即定位到末尾
+			expect(initialRender).toContain("Line 200");
 
-			// Scroll down first
-			for (let i = 0; i < 5; i++) {
-				handleInput("\x1b[B"); // down arrow
-			}
-			const scrolledRender = getRendered();
-
-			// Press Home to go back to top
+			// Press Home to jump to top
 			handleInput("\x1b[H"); // Home key
 
 			const afterHomeRender = getRendered();
 
-			// Should be back to initial state
-			expect(afterHomeRender).toBe(initialRender);
-			// And different from scrolled state
-			expect(scrolledRender).not.toBe(initialRender);
+			// Should be at the top now (first line visible, last line gone)
+			expect(afterHomeRender).toContain("Line 1:");
+			expect(afterHomeRender).not.toContain("Line 200");
+			// And different from the end state
+			expect(afterHomeRender).not.toBe(initialRender);
 		});
 
 		it("End 键应跳到底部", async () => {
@@ -524,6 +526,13 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 			await commandDef.handler(taskId, ctx);
 
 			const initialRender = getRendered();
+			// 打开即定位到末尾
+			expect(initialRender).toContain("Line 200");
+
+			// Press Home to jump to top first
+			handleInput("\x1b[H"); // Home key
+			const topRender = getRendered();
+			expect(topRender).toContain("Line 1:");
 
 			// Press End to jump to bottom
 			handleInput("\x1b[F"); // End key
@@ -531,7 +540,7 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 			const afterEndRender = getRendered();
 
 			// Output should have changed (scrolled to bottom)
-			expect(afterEndRender).not.toBe(initialRender);
+			expect(afterEndRender).not.toBe(topRender);
 			// Should contain the last line
 			expect(afterEndRender).toContain("Line 200");
 		});
@@ -608,15 +617,20 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 		it("空格键应向下翻页（替代 PageDown）", async () => {
 			const { getRendered, handleInput } = await openViewer("space-page-down");
 
-			// Arrange: 初始在顶部
+			// Arrange: 打开即定位到末尾
 			const initialRender = getRendered();
-			expect(initialRender).toContain("Line 1:");
+			expect(initialRender).toContain("Line 200");
+
+			// 先跳到顶部，再从顶部向下翻页
+			handleInput("\x1b[H"); // Home → 顶部
+			const topRender = getRendered();
+			expect(topRender).toContain("Line 1:");
 
 			// Act: 按空格（字符 " "）
 			handleInput(" ");
 
 			// Assert: 应发生向下翻页（输出变化）
-			expect(getRendered()).not.toBe(initialRender);
+			expect(getRendered()).not.toBe(topRender);
 		});
 
 		it("b 键应向上翻页（替代 PageUp）", async () => {
@@ -639,15 +653,21 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 		it("j 键应向下滚动一行（替代 ↓）", async () => {
 			const { getRendered, handleInput } = await openViewer("j-scroll-down");
 
-			// Arrange: 初始在顶部
+			// Arrange: 打开即定位到末尾
 			const initialRender = getRendered();
+			expect(initialRender).toContain("Line 200");
+
+			// 先跳到顶部
+			handleInput("\x1b[H"); // Home → 顶部
+			const topRender = getRendered();
+			expect(topRender).toContain("Line 1:");
 
 			// Act: 按 j
 			handleInput("j");
 			const afterJRender = getRendered();
 
 			// Assert: 应下移一行（输出变化）
-			expect(afterJRender).not.toBe(initialRender);
+			expect(afterJRender).not.toBe(topRender);
 
 			// 再按 j：继续逐行下移
 			handleInput("j");
@@ -657,7 +677,11 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 		it("k 键应向上滚动一行（替代 ↑）", async () => {
 			const { getRendered, handleInput } = await openViewer("k-scroll-up");
 
-			// Arrange: 先用 ↓ 向下滚两行
+			// Arrange: 打开即定位到末尾，先跳到顶部
+			expect(getRendered()).toContain("Line 200");
+			handleInput("\x1b[H"); // Home → 顶部
+
+			// 再用 ↓ 向下滚两行
 			handleInput("\x1b[B"); // ↓ 1 行
 			const oneDownRender = getRendered();
 			handleInput("\x1b[B"); // ↓ 2 行
@@ -687,9 +711,14 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 		it("G 键应跳到底部（替代 End）", async () => {
 			const { getRendered, handleInput } = await openViewer("G-jump-bottom");
 
-			// Arrange: 初始在顶部
+			// Arrange: 打开即定位到末尾
 			const initialRender = getRendered();
-			expect(initialRender).toContain("Line 1:");
+			expect(initialRender).toContain("Line 200");
+
+			// 先跳到顶部
+			handleInput("\x1b[H"); // Home → 顶部
+			const topRender = getRendered();
+			expect(topRender).toContain("Line 1:");
 
 			// Act: 按 G
 			handleInput("G");
@@ -697,7 +726,7 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 
 			// Assert: 应跳到底部（输出含最后一行）
 			expect(afterGRender).toContain("Line 200");
-			expect(afterGRender).not.toBe(initialRender);
+			expect(afterGRender).not.toBe(topRender);
 		});
 
 		it("空格在底部不再下移（与 PageDown 同 clamp 逻辑）", async () => {
@@ -720,21 +749,24 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 		it("g 在顶部不越界（clamp 到 0，不崩溃）", async () => {
 			const { getRendered, handleInput } = await openViewer("g-top-clamp");
 
-			// Arrange: 初始在顶部
+			// Arrange: 打开即定位到末尾，先跳到顶部
 			const initialRender = getRendered();
-			expect(initialRender).toContain("Line 1:");
+			expect(initialRender).toContain("Line 200");
+			handleInput("\x1b[H"); // Home → 顶部
+			const topRender = getRendered();
+			expect(topRender).toContain("Line 1:");
 
-			// 先向下滚动 3 行
+			// 再向下滚动 3 行
 			for (let i = 0; i < 3; i++) {
 				handleInput("\x1b[B"); // ↓
 			}
-			expect(getRendered()).not.toBe(initialRender);
+			expect(getRendered()).not.toBe(topRender);
 
 			// Act: 按 g 应回到顶部
 			handleInput("g");
 
 			// Assert: 恰好回到顶部（不越界、不偏移）
-			expect(getRendered()).toBe(initialRender);
+			expect(getRendered()).toBe(topRender);
 		});
 
 		// ============================================================
@@ -751,21 +783,28 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 			it("CSI-u 空格（\\x1b[32u）应向下翻页（替代 PageDown）", async () => {
 				const { getRendered, handleInput } = await openViewer("csi-u-space-page-down");
 
-				// Arrange: 初始在顶部
+				// Arrange: 打开即定位到末尾，先跳到顶部
 				const initialRender = getRendered();
-				expect(initialRender).toContain("Line 1:");
+				expect(initialRender).toContain("Line 200");
+				handleInput("\x1b[H"); // Home → 顶部
+				const topRender = getRendered();
+				expect(topRender).toContain("Line 1:");
 
 				// Act: Kitty 协议下按空格，终端发送 CSI-u 序列 \x1b[32u（空格 = 0x20 = 32）
 				handleInput("\x1b[32u");
 
-				// Assert: 应发生向下翻页（输出变化）——当前裸字符比较不响应 → 红
-				expect(getRendered()).not.toBe(initialRender);
+				// Assert: 应发生向下翻页（输出变化）
+				expect(getRendered()).not.toBe(topRender);
 			});
 
 			it("CSI-u k（\\x1b[107u）应向上滚动一行（替代 ↑）", async () => {
 				const { getRendered, handleInput } = await openViewer("csi-u-k-scroll-up");
 
-				// Arrange: 先用 ↓ 向下滚两行
+				// Arrange: 打开即定位到末尾，先跳到顶部
+				expect(getRendered()).toContain("Line 200");
+				handleInput("\x1b[H"); // Home → 顶部
+
+				// 再用 ↓ 向下滚两行
 				handleInput("\x1b[B"); // ↓ 1 行
 				const oneDownRender = getRendered();
 				handleInput("\x1b[B"); // ↓ 2 行
@@ -781,30 +820,37 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 			it("CSI-u j（\\x1b[106u）应向下滚动一行（替代 ↓）", async () => {
 				const { getRendered, handleInput } = await openViewer("csi-u-j-scroll-down");
 
-				// Arrange: 初始在顶部
+				// Arrange: 打开即定位到末尾，先跳到顶部
 				const initialRender = getRendered();
+				expect(initialRender).toContain("Line 200");
+				handleInput("\x1b[H"); // Home → 顶部
+				const topRender = getRendered();
+				expect(topRender).toContain("Line 1:");
 
 				// Act: Kitty 协议下按 j，终端发送 CSI-u 序列 \x1b[106u（j = 0x6a = 106）
 				handleInput("\x1b[106u");
 
-				// Assert: 应下移一行（输出变化）——当前不响应 → 红
-				expect(getRendered()).not.toBe(initialRender);
+				// Assert: 应下移一行（输出变化）
+				expect(getRendered()).not.toBe(topRender);
 			});
 
 			it("CSI-u shift+g（\\x1b[103:71;2u）应跳到底部（替代 End）", async () => {
 				const { getRendered, handleInput } = await openViewer("csi-u-shift-g-jump-bottom");
 
-				// Arrange: 初始在顶部
+				// Arrange: 打开即定位到末尾，先跳到顶部
 				const initialRender = getRendered();
-				expect(initialRender).toContain("Line 1:");
+				expect(initialRender).toContain("Line 200");
+				handleInput("\x1b[H"); // Home → 顶部
+				const topRender = getRendered();
+				expect(topRender).toContain("Line 1:");
 
 				// Act: Kitty 协议下按 shift+G，终端发送 CSI-u 序列 \x1b[103:71;2u
 				//（codepoint 103='g' : shifted 71='G' ; mod 2 = shift，flag 4 alternate keys）
 				handleInput("\x1b[103:71;2u");
 
-				// Assert: 应跳到底部（输出含最后一行）——当前不响应 → 红
+				// Assert: 应跳到底部（输出含最后一行）
 				expect(getRendered()).toContain("Line 200");
-				expect(getRendered()).not.toBe(initialRender);
+				expect(getRendered()).not.toBe(topRender);
 			});
 		});
 

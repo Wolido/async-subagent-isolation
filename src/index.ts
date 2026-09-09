@@ -3711,6 +3711,124 @@ const SubagentParams = Type.Object({
 	),
 });
 
+// ===== /subagent-result fullscreen viewer (overlay-mounted, self-sized) =====
+
+export interface ResultViewerOptions {
+	text: string;
+	taskId: string;
+	theme: any;
+	tui?: { requestRender?: () => void } | null;
+	onClose: () => void;
+}
+
+export interface ResultViewer {
+	component: any;
+	scrollToStart(): void;
+	scrollToEnd(): void;
+	scrollBy(lines: number): void;
+}
+
+/**
+ * Build the /subagent-result viewer: top border + title/key-hint row + a
+ * scrollable markdown window + bottom border. The caller mounts it as a
+ * fullscreen overlay ({ overlay: true, overlayOptions: { width: "100%",
+ * maxHeight: "100%", anchor: "top-left", margin: 0 } }).
+ *
+ * Why overlay + self-sized instead of a layout-node component: pi mounts a
+ * non-overlay ui.custom component into editorContainer — a plain Container
+ * (a layout LEAF), so the layout engine only ever calls its render(width)
+ * and never recurses into it; a VStack/ScrollView returned there never
+ * receives updateLayout and its bottom gets clipped by the dock allocation
+ * (the original bug). The overlay path composites the component over the
+ * whole screen without the dock, capping its height at maxHeight = terminal
+ * height, so sizing the component to exactly process.stdout.rows lines is
+ * safe: render(width) returns ≤ rows lines (long content: exactly rows =
+ * border 1 + title 1 + body rows-3 + border 1; short content shrinks).
+ *
+ * The viewer opens positioned at the END (the final answer is what the user
+ * opened it for). scrollOffset === null means "at end" (it re-anchors to the
+ * end if the terminal is resized). The markdown body's trailing blank lines
+ * (paddingY artifacts) are trimmed so the last body line is real content
+ * even in a tiny viewport. scrollBy's sign convention: positive scrolls down.
+ */
+export function createResultViewer(options: ResultViewerOptions): ResultViewer {
+	const { text, taskId, theme, tui, onClose } = options;
+	const border = new DynamicBorder((s: string) => theme.fg("accent", s));
+	// Title row doubles as the key-hint row. Truncated from the tail at render
+	// time so the front keys stay visible when the line exceeds the width.
+	const titleText =
+		theme.fg("accent", theme.bold(`Subagent Result: ${taskId}`)) +
+		theme.fg("dim", "  ↑↓/jk scroll · Space/b page · g/G top/bottom · Enter/Esc/q close");
+	const md = new Markdown(text.trim(), 1, 1, getMarkdownTheme());
+	// null = "at end" (the open state); re-anchors to the end on resize.
+	let scrollOffset: number | null = null;
+	let lastWidth = 80;
+	// Overhead: top border + title + bottom border = 3 rows.
+	const visibleHeight = () => Math.max(1, (process.stdout.rows || 24) - 3);
+	// Markdown body lines with trailing blanks trimmed (paddingY artifacts).
+	// md.render returns its CACHED array — copy before trimming.
+	const bodyLines = (width: number): string[] => {
+		const lines = [...md.render(width)];
+		while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
+		return lines;
+	};
+	const maxScroll = () => Math.max(0, bodyLines(lastWidth).length - visibleHeight());
+	const clampOffset = (offset: number) => Math.max(0, Math.min(maxScroll(), offset));
+	const effectiveOffset = () => (scrollOffset === null ? maxScroll() : clampOffset(scrollOffset));
+
+	const scrollToStart = () => {
+		scrollOffset = 0;
+	};
+	const scrollToEnd = () => {
+		scrollOffset = maxScroll();
+	};
+	const scrollBy = (lines: number) => {
+		scrollOffset = clampOffset(effectiveOffset() + lines);
+	};
+
+	const component = {
+		render: (width: number) => {
+			lastWidth = width;
+			const body = bodyLines(width);
+			const vh = visibleHeight();
+			const offset = effectiveOffset();
+			const window_ = body.slice(offset, offset + vh);
+			const title = new Text(truncateToWidth(titleText, width - 2), 1, 0);
+			return [
+				...border.render(width),
+				...title.render(width),
+				...window_,
+				...border.render(width),
+			];
+		},
+		invalidate: () => md.invalidate(),
+		handleInput: (data: string) => {
+			if (matchesKey(data, Key.enter) || matchesKey(data, Key.escape) || matchesKey(data, "q") || matchesKey(data, Key.shift("q"))) {
+				onClose();
+				return;
+			}
+			if (matchesKey(data, Key.up) || matchesKey(data, "k")) {
+				scrollBy(-1);
+			} else if (matchesKey(data, Key.down) || matchesKey(data, "j")) {
+				scrollBy(1);
+			} else if (matchesKey(data, Key.pageUp) || matchesKey(data, "b")) {
+				// 整页翻页：一页 = 当前可见行数
+				scrollBy(-visibleHeight());
+			} else if (matchesKey(data, Key.pageDown) || matchesKey(data, Key.space)) {
+				scrollBy(visibleHeight());
+			} else if (matchesKey(data, Key.home) || matchesKey(data, "g")) {
+				scrollToStart();
+			} else if (matchesKey(data, Key.end) || matchesKey(data, Key.shift("g"))) {
+				scrollToEnd();
+			} else {
+				return;
+			}
+			tui?.requestRender?.();
+		},
+	};
+	return { component, scrollToStart, scrollToEnd, scrollBy };
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "subagent",
@@ -4318,61 +4436,17 @@ export default function (pi: ExtensionAPI) {
 			// shown in a fullscreen read-only viewer (same pattern as the
 			// summarize example); outside the TUI fall back to console.log.
 			if (cmdCtx.hasUI && cmdCtx.mode === "tui") {
-				await cmdCtx.ui.custom((tui, theme, _kb, done) => {
-					const border = new DynamicBorder((s: string) => theme.fg("accent", s));
-					// Title row doubles as the key-hint row (the footer row was pushed
-					// off-screen). Truncated from the tail at render time so the front
-					// keys stay visible when the combined line exceeds the width.
-					const titleText =
-						theme.fg("accent", theme.bold(`Subagent Result: ${taskId}`)) +
-						theme.fg("dim", "  ↑↓/jk scroll · Space/b page · g/G top/bottom · Enter/Esc/q close");
-					const md = new Markdown(text.trim(), 1, 1, getMarkdownTheme());
-					// Scroll state: render(width) slices the fully-rendered markdown
-					// lines to the visible window; handleInput moves the window.
-					let scrollOffset = 0;
-					let lastWidth = 80;
-					// Overhead: top border + title + bottom border = 3 rows.
-					const visibleHeight = () => Math.max(1, (process.stdout.rows || 24) - 3);
-					const maxScroll = () => Math.max(0, md.render(lastWidth).length - visibleHeight());
-					return {
-						render: (width: number) => {
-							lastWidth = width;
-							scrollOffset = Math.min(scrollOffset, maxScroll());
-							const body = md.render(width).slice(scrollOffset, scrollOffset + visibleHeight());
-							const title = new Text(truncateToWidth(titleText, width - 2), 1, 0);
-							return [
-								...border.render(width),
-								...title.render(width),
-								...body,
-								...border.render(width),
-							];
-						},
-						invalidate: () => md.invalidate(),
-						handleInput: (data: string) => {
-							if (matchesKey(data, Key.enter) || matchesKey(data, Key.escape) || matchesKey(data, "q") || matchesKey(data, Key.shift("q"))) {
-								done(undefined);
-								return;
-							}
-							if (matchesKey(data, Key.up) || matchesKey(data, "k")) {
-								scrollOffset = Math.max(0, scrollOffset - 1);
-							} else if (matchesKey(data, Key.down) || matchesKey(data, "j")) {
-								scrollOffset = Math.min(maxScroll(), scrollOffset + 1);
-							} else if (matchesKey(data, Key.pageUp) || matchesKey(data, "b")) {
-								// 整页翻页：一页 = 当前可见行数
-								scrollOffset = Math.max(0, scrollOffset - visibleHeight());
-							} else if (matchesKey(data, Key.pageDown) || matchesKey(data, Key.space)) {
-								scrollOffset = Math.min(maxScroll(), scrollOffset + visibleHeight());
-							} else if (matchesKey(data, Key.home) || matchesKey(data, "g")) {
-								scrollOffset = 0;
-							} else if (matchesKey(data, Key.end) || matchesKey(data, Key.shift("g"))) {
-								scrollOffset = maxScroll();
-							} else {
-								return;
-							}
-							tui?.requestRender?.();
-						},
-					};
-				});
+				// Mounted as a fullscreen overlay, NOT the default editorContainer
+				// slot: the dock treats that slot as a layout leaf (render-only, no
+				// updateLayout) and clips its bottom; an overlay composites over the
+				// whole screen, capped at the terminal height by maxHeight.
+				await cmdCtx.ui.custom(
+					(tui, theme, _kb, done) => {
+						const viewer = createResultViewer({ text, taskId, theme, tui, onClose: () => done(undefined) });
+						return viewer.component;
+					},
+					{ overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", anchor: "top-left", margin: 0 } },
+				);
 			} else {
 				console.log(`\n[subagent-result] taskId: ${taskId}\n\n${text}\n`);
 			}
