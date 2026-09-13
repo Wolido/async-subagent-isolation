@@ -54,9 +54,14 @@ type ExecuteFn = (
 	ctx: unknown,
 ) => Promise<any>;
 
+/** Distinct fake pids so escalation-helper commands are attributable. */
+let nextFakePid = 400001;
+
 /**
  * Create a fake ChildProcess whose kill() is a no-op.
  * The process stays alive until manually terminated by the test.
+ * `pid`/`unref` mirror a real ChildProcess so the shutdown escalation
+ * helper can embed the pid in its command line and unref itself.
  */
 function createControllableProc() {
 	const proc = new EventEmitter() as any;
@@ -65,6 +70,8 @@ function createControllableProc() {
 	proc.kill = vi.fn(() => true); // no-op: does NOT auto-exit
 	proc.exitCode = null;
 	proc.signalCode = null;
+	proc.pid = nextFakePid++;
+	proc.unref = vi.fn();
 	return proc;
 }
 
@@ -703,9 +710,35 @@ describe("异步化改造 - TDD 红阶段", () => {
 
 			await shutdownHandlers![0]({ type: "session_shutdown" });
 
-			// 两个进程都应被 kill
+			// 两个进程都应被 kill（既有断言保留）
 			expect(proc1.kill).toHaveBeenCalled();
 			expect(proc2.kill).toHaveBeenCalled();
+
+			// 语义变更追溯（SIGTERM-first shutdown）：本用例原先所在套件钉住旧 B2
+			// 机制——shutdown 处理器立即 proc.kill("SIGKILL")（见
+			// async-regression.test.ts N1/N2 原始版本与 src/index.ts session_shutdown
+			// 的 "SIGKILL backstop" 注释块）。实测立即 SIGKILL 使子 pi 来不及回收
+			// 其 detached bash 工具进程，孙进程成孤儿。新语义：处理器只发 SIGTERM
+			//（经 abort 级联），SIGKILL 升级交给 detached 辅助进程在宽限期后补刀。
+			for (const proc of [proc1, proc2]) {
+				const killCalls = proc.kill.mock.calls.map((c: any[]) => c[0]);
+				expect(killCalls).toContain("SIGTERM");
+				expect(killCalls, "旧行为：shutdown 立即 SIGKILL —— 应改为只发 SIGTERM").not.toContain("SIGKILL");
+			}
+
+			// 每个存活任务各拉起一个升级辅助进程：detached + stdio ignore + unref，
+			// 命令含对应 proc 的 pid（契约见 test/shutdown-sigterm-escalation.test.ts 头注释）。
+			const spawnCalls = vi.mocked(spawn).mock.calls;
+			const spawnResults = vi.mocked(spawn).mock.results;
+			expect(spawnCalls.length, "shutdown 应为每个存活任务拉起一个升级辅助进程").toBe(4); // 2 dispatch + 2 helpers
+			const helperCmdline = (i: number) => `${spawnCalls[i][0]} ${(spawnCalls[i][1] as string[]).join(" ")}`;
+			expect(helperCmdline(2)).toContain(String(proc1.pid));
+			expect(helperCmdline(3)).toContain(String(proc2.pid));
+			for (const i of [2, 3]) {
+				expect((spawnCalls[i][2] as any).detached).toBe(true);
+				expect((spawnCalls[i][2] as any).stdio).toBe("ignore");
+				expect(spawnResults[i].value.unref).toHaveBeenCalled();
+			}
 		});
 	});
 

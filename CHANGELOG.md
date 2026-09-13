@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-09-12
+
+### Changed
+
+- `session_shutdown` no longer `SIGKILL`s in-flight subagent processes immediately when a session goes away (quit / session switch / reload). The handler now sends `SIGTERM` first, giving the child a chance to reap the processes it spawned (pi's bash tool processes run in detached process groups, so killing the child instantly used to orphan them), and a `detached: true` + `stdio: "ignore"` + `unref()` escalation helper sends the `SIGKILL` after a grace period — because the helper is a separate OS process, the SIGKILL escalation outlives the exiting main process, so a `SIGTERM`-ignoring child is still guaranteed to die. Already-cancelled tasks still inside their `SIGTERM` grace window are covered by the same backstop.
+
+### Added
+
+- `PI_SUBAGENT_SHUTDOWN_KILL_GRACE_MS`: injects the shutdown escalation grace period in milliseconds (default 5000ms, matching the in-process `SIGTERM → SIGKILL` escalation delay). Only a strict positive integer decimal literal up to the usable bound of 86400000ms (24h) is accepted; every other value — empty, non-numeric, negative, decimal, scientific notation, whitespace/sign/radix prefixes, or above the bound — falls back to the default. The 24h bound keeps the helper's `sleep` operand at or below 86400s, safely under the ~2^32s macOS `sleep` operand ceiling.
+
+### Fixed
+
+- A late-born subagent process (spawned after `session_shutdown` fired, during the prompt-temp-file window) now has its escalation helper armed synchronously in the same stack as the spawn callback. The previous one-macrotask deferral meant the helper was never armed at all when the main process hard-exited before that macrotask (pi's shutdown paths call `process.exit` directly), leaving a `SIGTERM`-ignoring late-born child orphaned.
+- Huge or out-of-range grace values no longer degrade into an instant `SIGKILL`: a value like `5000000000000` produced `sleep 5000000000`, which exceeds the macOS `sleep` operand limit and fails immediately, and very large values produced scientific-notation operands (`sleep 1e+19`) that fail the same way — in both cases the script fell through to `kill -9` at once, bypassing the grace entirely. Both shapes are rejected by the strict parser and fall back to the default.
+- The escalation helper now exits as soon as its target dies instead of sleeping out the full grace period: a background `sleep <grace>` acts as the deadline while a foreground loop re-checks `kill -0 <pid>` every 100ms, so a target that died at t=0.01s no longer leaves the helper lingering until t=grace. The pid-reuse exposure window is reduced from the whole grace period to the target's actual lifetime; the background sleeper is killed and reaped before the helper exits, leaving no residue.
+
+### Known limitations
+
+- If a child ignores `SIGTERM`, it is `SIGKILL`ed after the grace without a cleanup window, and its own detached grandchildren can still be orphaned — the backstop guarantees the direct child dies, not the whole tree.
+- The pid-reuse window is narrowed but not eliminated: the helper's final `kill -0 <pid>` re-check before `kill -9` cannot distinguish a still-running target from a dead one whose pid the OS has already recycled, so a SIGKILL could in theory land on an unrelated process that inherited the pid.
+
 ## [1.8.0] - 2026-08-30
 
 ### Changed

@@ -320,7 +320,7 @@ View the full final result of a background task. User-only, from the TUI:
 
 ### session_shutdown
 
-On quit, session switch, or reload, all in-flight subprocesses are killed and marked `killed_on_shutdown`. The corresponding `[subagent-result]` notification body says the task was terminated by session_shutdown — distinct from a user cancel. Note: on extension reload or process crash, in-flight tasks are not persisted or re-delivered. If the extension is dead when a task completes, the notification is lost (session log can still be inspected).
+On quit, session switch, or reload, every in-flight child process is sent `SIGTERM` first and marked `killed_on_shutdown`; a detached + unref'd escalation helper then sends `SIGKILL` after a grace period (default 5000ms, injectable via `PI_SUBAGENT_SHUTDOWN_KILL_GRACE_MS`, 24h upper bound — invalid or out-of-range values fall back to the default). The helper is a separate OS process, so the SIGKILL escalation outlives the exiting main process. SIGTERM goes first to give the child a chance to reap the processes it spawned (pi's bash tool processes run in detached process groups, so the previous immediate SIGKILL orphaned them). The corresponding `[subagent-result]` notification body says the task was terminated by session_shutdown — distinct from a user cancel. Note: on extension reload or process crash, in-flight tasks are not persisted or re-delivered. If the extension is dead when a task completes, the notification is lost (session log can still be inspected). Known limitation: if a child ignores `SIGTERM`, it is SIGKILLed after the grace without a cleanup window, and its own detached grandchildren can still be orphaned.
 
 ### TUI vs non-TUI summary
 

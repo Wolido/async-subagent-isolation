@@ -2451,6 +2451,90 @@ function parseEnvInt(raw: string | undefined, fallback: number): number {
 	return Number.isNaN(parsed) ? fallback : parsed;
 }
 
+/**
+ * Default grace period (ms) before the shutdown escalation helper sends
+ * SIGKILL. Matches the in-process SIGTERM→SIGKILL escalation delay inside
+ * runSingleAgent, so shutdown-time kills behave the same as cancel-time
+ * kills. Overridable via PI_SUBAGENT_SHUTDOWN_KILL_GRACE_MS (positive
+ * integer milliseconds) — used by tests to verify escalation quickly.
+ */
+const SHUTDOWN_KILL_GRACE_DEFAULT_MS = 5000;
+
+/**
+ * Usable upper bound for the shutdown escalation grace: 24 hours. Bounds the
+ * helper's `sleep` operand to <= 86400s, far below the ~2^32s macOS sleep
+ * operand ceiling — a larger operand makes sleep fail instantly, so the
+ * helper SIGKILLs immediately and the grace is bypassed entirely (measured
+ * defects: scientific-notation operands from huge values, and
+ * `sleep 5000000000` exceeding the platform limit).
+ */
+const MAX_SHUTDOWN_KILL_GRACE_MS = 86_400_000; // 24h
+
+/**
+ * Read the injectable shutdown escalation grace period. Only a strict
+ * positive integer decimal literal within the usable range is accepted:
+ * /^[0-9]+$/ and 0 < value <= MAX_SHUTDOWN_KILL_GRACE_MS (24h). Everything
+ * else — empty string, non-numeric, negative, decimal, scientific notation
+ * ("1e3"/"1e21"), surrounding whitespace, sign or radix prefixes
+ * ("+1500"/"0x10"), and values above the usable bound, including perfectly
+ * valid integers like "86400001" or "5000000000000" — falls back to the
+ * default. Strictness matters: parseInt would read "1e3"/"1.9" as 1ms, and
+ * huge values made String(ms/1000) emit scientific notation ("sleep 1e+19"
+ * fails instantly, bypassing the grace entirely — a measured defect).
+ * Number.isSafeInteger alone covers the machine-level safe-integer range
+ * (for x >= 0 it implies x <= Number.MAX_SAFE_INTEGER), so no separate
+ * MAX_SAFE_INTEGER clause is needed; the 24h bound is the operative check.
+ */
+function getShutdownKillGraceMs(): number {
+	const raw = process.env.PI_SUBAGENT_SHUTDOWN_KILL_GRACE_MS;
+	if (raw === undefined || !/^[0-9]+$/.test(raw)) return SHUTDOWN_KILL_GRACE_DEFAULT_MS;
+	const parsed = Number(raw);
+	return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= MAX_SHUTDOWN_KILL_GRACE_MS
+		? parsed
+		: SHUTDOWN_KILL_GRACE_DEFAULT_MS;
+}
+
+/**
+ * SIGKILL escalation backstop for session_shutdown, shared by the shutdown
+ * handler and the onProcSpawn late-proc path.
+ *
+ * An immediate SIGKILL here would kill the child pi before it can reap its
+ * own detached grandchildren (they'd be orphaned). An in-process SIGKILL
+ * timer instead dies with the exiting main process. So we spawn a detached,
+ * unref'd helper whose background `sleep <grace>` is the deadline timer while
+ * a foreground loop re-checks `kill -0 <pid>` every 100ms: the helper exits
+ * almost immediately when the target dies (an always-sleep helper would
+ * stretch the pid-reuse window across the whole grace — measured defect:
+ * target dead at t=0.01s, helper lingered until t=1.55s), and when the
+ * deadline expires one final liveness check guards the SIGKILL against pid
+ * reuse (narrows, but does NOT eliminate, that window). detached:true +
+ * stdio:"ignore" + unref() keep the helper from holding the event loop; the
+ * sleeper is our own child and is always killed+waited before exit, so the
+ * helper leaves nothing behind. Best-effort: any spawn failure is ignored
+ * because SIGTERM was already delivered by the abort cascade.
+ */
+function spawnShutdownEscalationHelper(proc: ChildProcess): void {
+	if (proc.exitCode !== null || proc.signalCode !== null) return;
+	const pid = proc.pid;
+	if (typeof pid !== "number") return;
+	const graceSeconds = String(getShutdownKillGraceMs() / 1000);
+	const script =
+		`sleep ${graceSeconds} 2>/dev/null & sleeper=$!; ` +
+		`while kill -0 ${pid} 2>/dev/null && kill -0 $sleeper 2>/dev/null; do sleep 0.1; done; ` +
+		`kill $sleeper 2>/dev/null; wait $sleeper 2>/dev/null; ` +
+		`if kill -0 ${pid} 2>/dev/null; then kill -9 ${pid} 2>/dev/null; fi; ` +
+		`exit 0`;
+	try {
+		const helper = spawn("sh", ["-c", script], { detached: true, stdio: "ignore" });
+		helper.on("error", () => {
+			/* best-effort backstop; nothing else to do */
+		});
+		helper.unref();
+	} catch {
+		/* ignore: escalation is best-effort, SIGTERM was already sent */
+	}
+}
+
 const UUID_V7_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 /** Validate an explicit sessionId. Returns an error message, or null when valid. */
@@ -3168,9 +3252,11 @@ export interface AsyncSubagentTask {
 	cancelReason?: string;
 	/**
 	 * Child process handle, set once runSingleAgent has spawned. Lets the
-	 * session_shutdown handler SIGKILL directly: on "quit" the main process
-	 * exits before the 5s SIGKILL-escalation timer inside runSingleAgent can
-	 * fire, so without this backstop a SIGTERM-ignoring child would be orphaned.
+	 * session_shutdown handler reach the live process directly: it sends
+	 * SIGTERM and arms the detached escalation helper (which sends SIGKILL
+	 * after the grace period), because on "quit" the main process exits before
+	 * the 5s SIGKILL-escalation timer inside runSingleAgent can fire and an
+	 * in-process backstop would die with it.
 	 */
 	proc?: ChildProcess;
 }
@@ -4117,14 +4203,20 @@ export default function (pi: ExtensionAPI) {
 					(proc) => {
 						taskRecord.proc = proc;
 						// Shutdown may have fired while the prompt temp file was being
-						// written (no proc handle existed yet); apply the session_shutdown
-						// SIGKILL backstop now.
+						// written (no proc handle existed yet); apply the same
+						// SIGTERM-first escalation backstop now — the abort cascade's
+						// killProc would only see this late-born proc moments later, and
+						// its in-process SIGKILL timer dies with the exiting main process.
 						if (taskRecord.status === "killed_on_shutdown") {
 							try {
-								proc.kill("SIGKILL");
+								proc.kill("SIGTERM");
 							} catch {
 								/* ignore ESRCH */
 							}
+							// Arm synchronously in the same stack: pi's shutdown paths exit
+							// the process directly, so any macrotask deferral could leave a
+							// SIGTERM-ignoring late-born proc without its SIGKILL backstop.
+							spawnShutdownEscalationHelper(proc);
 						}
 					},
 				).then(
@@ -4490,20 +4582,25 @@ export default function (pi: ExtensionAPI) {
 				task.status = "killed_on_shutdown";
 				task.abortController.abort();
 			}
-			// SIGKILL backstop: abort() only sends SIGTERM, and the 5s SIGKILL
-			// escalation timer inside runSingleAgent never fires when the main
-			// process quits right after shutdown — a SIGTERM-ignoring child would
-			// be orphaned. The session is going away either way, so skip the
-			// grace period and SIGKILL any still-alive process immediately —
-			// including already-cancelled tasks still inside their SIGTERM grace
-			// window.
+			// Escalation backstop: the abort cascade above only reaches procs whose
+			// runSingleAgent registered killProc; hand-registered tasks and the
+			// pre-spawn window still need SIGTERM delivered explicitly here. The
+			// in-process 5s SIGKILL escalation timer inside runSingleAgent never
+			// fires when the main process quits right after shutdown — a
+			// SIGTERM-ignoring child would be orphaned. An immediate SIGKILL here
+			// is equally wrong: the child pi would die before reaping its own
+			// detached grandchildren. So: SIGTERM first, then a detached helper
+			// that SIGKILLs after the grace period and therefore outlives this
+			// exiting process — including for already-cancelled tasks still
+			// inside their SIGTERM grace window.
 			const proc = task.proc;
 			if (proc && proc.exitCode === null && proc.signalCode === null) {
 				try {
-					proc.kill("SIGKILL");
+					proc.kill("SIGTERM");
 				} catch {
 					/* ignore ESRCH */
 				}
+				spawnShutdownEscalationHelper(proc);
 			}
 		}
 	});

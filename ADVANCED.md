@@ -320,7 +320,7 @@ widget 行中的 taskId 可直接复制，用于 `/subagent-result` 查看结果
 
 ### session_shutdown
 
-退出、切会话或 reload 时,自动 kill 所有在飞子进程并标记 `killed_on_shutdown`。对应的 `[subagent-result]` 通知正文为 `The task was terminated because the session shut down (session_shutdown).`与用户主动取消的正文不同。注意:扩展 reload 或进程崩溃时,在飞任务不落盘、不补投;任务完成后若扩展已死,通知丢失(可查 session 记录)。
+退出、切会话或 reload 时,先对所有在飞子进程发送 `SIGTERM` 并标记 `killed_on_shutdown`,再由一个 detached + unref 的辅助进程在宽限期后补 `SIGKILL`(宽限期默认 5000ms,可用 `PI_SUBAGENT_SHUTDOWN_KILL_GRACE_MS` 注入,上界 24 小时,非法或越界值回退默认)——辅助进程是独立 OS 进程,补刀活得过正在退出的主进程。先 `SIGTERM` 是为了给子进程回收它自己拉起的进程的机会(pi 的 bash 工具进程是 detached 独立进程组,此前的立即 `SIGKILL` 会把它们变成孤儿继续运行)。对应的 `[subagent-result]` 通知正文为 `The task was terminated because the session shut down (session_shutdown).`与用户主动取消的正文不同。注意:扩展 reload 或进程崩溃时,在飞任务不落盘、不补投;任务完成后若扩展已死,通知丢失(可查 session 记录)。已知边界:若子进程忽略 `SIGTERM`,宽限期后它会被 `SIGKILL` 但拿不到清理窗口,其 detached 孙进程仍可能成为孤儿。
 
 ### TUI / 非 TUI 差异总结
 

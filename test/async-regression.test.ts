@@ -46,8 +46,13 @@ type ExecuteFn = (
 	ctx: unknown,
 ) => Promise<any>;
 
+/** Distinct fake pids so escalation-helper commands are attributable. */
+let nextFakePid = 400001;
+
 /**
  * Create a fake ChildProcess whose kill() is a no-op.
+ * `pid`/`unref` mirror a real ChildProcess so the shutdown escalation
+ * helper can embed the pid in its command line and unref itself.
  */
 function createControllableProc() {
 	const proc = new EventEmitter() as any;
@@ -56,6 +61,8 @@ function createControllableProc() {
 	proc.kill = vi.fn(() => true);
 	proc.exitCode = null;
 	proc.signalCode = null;
+	proc.pid = nextFakePid++;
+	proc.unref = vi.fn();
 	return proc;
 }
 
@@ -1006,10 +1013,17 @@ describe("异步化回归测试 & B1 红阶段", () => {
 	});
 
 	// ================================================================
-	// N1: 孤儿窗口防护——cancelled 任务在飞时 shutdown 补 SIGKILL
+	// N1: 孤儿窗口防护——cancelled 任务在飞时 shutdown 的升级兜底
 	// ================================================================
-	describe("N1: 孤儿窗口——cancelled 任务在飞时 shutdown 应补 SIGKILL", () => {
-		it("should SIGKILL a cancelled task's still-alive proc on session_shutdown", async () => {
+	// 语义变更追溯（SIGTERM-first shutdown）：本 describe 原先钉住 B2 旧机制——
+	// shutdown 处理器对 cancelled 任务仍存活的 proc 立即 proc.kill("SIGKILL")
+	//（原用例名 "should SIGKILL a cancelled task's still-alive proc on
+	// session_shutdown"）。实测（N=5/5）立即 SIGKILL 把子 pi 瞬间打死，其
+	// detached bash 工具进程（孙进程）成孤儿。按新语义改写：shutdown 只发
+	// SIGTERM，SIGKILL 升级由 detached + unref 的辅助进程在宽限期后补刀
+	//（真实进程验证见 test/shutdown-real-process.test.ts B4）。
+	describe("N1: 孤儿窗口——cancelled 任务在飞时 shutdown 应拉起升级兜底", () => {
+		it("should arm a detached escalation helper instead of directly SIGKILLing a cancelled task's still-alive proc on session_shutdown", async () => {
 			const { pi, executeTool } = setupExtension();
 			const ctx = createMockTuiCtx(defaultCwd);
 
@@ -1042,18 +1056,33 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			const shutdownHandlers = pi._eventHandlers.get("session_shutdown");
 			await shutdownHandlers![0]({ type: "session_shutdown" });
 
-			// The shutdown handler must SIGKILL the still-alive proc even though
-			// the task was already cancelled (orphan-process protection).
+			// 新语义：处理器自身不得直接 SIGKILL（旧行为在此立即 SIGKILL）。
 			const killCalls = proc.kill.mock.calls.map((c: any[]) => c[0]);
-			expect(killCalls).toContain("SIGKILL");
+			expect(killCalls, "旧行为：shutdown 立即 SIGKILL —— 应改为只发 SIGTERM").not.toContain("SIGKILL");
+
+			// 升级兜底：为仍存活的 proc 拉起 detached + stdio ignore + unref 的
+			// 辅助进程，其命令包含该 proc 的 pid（孤儿防护的职责由它接管）。
+			const calls = vi.mocked(spawn).mock.calls;
+			expect(calls.length, "shutdown 应拉起一个升级辅助进程").toBe(2);
+			const helperCmdline = `${calls[1][0]} ${(calls[1][1] as string[]).join(" ")}`;
+			expect(helperCmdline).toContain(String(proc.pid));
+			expect((calls[1][2] as any).detached).toBe(true);
+			expect((calls[1][2] as any).stdio).toBe("ignore");
+			expect(allProcs[1].unref).toHaveBeenCalled();
 		});
 	});
 
 	// ================================================================
-	// N2: B2 机制回归测试——shutdown 同步 SIGKILL + pre-spawn 窗口
+	// N2: shutdown 升级兜底机制（SIGTERM-first）与 pre-spawn 窗口
 	// ================================================================
-	describe("N2: B2 机制——shutdown 同步 SIGKILL 与 pre-spawn 窗口", () => {
-		it("should synchronously SIGKILL running task procs during shutdown handler", async () => {
+	// 语义变更追溯：本 describe 原先钉住 B2 旧机制的两个用例——
+	// "should synchronously SIGKILL running task procs during shutdown handler"
+	// 与 "should SIGKILL proc spawned after shutdown via onProcSpawn backstop
+	// (pre-spawn window)"（src 侧对应 session_shutdown 处理器的立即 SIGKILL
+	// 与 onProcSpawn 回调里的 SIGKILL backstop）。按新语义改写：直接 SIGKILL
+	// 改为「发 SIGTERM + 拉起 detached 升级辅助进程」，pre-spawn 窗口同理。
+	describe("N2: shutdown 升级兜底（SIGTERM-first）与 pre-spawn 窗口", () => {
+		it("should synchronously arm a detached escalation helper without directly SIGKILLing running task procs", async () => {
 			const { pi, executeTool } = setupExtension();
 			const ctx = createMockTuiCtx(defaultCwd);
 
@@ -1076,24 +1105,40 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			const shutdownHandlers = pi._eventHandlers.get("session_shutdown");
 			expect(shutdownHandlers).toBeDefined();
 
-			// Before calling the handler, SIGKILL should NOT have been called
+			// Before calling the handler, no kill should have happened yet
 			expect(proc.kill).not.toHaveBeenCalled();
 
-			// Call the handler
-			await shutdownHandlers![0]({ type: "session_shutdown" });
+			// Act: the handler must resolve synchronously — it must NOT wait for
+			// the grace period (fake timers must not need to advance).
+			const handlerPromise = shutdownHandlers![0]({ type: "session_shutdown" });
+			const { timedOut } = await raceWithTimeout(handlerPromise, 500);
+			expect(timedOut, "shutdown 处理器不得 await 宽限期，不得拖住主进程退出").toBe(false);
 
-			// After the handler, SIGKILL should have been called synchronously
-			expect(proc.kill).toHaveBeenCalledWith("SIGKILL");
+			// 新语义：SIGTERM 已发（abort 级联）；处理器不直接 SIGKILL。
+			expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
+			expect(proc.kill, "旧行为：shutdown 立即 SIGKILL —— 应改为只发 SIGTERM").not.toHaveBeenCalledWith("SIGKILL");
+
+			// 升级辅助进程：detached + stdio ignore + unref，命令含 pid。
+			const calls = vi.mocked(spawn).mock.calls;
+			expect(calls.length, "shutdown 应拉起一个升级辅助进程").toBe(2);
+			const helperCmdline = `${calls[1][0]} ${(calls[1][1] as string[]).join(" ")}`;
+			expect(helperCmdline).toContain(String(proc.pid));
+			expect((calls[1][2] as any).detached).toBe(true);
+			expect((calls[1][2] as any).stdio).toBe("ignore");
+			expect(allProcs[1].unref).toHaveBeenCalled();
 		});
 
-		it("should SIGKILL proc spawned after shutdown via onProcSpawn backstop (pre-spawn window)", async () => {
-			// This test verifies the B2 mechanism: when shutdown fires before
+		it("should arm a detached escalation helper for a proc spawned after shutdown via onProcSpawn backstop (pre-spawn window)", async () => {
+			// This test verifies the pre-spawn window: when shutdown fires before
 			// the proc is spawned (during writePromptToTempFile), the onProcSpawn
-			// callback catches the late-born proc and SIGKILLs it.
+			// callback catches the late-born proc.
+			//
+			// 语义变更追溯：旧机制下该回调直接 SIGKILL 迟到 proc；新语义改为发
+			// SIGTERM（与已触发的 abort 级联一致）并拉起 detached 升级辅助进程。
 			//
 			// We mock writePromptToTempFile to pause, then trigger shutdown,
 			// then resume the write, allowing spawn to happen. The onProcSpawn
-			// callback should see status === "killed_on_shutdown" and SIGKILL.
+			// callback should see status === "killed_on_shutdown".
 
 			const { pi, executeTool } = setupExtension();
 			const ctx = createMockTuiCtx(defaultCwd);
@@ -1121,6 +1166,7 @@ describe("异步化回归测试 & B1 红阶段", () => {
 				return originalMkdtemp(template);
 			}) as any);
 
+			let tmpDir: string | null = null;
 			try {
 				// Dispatch with the prompter agent → runSingleAgent starts,
 				// hits writePromptToTempFile → mkdtemp is called and paused
@@ -1148,21 +1194,141 @@ describe("异步化回归测试 & B1 红阶段", () => {
 				// Task status should now be "killed_on_shutdown"
 				expect(taskRegistry.get("019ffdd3-3eb5-733d-b481-a53e5292bd35")!.status).toBe("killed_on_shutdown");
 
-				// No proc yet — shutdown couldn't SIGKILL what doesn't exist
-				expect(allProcs.length).toBe(0);
+				// No proc yet — shutdown couldn't arm what doesn't exist.
+				// 定位纪律：按 spawn 调用数判定"尚未 spawn"，不让子进程与辅助进程混计。
+				expect(vi.mocked(spawn).mock.calls.length).toBe(0);
 
 				// Now resume the temp file write → spawn happens → onProcSpawn fires
-				const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "n2-resume-"));
+				tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "n2-resume-"));
 				resumeMkdtemp(tmpDir);
 
-				// Let the async chain proceed through writeFile → spawn → onProcSpawn
-				await vi.waitFor(() => expect(allProcs.length).toBe(1), { timeout: 2000 });
+				// 定位纪律（重要，第七轮复审修正）：子进程与升级辅助进程必须按 spawn
+				// 调用下标/参数区分，不得用 allProcs.length 计数断言"恰好一个进程"。
+				// 旧断言 vi.waitFor(allProcs.length === 1) 要求"辅助进程比子进程晚至少
+				// 一个 macrotask 出现"，曾迫使生产代码把 onProcSpawn 的辅助进程拉起
+				// 延后（setTimeout+queueMicrotask）——若主进程在该 macrotask 之前硬
+				// 退出（pi 的 shutdown/emergencyTerminalExit 均直接 process.exit），
+				// 迟到的子进程只拿到 SIGTERM、SIGKILL 升级永不触发。改为按下标定位后，
+				// 生产同步拉起辅助进程测试也不变红，"延后"不再是任何断言的前提。
+				// 第 0 次 spawn = 派发子进程；第 1 次 spawn = 升级辅助进程。
+				await vi.waitFor(
+					() => expect(vi.mocked(spawn).mock.calls.length).toBeGreaterThanOrEqual(1),
+					{ timeout: 2000 },
+				);
 
-				// The onProcSpawn callback should have seen "killed_on_shutdown"
-				// and sent SIGKILL to the newly spawned proc
+				// 新语义：onProcSpawn backstop 给迟到的 proc 发 SIGTERM 机会（abort
+				// 级联也会补发 SIGTERM），不得立即 SIGKILL（旧行为，追溯见本 describe 头注）。
 				const proc = allProcs[0];
-				expect(proc.kill).toHaveBeenCalledWith("SIGKILL");
+				expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
+				expect(proc.kill, "旧行为：onProcSpawn backstop 立即 SIGKILL —— 应改为 SIGTERM + 升级兜底").not.toHaveBeenCalledWith("SIGKILL");
+
+				// 辅助进程无论同步拉起还是延后一个 macrotask，最终都必须出现：
+				// 等第 1 次 spawn（辅助进程）到位后再按下标断言其形态。
+				await vi.waitFor(
+					() => expect(vi.mocked(spawn).mock.calls.length).toBeGreaterThanOrEqual(2),
+					{ timeout: 2000 },
+				);
+				const calls = vi.mocked(spawn).mock.calls;
+				expect(calls[1][0]).toBe("sh");
+				const helperCmdline = `${calls[1][0]} ${(calls[1][1] as string[]).join(" ")}`;
+				expect(helperCmdline).toContain(String(proc.pid));
+				expect((calls[1][2] as any).detached).toBe(true);
+				expect((calls[1][2] as any).stdio).toBe("ignore");
+				expect(allProcs[1].unref).toHaveBeenCalled();
 			} finally {
+				// 第七轮卫生修正：n2-resume 临时目录此前从不清理（每次跑攒一个）。
+				if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+				vi.restoreAllMocks();
+			}
+		});
+
+		it("should arm the escalation helper synchronously in the same stack as the onProcSpawn callback (no macrotask deferral)", async () => {
+			// 为什么钉这条（第七轮补 RED）：onProcSpawn 迟到进程兜底曾把辅助进程
+			// 拉起延后一个 macrotask（setTimeout(0)+queueMicrotask）——若主进程在
+			// 该 macrotask 之前硬退出（pi 的 shutdown/emergencyTerminalExit 均为直接
+			// process.exit），迟到子进程只拿到 SIGTERM、辅助进程永不武装，忽略
+			// SIGTERM 的迟到子进程成为孤儿。该延后正是此前逃过全部测试的隐藏缺陷。
+			// 上轮把断言改为"按 spawn 调用下标定位"使同步拉起可行，但同时让"回归
+			// 到延后"不可证伪；本条用例把"必须在同一同步栈内武装"钉回可证伪。
+			//
+			// 机制：子进程 spawn 返回后，runSingleAgent 在同一同步栈内继续执行
+			// onProcSpawn 回调。我们在 spawn mock 里对第一次调用排一个微任务——它
+			// 在当前同步栈结束后、任何 macrotask（setTimeout(0)）之前运行；此刻
+			// 辅助进程的 spawn 必须已经发生（调用数 = 子进程 + 辅助进程 = 2）。
+			// 若实现延后拉起，此刻调用数仍为 1 → 本用例 RED。
+			const { pi, executeTool } = setupExtension();
+			const ctx = createMockTuiCtx(defaultCwd);
+
+			// Create an agent with a non-empty systemPrompt to trigger writePromptToTempFile
+			fs.writeFileSync(
+				path.join(defaultCwd, ".pi", "agents", "prompter.md"),
+				`---\nname: prompter\ndescription: Agent with prompt\n---\nYou are a helpful assistant.`,
+				"utf-8",
+			);
+
+			// 记录器：子进程 spawn 后的第一个微任务点观测到的 spawn 调用数。
+			let recorderArmed = false;
+			let observedCallsAtMicrotask: number | null = null;
+			vi.mocked(spawn).mockImplementation((() => {
+				const proc = createControllableProc();
+				allProcs.push(proc);
+				if (!recorderArmed) {
+					recorderArmed = true;
+					queueMicrotask(() => {
+						observedCallsAtMicrotask = vi.mocked(spawn).mock.calls.length;
+					});
+				}
+				return proc;
+			}) as any);
+
+			// Mock fs.promises.mkdtemp to pause until we explicitly resolve
+			let resumeMkdtemp!: (dir: string) => void;
+			const mkdtempPause = new Promise<string>((resolve) => {
+				resumeMkdtemp = resolve;
+			});
+			const originalMkdtemp = fs.promises.mkdtemp.bind(fs.promises);
+			let mkdtempCalled = false;
+			vi.spyOn(fs.promises, "mkdtemp").mockImplementation(((...args: any[]) => {
+				const template = args[0] as string;
+				if (template.includes("pi-subagent-")) {
+					mkdtempCalled = true;
+					return mkdtempPause;
+				}
+				return originalMkdtemp(template);
+			}) as any);
+
+			let tmpDir: string | null = null;
+			try {
+				// Dispatch → runSingleAgent hits writePromptToTempFile → mkdtemp paused
+				const executePromise = executeTool(
+					"call-1",
+					{ agent: "prompter", task: "test task", sessionId: "019ffdd3-3eb5-733d-b481-a53e5292bd36" },
+					undefined,
+					undefined,
+					ctx,
+				);
+				await raceWithTimeout(executePromise, 200);
+				await vi.waitFor(() => expect(mkdtempCalled).toBe(true), { timeout: 1000 });
+
+				// Shutdown fires while in the pre-spawn window (no proc yet)
+				const shutdownHandlers = pi._eventHandlers.get("session_shutdown");
+				await shutdownHandlers![0]({ type: "session_shutdown" });
+				expect(taskRegistry.get("019ffdd3-3eb5-733d-b481-a53e5292bd36")!.status).toBe("killed_on_shutdown");
+
+				// Resume → writeFile（真实异步 I/O）→ spawn → onProcSpawn
+				tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "n2-resume-"));
+				resumeMkdtemp(tmpDir);
+				await vi.waitFor(() => expect(allProcs.length).toBeGreaterThanOrEqual(1), { timeout: 2000 });
+
+				// 核心断言（同步纪律）：子进程 spawn 同一同步栈结束后的第一个微任务点，
+				// 辅助进程必须已经武装（spawn 调用数 = 2）。不 await 额外 macrotask、
+				// 不用 vi.waitFor 等辅助进程——等了就测不出"延后"。
+				expect(
+					observedCallsAtMicrotask,
+					"辅助进程必须在 onProcSpawn 同一同步栈内拉起；延后一个 macrotask 会让「主进程硬退出早于 macrotask」时辅助进程永不武装",
+				).toBe(2);
+			} finally {
+				if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
 				vi.restoreAllMocks();
 			}
 		});

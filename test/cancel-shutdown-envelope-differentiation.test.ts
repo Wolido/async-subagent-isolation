@@ -46,8 +46,13 @@ type ExecuteFn = (
 	ctx: unknown,
 ) => Promise<any>;
 
+/** Distinct fake pids so escalation-helper commands are attributable. */
+let nextFakePid = 400001;
+
 /**
  * Create a fake ChildProcess whose kill() is a no-op.
+ * `pid`/`unref` mirror a real ChildProcess so the shutdown escalation
+ * helper can embed the pid in its command line and unref itself.
  */
 function createControllableProc() {
 	const proc = new EventEmitter() as any;
@@ -56,6 +61,8 @@ function createControllableProc() {
 	proc.kill = vi.fn(() => true);
 	proc.exitCode = null;
 	proc.signalCode = null;
+	proc.pid = nextFakePid++;
+	proc.unref = vi.fn();
 	return proc;
 }
 
