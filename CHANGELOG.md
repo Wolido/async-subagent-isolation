@@ -28,6 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - If a child ignores `SIGTERM`, it is `SIGKILL`ed after the grace without a cleanup window, and its own detached grandchildren can still be orphaned — the backstop guarantees the direct child dies, not the whole tree.
 - The pid-reuse window is narrowed but not eliminated: the helper's final `kill -0 <pid>` re-check before `kill -9` cannot distinguish a still-running target from a dead one whose pid the OS has already recycled, so a SIGKILL could in theory land on an unrelated process that inherited the pid.
 
+## [1.9.0] - 2026-09-09
+
+### Changed
+
+- `/subagent-result` now opens positioned at the end of the result rather than at the top, and trailing blank lines in the rendered markdown are trimmed; the legacy scroll tests were updated to this open-at-end semantics.
+- The four `@earendil-works/*` development dependencies (`pi-agent-core`, `pi-ai`, `pi-coding-agent`, `pi-tui`) are pinned from `*` to `^0.85.1`. No runtime dependency was added or removed — the large `package-lock.json` churn is the re-resolved transitive tree that follows from pinning those devDependencies.
+
+### Fixed
+
+- `/subagent-result` no longer clips the bottom of long results, which used to make the final answer unreachable even when scrolled to the end. pi mounts a non-overlay `ui.custom` component into `editorContainer`, a plain `Container` (a layout leaf): the fullscreen layout engine only calls its `render(width)` and never feeds a nested `ScrollView`, so the viewer's bottom rows were cut off by the dock allocation. The viewer is now mounted as an overlay (`width`/`maxHeight` 100%, top-left, no margin) and sized to `process.stdout.rows`. Adds `test/result-viewer-layout.test.ts`.
+
 ## [1.8.0] - 2026-08-30
 
 ### Changed
