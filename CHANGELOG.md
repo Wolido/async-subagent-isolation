@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.1] - 2026-09-14
+
+### Changed
+
+- The `subagent` tool's model-facing text uses semicolons, commas, and parentheses in place of em dashes: the tool description, every `promptGuidelines` entry, and the parameter descriptions. `package.json` moves to 1.10.1; no behavior change.
+
 ## [1.10.0] - 2026-09-12
 
 ### Changed
