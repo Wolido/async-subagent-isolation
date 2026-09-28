@@ -270,7 +270,7 @@ Other tasks in flight when this task ended: 1
 
 widget 行的耗时是"存活至今"的实时时钟（`formatElapsed`，仅 `MM:SS`，可溢出 99 分钟）；信封与通知卡片的耗时是终态运行时长（`formatDuration`）。两者并存，语义不同。
 
-widget 行中的 taskId 可直接复制，用于 `/subagent-result` 查看结果或 `/subagent-cancel` 取消任务。
+widget 行中的 taskId 可直接复制，用于 `/subagent-watch` 实时观察（仅限运行中）、`/subagent-result` 查看结果或 `/subagent-cancel` 取消任务。
 
 ### 取消后台任务
 
@@ -304,6 +304,21 @@ widget 行中的 taskId 可直接复制，用于 `/subagent-result` 查看结果
 
 **禁止**因等待时间长而取消——后台子 agent 本就预期长时间运行。取消的依据是"这个任务不该继续"，不是"等太久了"。
 
+### /subagent-watch
+
+实时观察运行中的后台任务输出。仅限用户在 TUI 中使用：
+
+```
+/subagent-watch <taskId>
+```
+
+- 任务不在运行（已结束、不存在、或状态非 `running`） → 拒绝打开查看器并提示 `Task not running — /subagent-watch shows running tasks only: <taskId>. Use /subagent-result for finished tasks.`
+- 无参数 → 弹出运行中任务的交互选择列表（只含运行中任务），Enter 打开所选任务。
+- 打开后为全屏实时查看器：每 1000ms 刷新；正文为 `Original task` 节（主 agent 下发的任务原文，逐字）与 `Conversation log` 节——已完成条目（`[assistant]` / `→ 工具` / `← 工具结果`，与 `/subagent-result` 同格式）加进行中的流式文本（`[streaming]`，来自运行进程的内存缓冲，不落盘）；按键与 `/subagent-result` 一致（`↑↓`/`jk`、`Space`/`b`、`g`/`G`、`Enter`/`Esc`/`q`），默认锚定末尾。
+- 观看中任务结束 → 停止刷新并追加固定底行 `Task finished — live updates stopped. Final result: /subagent-result <taskId>`，查看器保持打开。
+- 非 TUI 模式（print/json） → 不打开查看器，输出一行 `[subagent-watch] taskId: <taskId> — live view requires TUI mode.`
+- 数据来自运行进程的内存态（消息数组与流式缓冲），不依赖子进程落盘节奏。
+
 ### /subagent-result
 
 查看某后台任务的完整返回。仅限用户在 TUI 中使用：
@@ -330,6 +345,7 @@ widget 行中的 taskId 可直接复制，用于 `/subagent-result` 查看结果
 | 结果投递 | `[subagent-result]` 系统通知 | 直接内联在返回值中 |
 | /subagent-cancel | 可用 | 不可用（无 TUI 命令系统） |
 | /subagent-cancel-all | 可用 | 不可用（无 TUI 命令系统） |
+| /subagent-watch | 可用 | 不可用（无 TUI 命令系统） |
 | 并行派发 | 支持（无依赖任务可同时派出） | 不支持（每次调用阻塞） |
 
 ## 手动调用

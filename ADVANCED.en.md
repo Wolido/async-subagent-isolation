@@ -270,7 +270,7 @@ While subagents run, a progress widget appears above the TUI editor, listing all
 
 The widget's time is a live "alive since" clock (`formatElapsed`, `MM:SS` only, overflowing past 99 minutes); the envelope and notification card show the final run duration (`formatDuration`). The two coexist with different semantics.
 
-The taskId in the widget row can be copied for `/subagent-result` (view full result) or `/subagent-cancel` (cancel the task).
+The taskId in the widget row can be copied for `/subagent-watch` (watch a running task live), `/subagent-result` (view full result) or `/subagent-cancel` (cancel the task).
 
 ### Cancelling background tasks
 
@@ -304,6 +304,21 @@ The main agent can call the `subagent` tool with `action="cancel"` (parameter `t
 
 **Do NOT** cancel merely because the task is taking a long time — background subagents are expected to run long. The criterion for cancellation is "this task should not continue", not "it's been a while".
 
+### /subagent-watch
+
+Watch a running background task's output live. User-only, from the TUI:
+
+```
+/subagent-watch <taskId>
+```
+
+- Task not running (finished, unknown, or status other than `running`) → the viewer is not opened; the command notifies `Task not running — /subagent-watch shows running tasks only: <taskId>. Use /subagent-result for finished tasks.`
+- Without arguments → an interactive picker lists running tasks only; Enter opens the selected one.
+- The opened viewer is a full-screen live view refreshed every 1000ms: the body shows the `Original task` section (the task as dispatched by the main agent, verbatim) and the `Conversation log` section — completed entries (`[assistant]` / `→ tool` / `← tool result`, same shape as `/subagent-result`) plus the in-progress stream (`[streaming]`, from the running process's in-memory buffer, never written to disk); keys match `/subagent-result` (`↑↓`/`jk`, `Space`/`b`, `g`/`G`, `Enter`/`Esc`/`q`), anchored to the end.
+- When the watched task ends → refreshing stops and a fixed bottom line `Task finished — live updates stopped. Final result: /subagent-result <taskId>` is appended; the viewer stays open.
+- Non-TUI modes (print/json) → no viewer is opened; one line is printed: `[subagent-watch] taskId: <taskId> — live view requires TUI mode.`
+- The data comes from the running process's in-memory state (message array and streaming buffer); the refresh cadence does not depend on the child's disk-flush timing.
+
 ### /subagent-result
 
 View the full final result of a background task. User-only, from the TUI:
@@ -330,6 +345,7 @@ On quit, session switch, or reload, every in-flight child process is sent `SIGTE
 | Result delivery | `[subagent-result]` system notification | Inline in the return value |
 | /subagent-cancel | Available | Not available (no TUI command system) |
 | /subagent-cancel-all | Available | Not available (no TUI command system) |
+| /subagent-watch | Available | Not available (no TUI command system) |
 | Parallel dispatch | Supported (independent tasks can be dispatched together) | Not supported (each call blocks) |
 
 ## Manual invocation
