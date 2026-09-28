@@ -150,7 +150,7 @@ async-subagent-isolation 做的是强制且完全的隔离：
 
 同步版里，每次委派都阻塞等待，体验上你面对的是一个“智能体集群”：主 agent 派完活就沉默，等子 agent 干完才回来，中间是一段段接力执行的空白。异步版把这一点翻了过来，**你的对话对象始终只有主 agent 一个**。
 
-主 agent 是调度者：理解需求、拆任务、派发、汇总结果。子 agent 是幕后工人，每个都在后台独立进程里跑，完成后用 `[subagent-result]` 通知把结果送回主 agent。你不直接和子 agent 对话，也不需要；查看结果用 `/subagent-result`，取消任务用 `/subagent-cancel`，中间过程交给调度者。
+主 agent 是调度者：理解需求、拆任务、派发、汇总结果。子 agent 是幕后工人，每个都在后台独立进程里跑，完成后用 `[subagent-result]` 通知把结果送回主 agent。你不直接和子 agent 对话，也不需要；查看结果用 `/subagent-result`，实时观察运行中的任务用 `/subagent-watch`，取消任务用 `/subagent-cancel`，中间过程交给调度者。
 
 更关键的是**派发之后的自由**。任务在后台跑的时候，你可以继续和主 agent 聊天：细化需求、调整规划、商量下一步，或提出新任务。主 agent 不必干等，可以继续规划，甚至并行派发更多任务。前台对话与后台工作并行推进。
 
@@ -200,6 +200,12 @@ Dispatched coder. taskId: 01912345-6789-7abc-8def-0123456789ab
 
 通知卡片只显示摘要。用 `/subagent-result <taskId>` 在全屏查看器中阅读完整返回：`↑↓`/`jk` 滚动、`Space`/`b` 翻页、`g`/`G` 首尾、`Enter`/`Esc`/`q` 关闭。不带参数时（TUI 模式）弹出选择列表，列出最近 5 个已结束的任务，`Enter` 打开所选任务。
 
+### 6. 实时观察（`/subagent-watch`）
+
+子 agent 长时间不返回时，不必干等到结束才知道它在做什么。用 `/subagent-watch <taskId>` 打开全屏实时查看器，每 1 秒刷新：正文顶部是 `Original task` 节（主 agent 下发的任务原文），其下 `Conversation log` 节按 `/subagent-result` 同款格式展示已完成内容（`[assistant]` 文本、`→` 工具调用、`←` 工具结果），正在生成的文本以 `[streaming]` 追加在末尾；按键习惯一致（`↑↓`/`jk` 滚动、`Space`/`b` 翻页、`g`/`G` 首尾、`Enter`/`Esc`/`q` 关闭），默认锚定最新输出。
+
+查看器**只服务仍在运行的任务**：传入已结束或不存在的 taskId 会被拒绝并提示改用 `/subagent-result`；不带参数时弹出选择列表，只列运行中任务。观看过程中任务结束，刷新自动停止，底部固定提示 `Task finished — live updates stopped. Final result: /subagent-result <taskId>`，查看器保持打开直到你手动关闭。
+
 ### 完整流程一览
 
 ```
@@ -235,6 +241,7 @@ Dispatched coder. taskId: 01912345-6789-7abc-8def-0123456789ab
 | `/subagent-cancel <taskId>` | 取消单个运行中的后台任务（不带参数时弹出运行中任务的交互选择列表，Enter 取消所选） |
 | `/subagent-cancel-all` | 一键取消全部运行中的后台任务 |
 | `/subagent-result <taskId>` | 全屏查看某任务的完整返回（不带参数时弹出最近 5 个已结束任务的交互选择列表） |
+| `/subagent-watch <taskId>` | 实时查看运行中任务的输出（全屏，1 秒刷新；不带参数时弹出运行中任务的交互选择列表） |
 | `/subagent-config [agent]` | 唯一的交互式配置入口：agent 选择菜单直接标注每个 agent 的生效 model/thinking，可编辑 description/tools/skills/body/model & thinking 五字段（name 只读）并管理可用 model 列表（带参数直进指定 agent） |
 
 ---

@@ -2561,6 +2561,7 @@ async function runSingleAgent(
 	parentModel?: CurrentModel,
 	modelOverrides?: Record<string, ModelOverride>,
 	onProcSpawn?: (proc: ChildProcess) => void,
+	onLiveResult?: (result: SingleResult) => void,
 ): Promise<SingleResult> {
 	const startedAt = Date.now();
 	let effectiveSessionId: string;
@@ -2678,6 +2679,11 @@ async function runSingleAgent(
 		sessionId: effectiveSessionId,
 		startedAt,
 	};
+	// Hand the live result reference back to the dispatcher (parallel to
+	// onProcSpawn): /subagent-watch reads messages/thinkingBuffer in place
+	// while the run is in flight — the session JSONL on disk only ever holds
+	// final messages, never streaming deltas.
+	onLiveResult?.(currentResult);
 
 	const emitProgress = () => {
 		if (emitTimer) { clearTimeout(emitTimer); emitTimer = null; }
@@ -3259,6 +3265,14 @@ export interface AsyncSubagentTask {
 	 * in-process backstop would die with it.
 	 */
 	proc?: ChildProcess;
+	/**
+	 * Live reference to the run's in-memory SingleResult (messages +
+	 * thinkingBuffer), set via runSingleAgent's onLiveResult as soon as the run
+	 * creates it. Only present while the task is running; cleared by
+	 * completeAsyncTask. /subagent-watch reads it in place — the disk session
+	 * JSONL never holds streaming deltas, so a live view must consume this.
+	 */
+	liveResult?: SingleResult;
 }
 
 /**
@@ -3707,6 +3721,9 @@ function completeAsyncTask(pi: ExtensionAPI, task: AsyncSubagentTask, result: Si
 		/* progress widget is non-critical */
 	}
 	taskRegistry.delete(task.taskId);
+	// Release the live-result reference; an open /subagent-watch viewer keeps
+	// its own captured reference and freezes its view on the finish transition.
+	task.liveResult = undefined;
 	// result === null means runSingleAgent rejected. Abort rejections carry
 	// the reason on the task record (user cancel / session shutdown); a
 	// rejection with the task still "running" is an internal failure (e.g.
@@ -3913,6 +3930,224 @@ export function createResultViewer(options: ResultViewerOptions): ResultViewer {
 		},
 	};
 	return { component, scrollToStart, scrollToEnd, scrollBy };
+}
+
+// ===== /subagent-watch live viewer (fullscreen overlay, 1s refresh) =====
+
+/** Live refresh period for /subagent-watch (contract: re-read every 1000ms). */
+const WATCH_REFRESH_MS = 1000;
+
+interface WatchViewerOptions {
+	taskId: string;
+	/** Verbatim task text the main agent dispatched (task.task); rendered in the
+	 * body's leading "Original task" section (same two-section shape as
+	 * /subagent-result). Empty string → the section is skipped. */
+	taskText: string;
+	/** Live SingleResult captured at open; mutated in place by runSingleAgent's stdout event handling until the run ends. May be undefined (task predates the live handoff). */
+	live: SingleResult | undefined;
+	theme: any;
+	tui?: { requestRender?: () => void } | null;
+	onClose: () => void;
+}
+
+/**
+ * Build the /subagent-watch live viewer on the /subagent-result viewer's
+ * skeleton (same border/title/key habits, same fullscreen overlay mount).
+ * render() only ever draws the text the refresh cycle last computed, so
+ * closing the viewer freezes the view: later process output causes no new
+ * render or read side effects. While the task runs, a 1000ms interval
+ * re-reads the live result (requestRender after each rebuild); once the task
+ * leaves the registry the interval is cleared and the locked finish line is
+ * appended exactly once, leaving the frozen view byte-stable on further
+ * ticks. The viewer stays open after the finish transition (done is not
+ * called) — Enter/Esc/q close it.
+ */
+function createWatchViewer(options: WatchViewerOptions) {
+	const { taskId, taskText, live, theme, tui, onClose } = options;
+	const border = new DynamicBorder((s: string) => theme.fg("accent", s));
+	const titleText =
+		theme.fg("accent", theme.bold(`Subagent Watch: ${taskId}`)) +
+		theme.fg("dim", "  ↑↓/jk scroll · Space/b page · g/G top/bottom · Enter/Esc/q close");
+
+	// Transcript in the /subagent-result shape: completed assistant turns and
+	// tool results come from the live messages array (message_end /
+	// tool_execution_end push into it); the in-progress stream exists only in
+	// thinkingBuffer (text_delta never reaches the session JSONL).
+	const buildText = (): string => {
+		const entries: string[] = [];
+		if (live) {
+			for (const msg of live.messages) {
+				if (msg.role === "assistant") {
+					for (const part of msg.content) {
+						if (part.type === "text" && typeof part.text === "string" && part.text.trim()) {
+							entries.push(`[assistant] ${part.text}`);
+						} else if (part.type === "toolCall" && typeof part.name === "string") {
+							const args = truncateSummary(JSON.stringify(part.arguments ?? {}), 200);
+							entries.push(`→ ${part.name} ${args}`);
+						}
+					}
+				} else if (msg.role === "toolResult") {
+					const text = msg.content
+						.filter((p: any) => p?.type === "text" && typeof p.text === "string")
+						.map((p: any) => p.text)
+						.join("\n");
+					if (text) {
+						const toolName = typeof msg.toolName === "string" ? `${msg.toolName}: ` : "";
+						entries.push(`← ${toolName}${truncateSummary(text, 500)}`);
+					}
+				}
+			}
+			const rawBuffer = live.thinkingBuffer ?? "";
+			const streaming = rawBuffer.trim();
+			if (streaming) {
+				// message_end lands the full text in live.messages but leaves
+				// thinkingBuffer holding its tail until the next turn_start
+				// (possibly truncated to the last ≤2048 chars at a line
+				// boundary), so a buffer that suffix-matches the latest completed
+				// assistant text is already-materialized output, not live output.
+				// Rendering it as [streaming] would duplicate the finished text as
+				// "still generating"; only a buffer with no materialized
+				// counterpart is genuinely streaming. Invariant: the raw buffer is
+				// always a raw suffix of the completed message text (text_delta is
+				// concatenated verbatim and truncation never trims), so the
+				// materialization check must endsWith the RAW buffer — trimming
+				// first would break the match for whitespace-terminated text and
+				// duplicate-render it. Trim is only for the display line content.
+				let materialized = false;
+				for (let i = live.messages.length - 1; i >= 0; i--) {
+					const msg = live.messages[i];
+					if (msg.role !== "assistant") continue;
+					const text = msg.content
+						.filter((p: any) => p?.type === "text" && typeof p.text === "string")
+						.map((p: any) => p.text)
+						.join("");
+					materialized = text !== "" && text.endsWith(rawBuffer);
+					break;
+				}
+				if (!materialized) entries.push(`[streaming] ${streaming}`);
+			}
+		}
+		// Same two-section body as /subagent-result's extractSessionTranscript:
+		// plain-text section labels (not markdown headings — headings would
+		// invoke theme closures that throw when the global theme is
+		// uninitialized), joined by a blank line. Rebuilt from scratch every
+		// refresh cycle, so the task text can never accumulate across rebuilds.
+		const sections: string[] = [];
+		if (taskText) sections.push(`Original task\n\n${taskText}`);
+		const log = entries.length > 0 ? entries.join("\n\n") : "(waiting for output…)";
+		sections.push(`Conversation log\n\n${log}`);
+		return sections.join("\n\n");
+	};
+
+	let md = new Markdown(buildText(), 1, 1, getMarkdownTheme());
+	// null = "at end": a live view stays anchored to the newest output.
+	let scrollOffset: number | null = null;
+	let lastWidth = 80;
+	let finished = false;
+	// Set on the finish transition: pinned, unwrapped row shown below the
+	// scrollable body (Markdown would wrap it, breaking the locked wording).
+	let finishLine: string | null = null;
+	let timer: ReturnType<typeof setInterval> | null = null;
+	// Overhead without finish row: top border + title + bottom border = 3 rows.
+	const visibleHeight = () => Math.max(1, (process.stdout.rows || 24) - 3 - (finishLine ? 1 : 0));
+	// Markdown body lines with trailing blanks trimmed (paddingY artifacts).
+	// md.render returns its CACHED array — copy before trimming.
+	const bodyLines = (width: number): string[] => {
+		const lines = [...md.render(width)];
+		while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
+		return lines;
+	};
+	const maxScroll = () => Math.max(0, bodyLines(lastWidth).length - visibleHeight());
+	const clampOffset = (offset: number) => Math.max(0, Math.min(maxScroll(), offset));
+	const effectiveOffset = () => (scrollOffset === null ? maxScroll() : clampOffset(scrollOffset));
+	const scrollToStart = () => {
+		scrollOffset = 0;
+	};
+	const scrollToEnd = () => {
+		scrollOffset = maxScroll();
+	};
+	const scrollBy = (lines: number) => {
+		scrollOffset = clampOffset(effectiveOffset() + lines);
+	};
+
+	const stopTimer = () => {
+		if (timer) {
+			clearInterval(timer);
+			timer = null;
+		}
+	};
+	const setBodyText = (text: string) => {
+		md = new Markdown(text.trim(), 1, 1, getMarkdownTheme());
+	};
+
+	// Finish transition (exactly once): freeze the transcript, pin the locked
+	// finish line below the body, stop refreshing. The view is then
+	// byte-stable and the viewer stays open.
+	const finish = () => {
+		if (finished) return;
+		finished = true;
+		stopTimer();
+		setBodyText(buildText());
+		finishLine = `Task finished — live updates stopped. Final result: /subagent-result ${taskId}`;
+		tui?.requestRender?.();
+	};
+
+	timer = setInterval(() => {
+		if (finished) return;
+		const record = taskRegistry.get(taskId);
+		if (!record || record.status !== "running") {
+			finish();
+			return;
+		}
+		setBodyText(buildText());
+		tui?.requestRender?.();
+	}, WATCH_REFRESH_MS);
+
+	const component = {
+		render: (width: number) => {
+			lastWidth = width;
+			const body = bodyLines(width);
+			const vh = visibleHeight();
+			const offset = effectiveOffset();
+			const window_ = body.slice(offset, offset + vh);
+			const title = new Text(truncateToWidth(titleText, width - 2), 1, 0);
+			const rows = [
+				...border.render(width),
+				...title.render(width),
+				...window_,
+			];
+			// Pinned finish row: raw line, never wrapped (locked wording must
+			// survive byte-for-byte at any render width).
+			if (finishLine) rows.push(` ${finishLine}`);
+			rows.push(...border.render(width));
+			return rows;
+		},
+		invalidate: () => md.invalidate(),
+		handleInput: (data: string) => {
+			if (matchesKey(data, Key.enter) || matchesKey(data, Key.escape) || matchesKey(data, "q") || matchesKey(data, Key.shift("q"))) {
+				stopTimer();
+				onClose();
+				return;
+			}
+			if (matchesKey(data, Key.up) || matchesKey(data, "k")) {
+				scrollBy(-1);
+			} else if (matchesKey(data, Key.down) || matchesKey(data, "j")) {
+				scrollBy(1);
+			} else if (matchesKey(data, Key.pageUp) || matchesKey(data, "b")) {
+				scrollBy(-visibleHeight());
+			} else if (matchesKey(data, Key.pageDown) || matchesKey(data, Key.space)) {
+				scrollBy(visibleHeight());
+			} else if (matchesKey(data, Key.home) || matchesKey(data, "g")) {
+				scrollToStart();
+			} else if (matchesKey(data, Key.end) || matchesKey(data, Key.shift("g"))) {
+				scrollToEnd();
+			} else {
+				return;
+			}
+		tui?.requestRender?.();
+		},
+	};
+	return { component };
 }
 
 export default function (pi: ExtensionAPI) {
@@ -4218,6 +4453,13 @@ export default function (pi: ExtensionAPI) {
 							// SIGTERM-ignoring late-born proc without its SIGKILL backstop.
 							spawnShutdownEscalationHelper(proc);
 						}
+					},
+					// Live-result handoff for /subagent-watch: the reference is the
+					// same mutable object runSingleAgent keeps pushing stdout events
+					// into, so the viewer sees message_end / tool results / streaming
+					// deltas in place while the task runs.
+					(liveResult) => {
+						taskRecord.liveResult = liveResult;
 					},
 				).then(
 					(result) => completeAsyncTask(pi, taskRecord, result),
@@ -4542,6 +4784,70 @@ export default function (pi: ExtensionAPI) {
 			} else {
 				console.log(`\n[subagent-result] taskId: ${taskId}\n\n${text}\n`);
 			}
+		},
+	});
+
+	// /subagent-watch <taskId> opens a live fullscreen viewer for a RUNNING
+	// background subagent task (issue #1): the view re-reads the task's live
+	// in-memory result every 1000ms, so new assistant text, tool calls/results
+	// and streaming deltas are visible long before the task finishes. Only
+	// running tasks are served — finished results stay with /subagent-result.
+	pi.registerCommand?.("subagent-watch", {
+		description: "Watch a running background subagent task live (usage: /subagent-watch <taskId>)",
+		handler: async (args, cmdCtx) => {
+			let taskId = (args ?? "").trim();
+			const isTui = cmdCtx.hasUI && cmdCtx.mode === "tui";
+			if (!taskId) {
+				if (!isTui) {
+					cmdCtx.ui?.notify?.("Usage: /subagent-watch <taskId> — watch a running subagent task live.", "warning");
+					return;
+				}
+				// No argument: picker over the RUNNING tasks only (same shape as the
+				// /subagent-cancel picker); Enter opens the watch viewer for the
+				// selection, Esc/q dismisses without doing anything.
+				const runningTasks = [...taskRegistry.values()].filter((t) => t.status === "running");
+				if (runningTasks.length === 0) {
+					cmdCtx.ui?.notify?.("No running subagent tasks to watch.", "warning");
+					return;
+				}
+				const items: SelectItem[] = runningTasks.map((t) =>
+					taskPickerItem(t.taskId, `${t.agentName}: ${truncateTaskDescription(t.task, 60)}`),
+				);
+				const picked = await pickTaskInteractively(cmdCtx.ui, "Watch subagent task — select task", items);
+				if (picked === undefined) return;
+				taskId = picked;
+			}
+			if (!isTui) {
+				// Live view needs the overlay compositor; outside the TUI the locked
+				// taskId line goes to stdout instead.
+				console.log(`[subagent-watch] taskId: ${taskId} — live view requires TUI mode.`);
+				return;
+			}
+			// Running tasks only: a finished / cancelled / unknown taskId must not
+			// open the viewer (locked warning; /subagent-result serves finished
+			// tasks).
+			const task = taskRegistry.get(taskId);
+			if (!task || task.status !== "running") {
+				cmdCtx.ui?.notify?.(
+					`Task not running — /subagent-watch shows running tasks only: ${taskId}. Use /subagent-result for finished tasks.`,
+					"warning",
+				);
+				return;
+			}
+			// Mounted as a fullscreen overlay, same mount options as
+			// /subagent-result (see createResultViewer for why overlay).
+			await cmdCtx.ui.custom(
+				(tui, theme, _kb, done) =>
+					createWatchViewer({
+						taskId,
+						taskText: task.task,
+						live: task.liveResult,
+						theme,
+						tui,
+						onClose: () => done(undefined),
+					}).component,
+				{ overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", anchor: "top-left", margin: 0 } },
+			);
 		},
 	});
 

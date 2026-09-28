@@ -150,7 +150,7 @@ This project is the async evolution of [subagent-isolation](https://github.com/W
 
 In the sync version, every delegation blocks, so the experience feels like facing a "swarm of agents": the main agent dispatches and goes silent until the subagent finishes, leaving you with stretches of relayed execution. The async version flips this — **your conversation is always with the main agent alone**.
 
-The main agent is the dispatcher: it understands the request, splits it into tasks, dispatches them, and summarizes the results. Subagents are behind-the-scenes workers, each running in its own background process and reporting back through a `[subagent-result]` notification. You never talk to a subagent directly, and you shouldn't need to: read results with `/subagent-result`, cancel with `/subagent-cancel`, and leave everything in between to the dispatcher.
+The main agent is the dispatcher: it understands the request, splits it into tasks, dispatches them, and summarizes the results. Subagents are behind-the-scenes workers, each running in its own background process and reporting back through a `[subagent-result]` notification. You never talk to a subagent directly, and you shouldn't need to: read results with `/subagent-result`, watch a running task live with `/subagent-watch`, cancel with `/subagent-cancel`, and leave everything in between to the dispatcher.
 
 More important is **the freedom after dispatch**. While a task runs in the background, you keep talking to the main agent — refine the requirements, adjust the plan, discuss next steps, or raise a new task. The main agent doesn't wait idle; it can keep planning and even dispatch more tasks in parallel. Foreground conversation and background work move forward together.
 
@@ -200,6 +200,12 @@ Results arrive automatically — **no polling**. In-flight task information is p
 
 The notification card shows only a summary. Use `/subagent-result <taskId>` to read the full output in a full-screen viewer: `↑↓`/`jk` scroll, `Space`/`b` page, `g`/`G` top/bottom, `Enter`/`Esc`/`q` close. With no argument (TUI mode), an interactive picker lists the 5 most recently finished tasks and `Enter` opens the selected one.
 
+### 6. Watch a running task live (`/subagent-watch`)
+
+When a subagent runs long, you don't have to wait for it to finish to see what it is doing. `/subagent-watch <taskId>` opens a full-screen live viewer that refreshes every second: the body starts with the `Original task` section (the task as dispatched by the main agent), followed by the `Conversation log` section — completed content in the same shape as `/subagent-result` (`[assistant]` text, `→` tool calls, `←` tool results), with the in-progress stream appended as `[streaming]`. Key habits match (`↑↓`/`jk` scroll, `Space`/`b` page, `g`/`G` top/bottom, `Enter`/`Esc`/`q` close), anchored to the newest output.
+
+The viewer **serves running tasks only**: a finished or unknown taskId is refused with a pointer to `/subagent-result`; with no argument it opens a picker that lists running tasks only. If the watched task finishes while you watch, refreshing stops and a fixed line stays at the bottom — `Task finished — live updates stopped. Final result: /subagent-result <taskId>` — and the viewer stays open until you close it.
+
 ### The flow at a glance
 
 ```
@@ -235,6 +241,7 @@ User runs /subagent-result <taskId> to read the full output
 | `/subagent-cancel <taskId>` | Cancel one running background task (no argument opens an interactive picker of running tasks; Enter cancels the selection) |
 | `/subagent-cancel-all` | Cancel all running background tasks at once |
 | `/subagent-result <taskId>` | Read a task's full result in a full-screen viewer (no argument opens an interactive picker of the 5 most recent finished tasks) |
+| `/subagent-watch <taskId>` | Watch a running task's output live (full-screen, 1s refresh; no argument opens an interactive picker of running tasks) |
 | `/subagent-config [agent]` | The single interactive config entry: the agent picker annotates each agent's effective model/thinking; edit the five fields description/tools/skills/body/model & thinking (name is read-only) and manage the available model list (with an argument, jumps straight to that agent) |
 
 ---
