@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-09-28
+
+### Added
+
+- `/subagent-watch [taskId]`: watch a running background subagent task live in a full-screen overlay that refreshes every second, showing the dispatched task under `Original task` plus the `Conversation log` (completed transcript entries — `[assistant]` text, tool calls, tool results — and the in-progress stream, `[streaming]`). The viewer serves running tasks only: a finished or unknown id is refused with a pointer to `/subagent-result`, while no argument opens a picker of running tasks; when the watched task ends, refreshing stops and a fixed line points to `/subagent-result`. Enter/Esc/q close the viewer and clear the refresh timer; non-TUI modes print one line and open nothing.
+
 ## [1.10.1] - 2026-09-14
 
 ### Changed
