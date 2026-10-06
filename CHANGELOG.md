@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.2] - 2026-10-06
+
+### Changed
+
+- The `subagent` tool definition now declares `exposure: "model-only"`, so pi's `codemode` scripts can never call it through `ctx.executeTool()`: `subagent` is asynchronous (a call returns only a dispatch receipt and the real result arrives later as a `[subagent-result]` notification), so a script calling it would silently miss the result. The four `@earendil-works/*` development dependencies (`pi-agent-core`, `pi-ai`, `pi-coding-agent`, `pi-tui`) move from `^0.85.1` to `^1.0.4`, which provides the `exposure` tool-definition type and matches the pi runtime version.
+
 ## [1.12.1] - 2026-10-06
 
 ### Changed

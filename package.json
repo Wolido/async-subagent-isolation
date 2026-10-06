@@ -1,6 +1,6 @@
 {
   "name": "@wolido/async-subagent-isolation",
-  "version": "1.12.1",
+  "version": "1.12.2",
   "description": "Fix context rot and context pollution in long AI agent sessions. Subagents run in isolated processes; the main agent stays read-only and context stays clean.",
   "license": "MIT",
   "author": "Wolido",
@@ -61,10 +61,10 @@
     "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "^0.85.1",
-    "@earendil-works/pi-ai": "^0.85.1",
-    "@earendil-works/pi-coding-agent": "^0.85.1",
-    "@earendil-works/pi-tui": "^0.85.1",
+    "@earendil-works/pi-agent-core": "^1.0.4",
+    "@earendil-works/pi-ai": "^1.0.4",
+    "@earendil-works/pi-coding-agent": "^1.0.4",
+    "@earendil-works/pi-tui": "^1.0.4",
     "@types/node": "^20.0.0",
     "typebox": "*",
     "typescript": "^5.4.0",

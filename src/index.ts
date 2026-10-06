@@ -4458,6 +4458,7 @@ export default function (pi: ExtensionAPI) {
 		pi.registerTool({
 			name: "subagent",
 			label: "Subagent",
+			exposure: "model-only",
 			description: [
 				"Delegate a task to a specialized subagent with isolated context.",
 				"",
