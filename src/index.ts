@@ -2624,9 +2624,9 @@ function truncateSummary(text: string, maxLen: number): string {
 /**
  * Extract the full session transcript (方案 A) from a pi session JSONL file:
  * the task text (first user message) followed by the conversation in original
- * order — assistant texts, tool calls (`→ name args`) and tool results
- * (`← name: summary`). Returns null when the file is unreadable or contains
- * no assistant text (same contract as extractFinalAssistantText).
+ * order — assistant texts and tool calls (`→ name args`); tool results are
+ * not rendered. Returns null when the file is unreadable or contains no
+ * assistant text (same contract as extractFinalAssistantText).
  */
 export function extractSessionTranscript(filePath: string): string | null {
 	let raw: string;
@@ -2673,12 +2673,6 @@ export function extractSessionTranscript(filePath: string): string | null {
 					const args = truncateSummary(JSON.stringify(part.arguments ?? {}), 200);
 					entries.push(`→ ${part.name} ${args}`);
 				}
-			}
-		} else if (role === "toolResult") {
-			const text = textOf();
-			if (text) {
-				const toolName = typeof message.toolName === "string" ? `${message.toolName}: ` : "";
-				entries.push(`← ${toolName}${truncateSummary(text, 500)}`);
 			}
 		}
 		// other roles (thinking etc.) are skipped
@@ -4260,10 +4254,11 @@ function createWatchViewer(options: WatchViewerOptions) {
 	const border = new DynamicBorder((s: string) => theme.fg("accent", s));
 	const titleText = theme.fg("accent", theme.bold(`Subagent Watch: ${taskId}`));
 
-	// Transcript in the /subagent-result shape: completed assistant turns and
-	// tool results come from the live messages array (message_end /
-	// tool_execution_end push into it); the in-progress stream exists only in
-	// thinkingBuffer (text_delta never reaches the session JSONL).
+	// Transcript in the /subagent-result shape: completed assistant turns
+	// (assistant text and tool calls) come from the live messages array
+	// (message_end pushes into it); the in-progress stream exists only in
+	// thinkingBuffer (text_delta never reaches the session JSONL). Tool-result
+	// messages do land in live.messages but are deliberately not rendered.
 	const buildText = (): string => {
 		const entries: string[] = [];
 		if (live) {
@@ -4276,15 +4271,6 @@ function createWatchViewer(options: WatchViewerOptions) {
 							const args = truncateSummary(JSON.stringify(part.arguments ?? {}), 200);
 							entries.push(`→ ${part.name} ${args}`);
 						}
-					}
-				} else if (msg.role === "toolResult") {
-					const text = msg.content
-						.filter((p: any) => p?.type === "text" && typeof p.text === "string")
-						.map((p: any) => p.text)
-						.join("\n");
-					if (text) {
-						const toolName = typeof msg.toolName === "string" ? `${msg.toolName}: ` : "";
-						entries.push(`← ${toolName}${truncateSummary(text, 500)}`);
 					}
 				}
 			}
@@ -4808,8 +4794,9 @@ export default function (pi: ExtensionAPI) {
 						},
 						// Live-result handoff for /subagent-watch: the reference is the
 						// same mutable object runSingleAgent keeps pushing stdout events
-						// into, so the viewer sees message_end / tool results / streaming
-						// deltas in place while the task runs.
+						// into, so the viewer sees message_end / streaming deltas in
+						// place while the task runs (tool-result messages do land in
+						// live.messages but are deliberately not rendered).
 						(liveResult) => {
 							taskRecord.liveResult = liveResult;
 						},

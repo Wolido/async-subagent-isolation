@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.1] - 2026-10-06
+
+### Changed
+
+- `/subagent-result` and `/subagent-watch` no longer render tool-result lines (`← <tool>: <summary>`) in the conversation log: the transcript keeps the `[assistant]` text and the `→` tool-call lines (plus `/subagent-watch`'s `[streaming]` line), so tool output no longer floods the viewer.
+
 ## [1.12.0] - 2026-10-06
 
 ### Added

@@ -14,7 +14,7 @@
  *     { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", anchor: "top-left", margin: 0 } }
  *     标题逐字包含 "Subagent Watch: ${taskId}"；初始内容含该任务已有助手文本。
  *  4. 每 1000ms 定时刷新（测试用 fake timers 推进，不依赖真实等待）：
- *     message_end 新文本 / 工具调用与结果（工具名）/ 无 message_end 的
+ *     message_end 新文本 / 工具调用（工具名；结果行按新契约不再渲染）/ 无 message_end 的
  *     message_update+text_delta 流式增量，均须在下一个刷新周期内出现在渲染中。
  *  5. 无参（TUI）→ 交互选择列表只含运行中任务；Enter 打开所选任务的查看器；
  *     无运行中任务 → warning 逐字："No running subagent tasks to watch."
@@ -274,6 +274,19 @@ function assistantEndEvent(text: string): object {
 	};
 }
 
+/** 子进程 stdout JSON：一条带工具调用的 assistant 消息（message_end，pi 真实事件顺序中先于 tool_execution_*）。 */
+function assistantToolCallEndEvent(toolName: string, args: Record<string, unknown>): object {
+	return {
+		type: "message_end",
+		message: {
+			role: "assistant",
+			content: [{ type: "toolCall", name: toolName, arguments: args }],
+			stopReason: "toolUse",
+			usage: { input: 10, output: 5, totalTokens: 15 },
+		},
+	};
+}
+
 /** 子进程 stdout JSON：流式增量（message_update / text_delta，无 message_end）。 */
 function textDeltaEvent(delta: string): object {
 	return { type: "message_update", assistantMessageEvent: { type: "text_delta", delta } };
@@ -284,7 +297,7 @@ function toolStartEvent(toolName: string): object {
 	return { type: "tool_execution_start", toolName };
 }
 
-/** 子进程 stdout JSON：工具调用结束（携带 toolResult 消息）。 */
+/** 子进程 stdout JSON：工具调用结束（携带 toolResult 消息；新契约下结果不再渲染，仅用于证明被忽略）。 */
 function toolEndEvent(toolName: string, resultText: string): object {
 	return {
 		type: "tool_execution_end",
@@ -523,7 +536,7 @@ describe("/subagent-watch 命令（issue #1 实时观察运行中子 agent）", 
 			await handlerPromise;
 		});
 
-		it("should render new tool call / tool result content (tool name) within one refresh tick", async () => {
+		it("should render new tool call (tool name) but not tool result content within one refresh tick", async () => {
 			expect(watchCommand, "功能缺失：未注册 subagent-watch 命令").toBeDefined();
 			// Arrange
 			const taskId = await dispatchRunningTask(302);
@@ -531,15 +544,18 @@ describe("/subagent-watch 命令（issue #1 实时观察运行中子 agent）", 
 			const handlerPromise = watchCommand.handler(taskId, ctx);
 			await waitForCustomCalls(captured, 1);
 
-			// Act: 运行中产生工具调用与工具结果事件，推进一个刷新周期
+			// Act: 按真实 pi 事件顺序产生工具调用（assistant message_end 携带 toolCall part）
+			// 与工具结果事件，推进一个刷新周期
+			feedEvent(lastProc(), assistantToolCallEndEvent("read_file", { path: "src/index.ts" }));
 			feedEvent(lastProc(), toolStartEvent("read_file"));
 			feedEvent(lastProc(), toolEndEvent("read_file", "工具结果内容 BBB-302"));
 			await vi.advanceTimersByTimeAsync(REFRESH_MS);
 
-			// Assert: 渲染包含工具名等新内容
+			// Assert: 工具调用行仍渲染（含工具名），工具结果正文不再渲染（新契约）
 			const rendered = captured[0].getRendered();
+			expect(rendered).toContain("→ read_file");
 			expect(rendered).toContain("read_file");
-			expect(rendered).toContain("工具结果内容 BBB-302");
+			expect(rendered).not.toContain("工具结果内容 BBB-302");
 
 			captured[0].handleInput(KEY_ESC);
 			await handlerPromise;

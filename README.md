@@ -202,7 +202,7 @@ Dispatched coder. taskId: 01912345-6789-7abc-8def-0123456789ab
 
 ### 6. 实时观察（`/subagent-watch`）
 
-子 agent 长时间不返回时，不必干等到结束才知道它在做什么。用 `/subagent-watch <taskId>` 打开全屏实时查看器，每 1 秒刷新：正文顶部是 `Original task` 节（主 agent 下发的任务原文），其下 `Conversation log` 节按 `/subagent-result` 同款格式展示已完成内容（`[assistant]` 文本、`→` 工具调用、`←` 工具结果），正在生成的文本以 `[streaming]` 追加在末尾；按键习惯一致（`↑↓`/`jk` 滚动、`Space`/`b` 翻页、`g`/`G` 首尾、`Enter`/`Esc`/`q` 关闭），底部常驻按键栏文本逐字为 `↑↓/jk line · b/PgUp & Space/PgDn page · g/G top/bottom · Enter/Esc/q close`（`Home`/`End` 可用但**故意不列入**按键栏，`Shift+Q` 同样可关闭查看器），默认锚定最新输出。实时查看器仅在 TUI 可用。
+子 agent 长时间不返回时，不必干等到结束才知道它在做什么。用 `/subagent-watch <taskId>` 打开全屏实时查看器，每 1 秒刷新：正文顶部是 `Original task` 节（主 agent 下发的任务原文），其下 `Conversation log` 节按 `/subagent-result` 同款格式展示已完成内容（`[assistant]` 文本、`→` 工具调用），正在生成的文本以 `[streaming]` 追加在末尾；按键习惯一致（`↑↓`/`jk` 滚动、`Space`/`b` 翻页、`g`/`G` 首尾、`Enter`/`Esc`/`q` 关闭），底部常驻按键栏文本逐字为 `↑↓/jk line · b/PgUp & Space/PgDn page · g/G top/bottom · Enter/Esc/q close`（`Home`/`End` 可用但**故意不列入**按键栏，`Shift+Q` 同样可关闭查看器），默认锚定最新输出。实时查看器仅在 TUI 可用。
 
 查看器**只服务仍在运行的任务**：传入已结束或不存在的 taskId 会被拒绝并提示改用 `/subagent-result`；不带参数时（TUI）弹出选择列表，只列运行中任务，非 TUI 且无参时打印用法提示 `Usage: /subagent-watch <taskId> — watch a running subagent task live.`。观看过程中任务结束，刷新自动停止，底部固定提示 `Task finished — live updates stopped. Final result: /subagent-result <taskId>`，查看器保持打开直到你手动关闭。
 

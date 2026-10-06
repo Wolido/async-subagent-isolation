@@ -387,7 +387,7 @@ widget 行中的 taskId 可直接复制，用于 `/subagent-watch` 实时观察�
 
 - 任务不在运行（已结束、不存在、或状态非 `running`） → 拒绝打开查看器并提示 `Task not running — /subagent-watch shows running tasks only: <taskId>. Use /subagent-result for finished tasks.`
 - 无参数 → 弹出运行中任务的交互选择列表（只含运行中任务），Enter 打开所选任务；选择列表仅 TUI。
-- 打开后为全屏实时查看器：每 1000ms 刷新；正文为 `Original task` 节（主 agent 下发的任务原文，逐字）与 `Conversation log` 节——已完成条目（`[assistant]` / `→ 工具` / `← 工具结果`，与 `/subagent-result` 同格式）加进行中的流式文本（`[streaming]`，来自运行进程的内存缓冲，不落盘）；按键与 `/subagent-result` 一致（`↑↓`/`jk`、`Space`/`b`、`g`/`G`、`Enter`/`Esc`/`q`），底部常驻按键栏文本逐字为 `↑↓/jk line · b/PgUp & Space/PgDn page · g/G top/bottom · Enter/Esc/q close`（`Home`/`End` 可用但故意不列入按键栏，`Shift+Q` 同样可关闭查看器），默认锚定末尾。
+- 打开后为全屏实时查看器：每 1000ms 刷新；正文为 `Original task` 节（主 agent 下发的任务原文，逐字）与 `Conversation log` 节——已完成条目（`[assistant]` / `→ 工具`，与 `/subagent-result` 同格式）加进行中的流式文本（`[streaming]`，来自运行进程的内存缓冲，不落盘）；按键与 `/subagent-result` 一致（`↑↓`/`jk`、`Space`/`b`、`g`/`G`、`Enter`/`Esc`/`q`），底部常驻按键栏文本逐字为 `↑↓/jk line · b/PgUp & Space/PgDn page · g/G top/bottom · Enter/Esc/q close`（`Home`/`End` 可用但故意不列入按键栏，`Shift+Q` 同样可关闭查看器），默认锚定末尾。
 - 观看中任务结束 → 停止刷新并追加固定底行 `Task finished — live updates stopped. Final result: /subagent-result <taskId>`，查看器保持打开。
 - 非 TUI 模式（print/json） → 不打开查看器；带 taskId 时输出一行 `[subagent-watch] taskId: <taskId> — live view requires TUI mode.`；无参时打印用法提示 `Usage: /subagent-watch <taskId> — watch a running subagent task live.`
 - 数据来自运行进程的内存态（消息数组与流式缓冲），不依赖子进程落盘节奏。

@@ -2,7 +2,7 @@
  * Red-phase tests for 方案 A: /subagent-result 查看器显示完整会话记录.
  *
  * 当前实现只显示 extractFinalAssistantText 提取的最后一条 assistant 文本；
- * 需求是显示完整会话记录（中间工具调用、toolResult、多轮文本）+ 任务原文
+ * 需求是显示完整会话记录（中间工具调用、多轮文本）+ 任务原文
  * （session 文件第一条 user 消息，通常以 "Task: " 开头）。
  *
  * 以下测试均为红阶段：在当前实现下断言失败，需 coder 实现新提取函数
@@ -223,11 +223,12 @@ describe("/subagent-result 完整会话记录（方案 A，红阶段）", () => 
 	});
 
 	// ================================================================
-	// 3. toolResult 显示（红）
+	// 3. 工具结果不显示（新契约）
 	// ================================================================
-	describe("toolResult 显示", () => {
-		it("查看器应显示工具结果摘要（当前只显示最终文本 → 红）", async () => {
-			// Arrange: session 含 toolResult 消息（role:"toolResult"）
+	describe("工具结果不显示（新契约）", () => {
+		it("查看器不应显示工具结果正文", async () => {
+			// Arrange: session 含 toolResult 消息（role:"toolResult"）——保留该消息，
+			// 用来证明工具结果被查看器忽略
 			const taskId = "transcript-tool-result";
 			const sessionDir = path.join(tempDir, "subagent-sessions", taskId);
 			writeSessionFile(sessionDir, taskId, [
@@ -264,8 +265,10 @@ describe("/subagent-result 完整会话记录（方案 A，红阶段）", () => 
 			// Act
 			const { getRendered } = await runHandler(taskId);
 
-			// Assert: 工具结果摘要应出现在渲染中
-			expect(getRendered()).toContain("文件共 120 行");
+			// Assert: 工具结果正文不应出现在渲染中（新契约）
+			expect(getRendered()).not.toContain("文件共 120 行");
+			// Assert: 渲染结果中不得出现 `← ` 前缀的工具结果行
+			expect(getRendered()).not.toMatch(/← /);
 		});
 	});
 
