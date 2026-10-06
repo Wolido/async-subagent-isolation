@@ -677,9 +677,12 @@ describe("result observability & state semantics (N1-N4)", () => {
 			// Process stays silent after the error.
 			await vi.advanceTimersByTimeAsync(600);
 
+			// 新契约：超时杀首发 SIGTERM（旧行为：直接 SIGKILL），宽限期内不升级。
+			expect(allProcs[0].kill).toHaveBeenCalledWith("SIGTERM");
 			const sigkillCalls = allProcs[0].kill.mock.calls.filter((call: any[]) => call[0] === "SIGKILL");
-			expect(sigkillCalls.length).toBeGreaterThanOrEqual(1);
+			expect(sigkillCalls).toHaveLength(0);
 
+			// 进程在宽限期内退出 → finalize 延迟到退出，信封到达
 			endProcess(allProcs[0], 0);
 			await vi.advanceTimersByTimeAsync(1000);
 

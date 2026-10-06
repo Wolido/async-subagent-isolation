@@ -29,6 +29,16 @@ vi.mock("node:child_process", () => ({
 }));
 
 const SESSION_ID = "019ffdd3-3eb5-733d-b481-a53e5292bd02";
+
+/**
+ * Grace period between the timeout's first SIGTERM and the SIGKILL escalation.
+ * Locked to the cancel path's escalation delay in src/index.ts
+ * (`sigkillTimer = setTimeout(..., 5000)` in runSingleAgent's abort handler,
+ * plus a `proc.exitCode/signalCode` liveness re-check): the timeout kill paths
+ * must reuse that exact mechanism, not invent a different grace.
+ */
+const SIGTERM_GRACE_MS = 5000;
+
 const ENV_KEYS = [
 	"PI_SUBAGENT_DEPTH",
 	"PI_SUBAGENT_HARD_TIMEOUT_MS",
@@ -44,16 +54,24 @@ type ExecuteFn = (
 ) => Promise<any>;
 
 /**
- * Create a fake ChildProcess that we can control externally
+ * Create a fake ChildProcess that we can control externally.
+ *
+ * By default the fake process terminates on SIGTERM and SIGKILL (a
+ * well-behaved child) and mirrors real ChildProcess bookkeeping by setting
+ * `signalCode` when it exits. Pass `terminatesOn: ["SIGKILL"]` for a process
+ * that ignores SIGTERM — required to observe the grace-period escalation — and
+ * `terminatesOn: []` for a process whose exit timing this test drives manually.
  */
-function createControllableProc() {
+function createControllableProc(options: { terminatesOn?: string[] } = {}) {
+	const terminatesOn = options.terminatesOn ?? ["SIGTERM", "SIGKILL"];
 	const proc = new EventEmitter() as any;
 	proc.stdout = new EventEmitter();
 	proc.stderr = new EventEmitter();
 	proc.kill = vi.fn((signal?: string) => {
-		// Simulate process termination
-		if (signal === "SIGKILL" || signal === "SIGTERM") {
+		// Simulate process termination for the signals this fake child handles.
+		if (signal && terminatesOn.includes(signal)) {
 			queueMicrotask(() => {
+				proc.signalCode = signal;
 				proc.stdout.emit("end");
 				proc.emit("exit", null, signal);
 				proc.emit("close", null, signal);
@@ -64,6 +82,19 @@ function createControllableProc() {
 	proc.exitCode = null;
 	proc.signalCode = null;
 	return proc;
+}
+
+/**
+ * Simulate a real ChildProcess exit: set the exit bookkeeping before emitting
+ * `exit` / `close`, exactly like Node does (a signal exit leaves `exitCode`
+ * null and sets `signalCode`).
+ */
+function emitProcessExit(proc: any, signal: string | null = null, code = 0) {
+	if (signal !== null) proc.signalCode = signal;
+	else proc.exitCode = code;
+	proc.stdout.emit("end");
+	proc.emit("exit", signal !== null ? null : code, signal);
+	proc.emit("close", signal !== null ? null : code, signal);
 }
 
 /**
@@ -90,6 +121,7 @@ describe("runSingleAgent timeout behavior", () => {
 	let executeTool: ExecuteFn;
 	let savedEnv: Record<string, string | undefined>;
 	let procRef: ReturnType<typeof createControllableProc> | null;
+	let procFactory: () => any;
 
 	beforeEach(() => {
 		vi.useFakeTimers();
@@ -109,8 +141,9 @@ describe("runSingleAgent timeout behavior", () => {
 		);
 
 		procRef = null;
+		procFactory = () => createControllableProc();
 		vi.mocked(spawn).mockImplementation((() => {
-			procRef = createControllableProc();
+			procRef = procFactory();
 			return procRef;
 		}) as any);
 
@@ -202,8 +235,9 @@ describe("runSingleAgent timeout behavior", () => {
 			// Wait for the full timeout period
 			await vi.advanceTimersByTimeAsync(1000);
 
-			// Bug #2 fixed: process IS killed (timer started at spawn)
-			expect(procRef!.kill).toHaveBeenCalledWith("SIGKILL");
+			// Bug #2 fixed: process IS killed (timer started at spawn). The exact
+			// first signal is locked by the SIGTERM-first contract tests below.
+			expect(procRef!.kill).toHaveBeenCalled();
 
 			// Clean up
 			await resultPromise;
@@ -329,14 +363,129 @@ describe("runSingleAgent timeout behavior", () => {
 			// Wait for timeout after last activity
 			await vi.advanceTimersByTimeAsync(200);
 
-			// Now should be killed
-			expect(procRef!.kill).toHaveBeenCalledWith("SIGKILL");
+			// Now should be killed (first signal locked by the SIGTERM-first
+			// contract tests below)
+			expect(procRef!.kill).toHaveBeenCalled();
 			await vi.advanceTimersByTimeAsync(100);
 
 			const result = await resultPromise;
 
 			// Should have structured stopReason (Bug #3)
 			expect(result.details.results[0].stopReason).toBe("activity_timeout");
+		});
+	});
+
+	// ================================================================
+	// SIGTERM-first timeout kills (RED contract)
+	//
+	// Old behavior: activity/hard timeouts called proc.kill("SIGKILL")
+	// directly as the first and only signal, giving the child no chance to
+	// reap its own descendants. New behavior: reuse the cancel-path
+	// escalation — SIGTERM first, then a SIGTERM_GRACE_MS grace with a
+	// liveness re-check before SIGKILL. stopReason semantics
+	// (activity_timeout / hard_timeout) are unchanged.
+	// ================================================================
+	describe("SIGTERM-first timeout kills (RED contract)", () => {
+		it("should send SIGTERM, not SIGKILL, as the first kill signal when the activity timeout fires", async () => {
+			// Arrange: a well-behaved child that exits on SIGTERM
+			process.env.PI_SUBAGENT_ACTIVITY_TIMEOUT_MS = "1000";
+			delete process.env.PI_SUBAGENT_HARD_TIMEOUT_MS;
+
+			// Act
+			const resultPromise = runSingleAgent();
+			await vi.advanceTimersByTimeAsync(0);
+			expect(procRef).not.toBeNull();
+			await vi.advanceTimersByTimeAsync(1000);
+
+			// Assert
+			const killCalls = procRef!.kill.mock.calls.map((c: any[]) => c[0]);
+			expect(killCalls[0], "超时首发信号必须是 SIGTERM（旧行为是 SIGKILL）").toBe("SIGTERM");
+
+			await resultPromise;
+		});
+
+		it("should not send SIGKILL and leave no escalation timer when the process exits within the grace period", async () => {
+			// Arrange: the fake child ignores every signal so this test owns the
+			// exit timing — it exits 2s into the 5s grace, like a child that
+			// reaped its own grandchildren before dying.
+			process.env.PI_SUBAGENT_ACTIVITY_TIMEOUT_MS = "1000";
+			delete process.env.PI_SUBAGENT_HARD_TIMEOUT_MS;
+			procFactory = () => createControllableProc({ terminatesOn: [] });
+
+			const resultPromise = runSingleAgent();
+			await vi.advanceTimersByTimeAsync(0);
+			expect(procRef).not.toBeNull();
+
+			// Act: timeout fires -> SIGTERM
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(procRef!.kill).toHaveBeenCalledWith("SIGTERM");
+
+			// Exit mid-grace
+			await vi.advanceTimersByTimeAsync(2000);
+			emitProcessExit(procRef!, "SIGTERM");
+			await vi.advanceTimersByTimeAsync(0);
+
+			// Assert: the escalation timer must have been cleared on exit
+			expect(vi.getTimerCount(), "进程退出后不得遗留升级定时器").toBe(0);
+
+			const result = await resultPromise;
+			expect(result.isError).toBe(true);
+			expect(result.details.results[0].stopReason).toBe("activity_timeout");
+
+			// Assert: no SIGKILL even after the full grace + finalize window
+			await vi.advanceTimersByTimeAsync(SIGTERM_GRACE_MS);
+			const killCalls = procRef!.kill.mock.calls.map((c: any[]) => c[0]);
+			expect(killCalls, "宽限期内退出的进程不得补发 SIGKILL").not.toContain("SIGKILL");
+		});
+
+		it("should escalate to SIGKILL only after the exact cancel-path grace when the process ignores SIGTERM", async () => {
+			// Arrange: SIGTERM-ignoring child, only SIGKILL terminates it
+			process.env.PI_SUBAGENT_ACTIVITY_TIMEOUT_MS = "1000";
+			delete process.env.PI_SUBAGENT_HARD_TIMEOUT_MS;
+			procFactory = () => createControllableProc({ terminatesOn: ["SIGKILL"] });
+
+			const resultPromise = runSingleAgent();
+			await vi.advanceTimersByTimeAsync(0);
+			await vi.advanceTimersByTimeAsync(1000);
+
+			// Assert: SIGTERM immediately, no SIGKILL and no second signal yet
+			expect(procRef!.kill).toHaveBeenCalledWith("SIGTERM");
+			await vi.advanceTimersByTimeAsync(SIGTERM_GRACE_MS - 1);
+			expect(procRef!.kill.mock.calls.map((c: any[]) => c[0])).toEqual(["SIGTERM"]);
+
+			// Act: grace expires -> SIGKILL
+			await vi.advanceTimersByTimeAsync(1);
+			expect(procRef!.kill.mock.calls.map((c: any[]) => c[0])).toEqual(["SIGTERM", "SIGKILL"]);
+
+			// Assert: the escalation guarantees exit, so the run still finalizes
+			// as a timeout instead of hanging on the grace period
+			const result = await resultPromise;
+			expect(result.isError).toBe(true);
+			expect(result.details.results[0].stopReason).toBe("activity_timeout");
+		});
+
+		it("should apply the same SIGTERM -> grace -> SIGKILL escalation to the hard timeout", async () => {
+			// Arrange
+			process.env.PI_SUBAGENT_HARD_TIMEOUT_MS = "2000";
+			delete process.env.PI_SUBAGENT_ACTIVITY_TIMEOUT_MS;
+			procFactory = () => createControllableProc({ terminatesOn: ["SIGKILL"] });
+
+			const resultPromise = runSingleAgent();
+			await vi.advanceTimersByTimeAsync(0);
+			await vi.advanceTimersByTimeAsync(2000);
+
+			// Assert: hard timeout also starts with SIGTERM, never a first SIGKILL
+			const killCalls = procRef!.kill.mock.calls.map((c: any[]) => c[0]);
+			expect(killCalls[0], "hard_timeout 首发信号必须是 SIGTERM").toBe("SIGTERM");
+
+			// Act: grace expires -> SIGKILL
+			await vi.advanceTimersByTimeAsync(SIGTERM_GRACE_MS);
+			expect(procRef!.kill.mock.calls.map((c: any[]) => c[0])).toEqual(["SIGTERM", "SIGKILL"]);
+
+			// Assert: stopReason semantics unchanged
+			const result = await resultPromise;
+			expect(result.isError).toBe(true);
+			expect(result.details.results[0].stopReason).toBe("hard_timeout");
 		});
 	});
 });

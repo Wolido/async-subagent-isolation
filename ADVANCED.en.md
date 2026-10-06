@@ -50,9 +50,10 @@ Delegate tasks to these specialized subagents via the `subagent` tool:
 
 Behavior details:
 
+- List mode (a `dispatch` field is configured): only agents **on this process's effective roster** are injected (the main process gets the S × C intersection; a subagent process follows `PI_SUBAGENT_ALLOWED`); nothing is injected when the roster is empty or when startup validation fail-closes (blocks); the roster is **rebuilt on every turn** (it comes from env/config, not from cached agent files). The two bullets below — "build and cache" and "depth guard" — apply to legacy mode only.
 - Line format: one agent per line, `name — description (source)`; the separator is a U+2014 em dash; source is `user` or `project`. Discovery semantics match `discoverAgents(cwd, "both")`: a project-level agent shadows a user-level one with the same name.
-- Build and cache: the injection text is built on the first hook trigger (`ctx.cwd` is unavailable at factory time, so it cannot be built earlier) and then cached in the factory closure. Mid-session agent file edits do not change the injection; `/reload` re-executes the factory, producing a fresh closure that rebuilds the roster. An empty build is cached the same way: agent files added after an empty first build do not trigger a rebuild and only appear after `/reload`.
-- Depth guard: no injection when `PI_SUBAGENT_DEPTH >= 1` (inside a subagent process); a subagent has no `subagent` tool surface, so the roster would be pure pollution.
+- Build and cache (legacy): the injection text is built on the first hook trigger (`ctx.cwd` is unavailable at factory time, so it cannot be built earlier) and then cached in the factory closure. Mid-session agent file edits do not change the injection; `/reload` re-executes the factory, producing a fresh closure that rebuilds the roster. An empty build is cached the same way: agent files added after an empty first build do not trigger a rebuild and only appear after `/reload`. A `dispatch` edit is not always a `/reload` matter: as long as C still carries the field, tightening (removing entries) takes effect immediately, while widening (adding entries) is immediate only for entries already in the same row of the startup snapshot S and otherwise requires `/reload` (see "Reload semantics" below for the full edges).
+- Depth guard (legacy): no injection when `PI_SUBAGENT_DEPTH >= 1` (inside a subagent process); a subagent has no `subagent` tool surface, so the roster would be pure pollution. In list mode a subagent process is injected the roster of its own list (via `PI_SUBAGENT_ALLOWED`).
 - Silent skip: a missing `ctx.cwd` or a build failure settles the injection to empty silently (no throw, no injection), and later triggers within the same factory instance do not retry.
 - Multi-line descriptions flattened: newlines, tabs and whitespace runs in a description collapse to single spaces, including multi-line text produced by YAML block scalars (`description: |`), so name, description and source marker always stay on one line.
 - With no agents discovered, nothing is injected and the system prompt is returned unchanged.
@@ -168,6 +169,78 @@ All interactive edits (`/subagent-config`) write to disk under the same guarante
 - BOM tolerance: config reads tolerate a UTF-8 BOM (the `\uFEFF` prefix is stripped before parsing).
 - The memory layer is exempt: overrides written to `this process` live only in process memory and never go through any disk-write path (see "Process memory-level temporary overrides" above).
 
+## Dispatch roster (dispatch)
+
+**Why a roster**
+
+- **Replacing the depth lock**: the old depth lock can only express "how many levels"; a roster expresses "A may dispatch B but not C". A roster has no notion of level or depth — hierarchy is a consequence, not a premise — and adding a role means adding a name to the relevant row, not restructuring the global config.
+- **Permission model**: a manager (an intermediate layer) must be a read-only persona — decision and execution are separated, and an executor that can modify files never gets dispatch rights; read-only plus `subagent` declared in `tools` is what allows dispatching.
+- **Capabilities built from zero + fail-closed**: no row = leaf (the `subagent` tool is not registered); a config mistake blocks at startup and registers no tool rather than falling back to the more permissive legacy behavior (fail-closed); an agent in no roster gets a notice, not an error.
+- **The structure is a roster (a DAG), not a tree**: the same agent may be referenced by several rows, pointing at the same node with a single copy of its capability (not duplicated per row); removing a row affects only that row and leaves the others untouched — which is also why the tree constraint (one unique parent per subagent) was rejected.
+- **The safety motivation for the S×C intersection**: tightening either source — the startup snapshot S or the runtime config C — takes effect; looking at one source alone would miss the other's tightening; and a runtime that cannot read `dispatch` never falls back to legacy pass-through.
+- **legacy compatibility**: neither config level defining a `dispatch` field means behavior identical to before the change (zero migration cost).
+
+The optional top-level `dispatch` field in `subagent-isolation.json` writes "who can dispatch whom" as a roster table:
+
+```json
+{
+  "dispatch": {
+    "main": ["coder", "reviewer"],
+    "coder": ["reviewer"]
+  }
+}
+```
+
+Field semantics and shape rule:
+
+- The value is an object shaped `{ "manager": ["dispatchable subagent", ...] }`; each row's value is a **string array** (elements are non-blank strings).
+- **`main` is the entry row**: the main agent's dispatch roster is `dispatch.main`.
+- **A missing row = leaf**: an agent that never appears on the left side of a row is a leaf and cannot dispatch further.
+- **The same agent name may be referenced by several rows**: they point at the same node, whose capability exists only once (it is not copied per row).
+- Shape rule: `dispatch` must be an object; a row's value must be an array; elements must be non-blank strings. Violations are reported as blocking item ① by the validation.
+
+**Lookup and replacement semantics**: config lookup matches model config — the user-level `~/.pi/agent/subagent-isolation.json` plus the nearest project-level `.pi/subagent-isolation.json` walking up from cwd. A project-level `dispatch` **replaces the user-level one wholesale** (not merged per key); if the project-level file has no such field, the user-level one is used.
+
+**S×C composition algorithm**:
+
+- S is the snapshot read at startup (at factory time) and fixed there; C is the runtime config read against the current cwd on every dispatch/injection.
+- An agent's (or `main`'s) effective roster is the **intersection** of its row from S and C: only the **present** sources contribute their row (a source absent wholesale does not participate), while a present source that lacks that row participates as an empty row; the order follows S when S exists (C when S does not), and the result is deduplicated.
+- If either side is present it is list mode (legacy is defined as neither config level having a `dispatch` field); child processes at depth ≥ 1 do not compose — they follow the `PI_SUBAGENT_ALLOWED` injected by the parent.
+
+**Empty roster fail-closed**: the registration gate is decided at factory time — a process whose effective roster is empty at startup does not register the `subagent` tool (it cannot dispatch); if the roster only shrinks to empty at runtime, the tool stays registered and every dispatch is rejected by the call gate (`Cannot dispatch "X". Allowed subagents: .`). `before_agent_start` injects no roster. The main process with an empty `main` row likewise registers nothing.
+
+**Manager constraint**: a manager agent in the roster (any key other than `main`) must be read-only, and its `tools` must declare `subagent`, otherwise startup validation blocks it.
+
+**Startup validation (run when a `dispatch` field is configured)**, blocking items:
+
+1. Invalid `dispatch` shape (not an object / a row that is not an array / an element that is not a string or is blank);
+2. A missing `main` row (the entry point);
+3. A name in the table with no matching agent `.md`;
+4. A manager agent that is not read-only (no `tools` declared, or `tools` containing `write`/`edit`; `bash` does not count as write/edit);
+5. A manager agent whose `tools` is declared and non-empty but does not declare `subagent` (the `--tools` whitelist also governs extension tools, so without it dispatch is impossible; a missing or empty `tools` is covered by item 4);
+6. A cycle in the table (self-loops included);
+7. A name unreachable from `main` along roster edges.
+
+Non-blocking notice: a discovered agent that appears in no roster (notice only).
+
+**Fail-closed consequences**: any blocking item → per-line `console.warn("[async-subagent-isolation] …")` at startup, **the `subagent` tool is not registered**, and the whole roster-injection block of the `before_agent_start` system prompt is skipped; `/subagent-dispatch` stays available for troubleshooting.
+
+**legacy compatibility**: neither config level defining a `dispatch` field means legacy mode, whose behavior is exactly as before the change (still bounded by the depth lock, with zero migration cost).
+
+**`/subagent-dispatch` output structure**:
+
+1. Effective roster (the S × C intersection): one line per agent (or `main`), `<agent name> → <composed roster>`;
+2. Reverse lookup (who dispatches it): `<child> ← <parents>`;
+3. Validation findings: the validation findings of S and C respectively, each prefixed `[S <cwd>]` / `[C <cwd>]`.
+
+When neither level defines `dispatch`, it prints `未配置 dispatch（legacy 模式）：subagent 工具不受名单限制，子进程内的派发仍由深度锁（PI_SUBAGENT_DEPTH）拦截。` Available in both modes (TUI and non-TUI): TUI uses notify, non-TUI uses console.log.
+
+**Reload semantics**: S is fixed at startup and C is re-read on every dispatch/injection, and the effective roster is their intersection. So editing the `dispatch` field is not always a `/reload` matter: as long as C still carries the field, tightening (removing entries) takes effect immediately (the re-read C shrinks the intersection at once), whereas widening (adding entries) is immediate only for entries already in the same row of the snapshot S and otherwise requires `/reload` (which re-executes the factory to refresh S). Edges (all for the main process): ① C is absent wholesale only when neither level provides the field any more (the key was removed, the file was deleted, its JSON fails to parse, or its top level is not an object) — then the roster falls back to S alone, nothing tightens, and `/reload` is needed for the switch (with no field at either level after the reload it falls back to legacy); deleting/corrupting only one level while the other still carries the field makes C fall back to the other level's row, and the intersection may change at once; by contrast, editing a shadowed level's file does not change C at all, and `/reload` does not help either (a project-level field replaces the user-level one wholesale). ② A `dispatch` key still present but shape-invalid (not an object, a row that is not an array, an element that is not a string or is blank) does not count as absent: a non-object or invalid-row case makes that row participate as an empty row (a dropped `main` row rejects everything), whereas an invalid element is merely dropped with the rest of its row kept — so the intersection tightens at most immediately and never widens. ③ A session that already fail-closed at startup, or whose startup roster was empty, never registered the `subagent` tool at all, so no config change in it (fixing an agent file's `tools` included) takes effect until `/reload` re-executes the factory. ④ A child process (`PI_SUBAGENT_DEPTH >= 1`) has its roster fixed when the parent dispatches it, via the parent-injected `PI_SUBAGENT_ALLOWED`; neither config edits nor `/reload` refresh it — only a fresh dispatch from the parent does — and deleting the `dispatch` field on the child's own side does not fall back to the legacy depth lock immediately either: while its S is still present the process stays in list mode with the roster still coming from `PI_SUBAGENT_ALLOWED` (same as in ①), and only a `/reload` inside the child refreshes S and falls back to the legacy depth lock. ⑤ A session that started with no `dispatch` at either level (S absent) registered the tool unconditionally, and once a `dispatch` field appears mid-session the roster comes from C alone, so additions and removals alike take effect immediately (that field never goes through startup validation).
+
+**Child-process propagation in list mode**: when the parent dispatches an agent, it writes that agent's composed roster (S × C composed under that agent's name) into the child's environment variable `PI_SUBAGENT_ALLOWED` (comma-separated); if empty, the variable is removed. Only when `dispatch` is configured on the child's own side does the child process (`PI_SUBAGENT_DEPTH >= 1`) use that env as its effective roster: non-empty means it can keep dispatching subordinates (nesting); empty means it registers no `subagent` tool. When neither level on the child's own side defines `dispatch` (e.g. it was started outside the config tree), the child stays on the legacy depth lock and the injected env is not honored — a known fail-closed usability limitation that never grants extra privilege. Legacy mode never sets the variable, so the child is still blocked by the depth lock.
+
+A dispatch outside the roster is rejected with the verbatim error `Cannot dispatch "X". Allowed subagents: a, b.` (X is the target agent name; the allowed list is comma+space separated, and it is empty when the roster is empty).
+
 ## Configuration commands (/subagent-config)
 
 ### The /subagent-config edit flow
@@ -184,7 +257,7 @@ One unified interactive entry. Main flow: pick an agent → pick a field → edi
 - model & thinking: enters the merged editing subflow (`editAgentModelConfig`), whose action layer offers `edit model & thinking` (annotated with the current effective model+thinking and their sources, `not set` in unset slots; a process override appends the `[saved: ...]` original-value fragment) and `clear model & thinking (reset to frontmatter)`. The edit branch walks the model value step (`$models` select when the list is non-empty, free-text input prefilled with the effective value otherwise) → thinking value step (pi's official 7 levels plus a `not set` option; the currently effective level or unset state is marked `(current)`; picking `not set` writes `thinking: null`, dropping the key from the entry) → write target (`this process` (in-memory, nothing written to disk, gone on process exit or `/reload`) / `user` / `project`, the currently governing source marked `(current)`) → one patch writes both fields, so the entry is always complete and can no longer accidentally shadow the other field at a lower level. The clear branch picks a write target, clears both fields of the whole entry (a missing entry is a no-op), and reports the recomputed fallback for each field separately with its source ("frontmatter" is only claimed when the recomputed source really is frontmatter, or the chain reached frontmatter with no value, i.e. unconfigured). ESC inside the subflow follows one rule: a model-value-step, thinking-value-step or write-target ESC returns to the action layer (collected values discarded, zero writes), and the action-layer ESC returns to the parent flow's field select (no exit, no subflow restart).
 - Reload hint matrix: after description edits the result notice asks for `/reload` (the injected roster is cached; see "Subagent roster injection" above); tools/skills/body/model & thinking edits report immediate effect, because every dispatch re-discovers agents and re-reads the config.
 - name is read-only: `name` is the agent's identity and does not appear in the field select; any patch containing `name` is rejected outright (see "Agent file write-back (updateAgentFile)" below).
-- Non-TUI mode: usage notice (warning) only — no dialogs, no writes.
+- Non-TUI mode: prints only `/subagent-config requires TUI mode (interactive config editor).` (warning) — no dialogs, no writes.
 
 ### Agent file write-back (updateAgentFile)
 
@@ -225,7 +298,7 @@ Once the subagent finishes, its result is pushed into the conversation:
 
 - Status: succeeded
 - Task: Refactor the auth middleware to use async/await.
-- Duration: 02:34 · Usage: 5 turns/↑12.5k/↓3.2k/$0.0042
+- Duration: 02:34 · Usage: 5 turns ↑13k ↓3.2k $0.0042
 - Session: 01912345-6789-7abc-8def-0123456789ab
 
 Other tasks in flight when this task ended: 1
@@ -237,7 +310,7 @@ Other tasks in flight when this task ended: 1
 
 **Trigger line**: between the title line and the metadata block sits a fixed blockquote line (`>` prefix), verbatim-identical in every envelope. It is a meta-instruction addressed to the main agent and does three jobs: identity correction (this is a completion notification, not a new user instruction), mainline retention (anchor the mainline task and progress currently in flight before processing), and a fixed processing order (anchor the mainline first, then digest the notification against dispatch records). The wording is deliberately unconditional, leaving no "the result is important, so interrupting the mainline is fine" loophole; since steer delivery inserts notifications mid-turn, the line restates mainline awareness verbatim at delivery. It enters only the LLM context and does not affect the summary card shown to the user in the TUI.
 
-Status enumeration: **succeeded** (exit=0) / **failed** (exit≠0 or stopReason=error) / **timed out** (activity_timeout or hard_timeout) / **cancelled** (aborted or killed_on_shutdown).
+Status enumeration: **succeeded** (clean exit, no recorded error, and a non-empty final assistant text) / **failed** (exit≠0, or a `stopReason` of `error`/`length`/`deferred`, or an `errorMessage` present, or no final text; exit=0 does not guarantee success) / **timed out** (`activity_timeout` or `hard_timeout`) / **cancelled** (`aborted` or `killed_on_shutdown`).
 
 **Duration**: the `- Duration:` line shows the subagent's real run time. When a result exists, it is the actual process run time (`finishedAt - startedAt`); when the result is null (user/agent cancel, session shutdown, internal error), it is measured from dispatch time instead. The format is `MM:SS`, or `H:MM:SS` at one hour and beyond (hours not zero-padded). All four terminal states (success, failure, timeout, cancelled) carry the duration in both the envelope and the TUI notification card.
 
@@ -248,9 +321,9 @@ Status enumeration: **succeeded** (exit=0) / **failed** (exit≠0 or stopReason=
 
 When the main agent receives a “cancelled” notification, it should distinguish the origin: a user cancel must never be auto-retried (ask the user first); an agent cancel is its own decision - do not re-dispatch without new information; a session-shutdown cancel can be re-dispatched after the session resumes, at the agent's discretion.
 
-**In-flight block**: the in-flight list in the envelope's metadata section lists the **other** background tasks still running (this task is removed from the registry before the envelope is built, so it never appears in its own list). Its format is `Other tasks in flight when this task ended: N` followed by one `- taskId (agent): task description` line per task, or `No other tasks were in flight when this task ended.` when none remain. It deliberately carries **no elapsed time and no clock time** (it answers "what else was running when this task ended", not "how long has it run" or "what time is it"). The block is a **build-time snapshot** whose wording is anchored to this task's end event rather than an absolute "now" - between envelope construction and delivery the main agent may have dispatched new tasks, making the snapshot stale; on conflict with dispatch records the main agent issued itself this turn, the dispatch records prevail. The main agent uses it to know how many tasks are still outstanding - while the count is non-zero, do not report "all done" to the user.
+**In-flight block**: the in-flight list in the envelope's metadata section lists the **other** background tasks still running (this task is removed from the registry before the envelope is built, so it never appears in its own list). Its format is `Other tasks in flight when this task ended: N` followed by one `- taskId (agent): task description` line per task, or `No other tasks were in flight when this task ended.` when none remain. It deliberately carries **no elapsed time and no clock time** (it answers "what else was running when this task ended", not "how long has it run" or "what time is it"). The block is a **build-time snapshot** whose wording is anchored to this task's end event rather than an absolute "now" - between envelope construction and delivery the main agent may have dispatched new tasks, making the snapshot stale; on conflict with dispatch records the main agent issued itself this turn, the dispatch records prevail. (Usage advice) The main agent uses it to know how many tasks are still outstanding - while the count is non-zero, do not report "all done" to the user.
 
-The full output enters the LLM context (not truncated). The `details` carries structured data (taskId, agent, status, exitCode, stopReason, durationMs (required, run time in milliseconds), usage, sessionId, full output) for programmatic consumption; it does not enter the LLM context.
+The full output enters the LLM context (not truncated). The `details` carries structured data (taskId, agent, status, exitCode, stopReason, durationMs (required, run time in milliseconds), usage, sessionId, output (truncated past 16 KB with a "... (truncated; full output in content)" marker; the full text is guaranteed only in content)) for programmatic consumption; it does not enter the LLM context.
 
 ### Notification delivery
 
@@ -284,7 +357,7 @@ From the TUI, the user enters `/subagent-cancel <taskId>` to cancel a single run
 /subagent-cancel <taskId>
 ```
 
-Without arguments, lists currently running tasks. The cancel source is recorded as `cancelledBy: "user"`.
+Without arguments: in the TUI, a picker of running tasks opens (Enter cancels the selection, Esc/q exits); in non-TUI mode, the running taskIds are listed in a notification. The cancel source is recorded as `cancelledBy: "user"`.
 
 To cancel all running tasks at once:
 
@@ -306,32 +379,33 @@ The main agent can call the `subagent` tool with `action="cancel"` (parameter `t
 
 ### /subagent-watch
 
-Watch a running background task's output live. User-only, from the TUI:
+Watch a running background task's output live. The live viewer is TUI-only:
 
 ```
 /subagent-watch <taskId>
 ```
 
 - Task not running (finished, unknown, or status other than `running`) → the viewer is not opened; the command notifies `Task not running — /subagent-watch shows running tasks only: <taskId>. Use /subagent-result for finished tasks.`
-- Without arguments → an interactive picker lists running tasks only; Enter opens the selected one.
-- The opened viewer is a full-screen live view refreshed every 1000ms: the body shows the `Original task` section (the task as dispatched by the main agent, verbatim) and the `Conversation log` section — completed entries (`[assistant]` / `→ tool` / `← tool result`, same shape as `/subagent-result`) plus the in-progress stream (`[streaming]`, from the running process's in-memory buffer, never written to disk); keys match `/subagent-result` (`↑↓`/`jk`, `Space`/`b`, `g`/`G`, `Enter`/`Esc`/`q`), anchored to the end.
+- Without arguments → an interactive picker lists running tasks only; Enter opens the selected one. The picker is TUI-only.
+- The opened viewer is a full-screen live view refreshed every 1000ms: the body shows the `Original task` section (the task as dispatched by the main agent, verbatim) and the `Conversation log` section — completed entries (`[assistant]` / `→ tool` / `← tool result`, same shape as `/subagent-result`) plus the in-progress stream (`[streaming]`, from the running process's in-memory buffer, never written to disk); keys match `/subagent-result` (`↑↓`/`jk`, `Space`/`b`, `g`/`G`, `Enter`/`Esc`/`q`), with a persistent key bar at the bottom whose text is verbatim `↑↓/jk line · b/PgUp & Space/PgDn page · g/G top/bottom · Enter/Esc/q close` (`Home`/`End` work but are deliberately left off the key bar, and `Shift+Q` closes the viewer just like `q`), anchored to the end.
 - When the watched task ends → refreshing stops and a fixed bottom line `Task finished — live updates stopped. Final result: /subagent-result <taskId>` is appended; the viewer stays open.
-- Non-TUI modes (print/json) → no viewer is opened; one line is printed: `[subagent-watch] taskId: <taskId> — live view requires TUI mode.`
+- Non-TUI modes (print/json) → no viewer is opened; with a taskId, one line is printed: `[subagent-watch] taskId: <taskId> — live view requires TUI mode.`; with no argument, the usage hint is printed: `Usage: /subagent-watch <taskId> — watch a running subagent task live.`
 - The data comes from the running process's in-memory state (message array and streaming buffer); the refresh cadence does not depend on the child's disk-flush timing.
 
 ### /subagent-result
 
-View the full final result of a background task. User-only, from the TUI:
+View the full final result of a background task. The full-screen viewer and the no-argument picker are TUI-only:
 
 ```
 /subagent-result <taskId>
 ```
 
-- Without arguments, prints usage.
-- Task still running → `Task still running — view it after it finishes`.
+- Without arguments (TUI) → a picker lists the 5 most recently finished tasks, Enter opens the selected one; without arguments (non-TUI) → prints usage.
+- Non-TUI with a `taskId`: the full result is printed straight to the terminal (`console.log`), with no viewer.
+- Task still running → `Task still running — view it after it finishes: <taskId>`.
 - No record found → `No task record for: <taskId>`.
 - Task exists but produced no final output (likely killed) → `Task has no final output` with the session file path.
-- When output exists, displays the full Markdown result in a full-screen viewer; press Enter or Esc to close.
+- When output exists, displays the full Markdown result in a full-screen viewer; press Enter or Esc to close. The viewer keeps a persistent key bar at the bottom whose text is verbatim `↑↓/jk line · b/PgUp & Space/PgDn page · g/G top/bottom · Enter/Esc/q close`; `Home`/`End` work but are deliberately left off the key bar, and `Shift+Q` closes the viewer just like `q`.
 
 ### session_shutdown
 
@@ -343,9 +417,12 @@ On quit, session switch, or reload, every in-flight child process is sent `SIGTE
 |----------|-----|----------------------|
 | execute returns | Dispatch receipt immediately | Full result after subagent finishes |
 | Result delivery | `[subagent-result]` system notification | Inline in the return value |
-| /subagent-cancel | Available | Not available (no TUI command system) |
-| /subagent-cancel-all | Available | Not available (no TUI command system) |
-| /subagent-watch | Available | Not available (no TUI command system) |
+| /subagent-cancel | Available (no-arg picker of running tasks) | Available (no-arg lists the running taskIds in a notification) |
+| /subagent-cancel-all | Available | Available |
+| /subagent-watch | Available (full-screen live viewer) | Available (prints one `… live view requires TUI mode.` line, no viewer) |
+| /subagent-result | Available (full-screen viewer; no argument opens a picker of the 5 most recent finished tasks) | Available (with a taskId, the full result goes to the terminal) |
+| /subagent-config | Available (interactive config) | Available but only prints `/subagent-config requires TUI mode (interactive config editor).` |
+| /subagent-dispatch | Available (notify) | Available (console.log) |
 | Parallel dispatch | Supported (independent tasks can be dispatched together) | Not supported (each call blocks) |
 
 ## Manual invocation
@@ -399,14 +476,18 @@ These variables are propagated into every subagent process automatically:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PI_SUBAGENT_DEPTH` | `0` | Current recursion depth. Auto-incremented per nested call. **Depth limit is 1** — a subagent (depth ≥ 1) cannot call any `subagent` action (including `action="cancel"`). |
+| `PI_SUBAGENT_DEPTH` | `0` | Current recursion depth. Auto-incremented per nested call. **The depth limit of 1 applies to legacy mode** — a subagent (depth ≥ 1) cannot call any `subagent` action (including `action="cancel"`); list mode does not use this depth lock, and the effective roster decides what it may dispatch. |
 | `PI_CURRENT_AGENT_NAME` | — | Name of the current agent, injected into every subagent process. |
 | `PI_SUBAGENT_ACTIVITY_TIMEOUT_MS` | `600000` (10 min) | Max idle time with no output on either stdout or stderr before the subagent is killed. |
 | `PI_SUBAGENT_HARD_TIMEOUT_MS` | `0` (disabled) | Absolute maximum runtime for a single call. Set a positive value (ms) to enable. |
+| `PI_SUBAGENT_ALLOWED` | — (unset = empty) | The dispatch roster the parent injects into a subagent (comma-separated); the subagent process's effective roster follows it. Unset or empty means an empty roster. |
+| `PI_SUBAGENT_SHUTDOWN_KILL_GRACE_MS` | `5000` | On session_shutdown, `SIGTERM` goes first, then a detached helper sends `SIGKILL` after the grace period; 24h upper bound — invalid or out-of-range values fall back to the default. |
 
 ## Timeouts and termination
 
 - Activity timeout: 10 minutes — subagent is killed if neither stdout nor stderr produces output (no activity). The timer starts as soon as the child process spawns and resets whenever either stream receives data.
 - Hard timeout: disabled by default (`PI_SUBAGENT_HARD_TIMEOUT_MS=0`), no absolute maximum runtime. Set a positive value in milliseconds to enable.
+- Liveness during nested waits: while a parent synchronously dispatches a child, it keeps reporting liveness through the tool progress channel (child progress plus a periodic heartbeat during silence), so an intermediate waiting on a child is not mistaken for a silent direct child by the upstream activity timeout. The activity-timeout semantics are unchanged: it still watches only the **direct child's** stdout/stderr for real silence.
 - When a timeout kills the subagent, the result's `stopReason` is `"activity_timeout"` (activity timeout) or `"hard_timeout"` (hard timeout). It appears in the diagnostic output (`Stop reason: ...`) and as a UI badge, distinguishing "killed by timeout" from "subagent failed on its own".
-- On `AbortSignal`, `SIGTERM` is sent; `SIGKILL` follows after 5 seconds if still running. In async mode, users can trigger cancellation with `/subagent-cancel <taskId>` or `/subagent-cancel-all`.
+- On `AbortSignal`, `SIGTERM` is sent; `SIGKILL` follows after 5 seconds if still running; timeout termination is likewise SIGTERM-first. In async mode, users can trigger cancellation with `/subagent-cancel <taskId>` or `/subagent-cancel-all`.
+- Termination order: the timeout-kill path is SIGTERM → 5000ms grace → SIGKILL (sharing `SIGTERM_GRACE_MS = 5000` with the cancel kill); finalize is deferred until after the process exits.

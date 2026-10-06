@@ -433,8 +433,13 @@ describe("异步化改造 - TDD 红阶段", () => {
 			procRef!.stdout.emit("data", Buffer.from('{"type":"turn_start"}\n'));
 			await vi.advanceTimersByTimeAsync(0);
 
-			// Wait for activity timeout
+			// 超时后：新契约首发 SIGTERM，finalize 延迟到进程退出（信封不再即时发出）
 			await vi.advanceTimersByTimeAsync(1500);
+			expect(procRef!.kill).toHaveBeenCalledWith("SIGTERM");
+
+			// 进程在宽限期内退出 → 信封到达
+			endProcess(procRef!, null, "SIGTERM");
+			await vi.advanceTimersByTimeAsync(1000);
 
 			expect(pi.sendMessage).toHaveBeenCalled();
 			const [message] = pi._sendMessageCalls[0];

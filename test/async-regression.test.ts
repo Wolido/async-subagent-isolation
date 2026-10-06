@@ -463,9 +463,14 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			expect(result.isError).toBeFalsy();
 			expect(taskRegistry.size).toBe(1);
 
-			// Advance past the hard timeout — timer fires inside runSingleAgent,
-			// kills the process, and triggers completeAsyncTask → sendMessage
+			// Advance past the hard timeout — the timer fires inside runSingleAgent
+			// and 新契约首发 SIGTERM（finalize 延迟到进程退出，信封不再即时发出）。
 			await vi.advanceTimersByTimeAsync(3000);
+			expect(procRef!.kill).toHaveBeenCalledWith("SIGTERM");
+
+			// 进程在宽限期内退出 → 信封到达
+			endProcess(procRef!, null, "SIGTERM");
+			await vi.advanceTimersByTimeAsync(1000);
 
 			// Envelope should be sent with timeout status
 			expect(pi.sendMessage).toHaveBeenCalled();
@@ -488,6 +493,11 @@ describe("异步化回归测试 & B1 红阶段", () => {
 			);
 
 			await vi.advanceTimersByTimeAsync(2000);
+			expect(procRef!.kill).toHaveBeenCalledWith("SIGTERM");
+
+			// 进程在宽限期内退出 → finalize 延迟到退出，信封到达
+			endProcess(procRef!, null, "SIGTERM");
+			await vi.advanceTimersByTimeAsync(1000);
 
 			expect(pi.sendMessage).toHaveBeenCalled();
 			const [message] = pi._sendMessageCalls[0];

@@ -410,6 +410,11 @@ describe("子 agent 返回时长 — 全流程（信封 + 同步结果）", () =
 			procRef!.stdout.emit("data", Buffer.from('{"type":"turn_start"}\n'));
 			await vi.advanceTimersByTimeAsync(0);
 			await vi.advanceTimersByTimeAsync(1500);
+			expect(procRef!.kill).toHaveBeenCalledWith("SIGTERM");
+
+			// 进程在宽限期内退出 → finalize 延迟到退出，信封到达
+			endProcess(procRef!, null, "SIGTERM");
+			await vi.advanceTimersByTimeAsync(1000);
 
 			expect(pi.sendMessage).toHaveBeenCalled();
 			const [message] = pi._sendMessageCalls[0];
@@ -508,10 +513,15 @@ describe("子 agent 返回时长 — 全流程（信封 + 同步结果）", () =
 			expect(procRef, "子进程应已 spawn").not.toBeNull();
 
 			// 产生一次活动后保持静默；硬计时器独立于活动计时器，T=1000 触发
-			// SIGKILL + finalize(1)（默认活动超时 600s，不会抢先触发）
+			// （新契约：首发 SIGTERM，finalize 延迟到进程退出；默认活动超时 600s，不会抢先触发）
 			procRef!.stdout.emit("data", Buffer.from('{"type":"turn_start"}\n'));
 			await vi.advanceTimersByTimeAsync(0);
 			await vi.advanceTimersByTimeAsync(1500);
+			expect(procRef!.kill).toHaveBeenCalledWith("SIGTERM");
+
+			// 进程在宽限期内退出 → 信封到达
+			endProcess(procRef!, null, "SIGTERM");
+			await vi.advanceTimersByTimeAsync(1000);
 
 			expect(pi.sendMessage).toHaveBeenCalled();
 			const [message] = pi._sendMessageCalls[0];

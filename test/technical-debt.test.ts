@@ -458,10 +458,8 @@ describe("Technical debt: race conditions and boundary bugs", () => {
 
 		it("(b) when activity timeout fires first, hard timer should be cleared and not override stopReason", async () => {
 			// Activity at 500ms, hard at 1000ms
-			// When activity timer fires, finalize() clears the hard timer synchronously.
-			// This test verifies that behavior: hard timer should not fire after activity timer resolves.
-			// NOTE: This test PASSES on current code because finalize clears hardTimer.
-			// It serves as a regression guard to ensure this ordering is maintained.
+			// 新契约：activity 超时首发 SIGTERM，finalize 延迟到进程退出；首个超时者胜出——
+			// activity 触发时必须清掉 hardTimer，hard_timeout 不得覆盖 stopReason。
 			process.env.PI_SUBAGENT_ACTIVITY_TIMEOUT_MS = "500";
 			process.env.PI_SUBAGENT_HARD_TIMEOUT_MS = "1000";
 
@@ -472,25 +470,26 @@ describe("Technical debt: race conditions and boundary bugs", () => {
 			procRef!.stdout.emit("data", Buffer.from('{"type":"turn_start"}\n'));
 			await vi.advanceTimersByTimeAsync(0);
 
-			// Activity timeout fires at T=500ms → sets stopReason="activity_timeout", calls finalize(1)
+			// Activity timeout fires at T=500ms → SIGTERM first
 			await vi.advanceTimersByTimeAsync(500);
+			expect(procRef!.kill).toHaveBeenCalledWith("SIGTERM");
 
-			// finalize() from activity timer clears hardTimer synchronously.
-			// Advance past where hard timer WOULD have fired.
+			// Advance past where hard timer WOULD have fired (T=1000ms): the hard
+			// timer must have been cleared — first timeout wins, no SIGKILL yet.
 			await vi.advanceTimersByTimeAsync(500);
+			expect(procRef!.kill.mock.calls.map((c: any[]) => c[0])).toEqual(["SIGTERM"]);
+
+			// 宽限到期（T=5500ms = activity 超时后 5000ms）→ 恰好一次 SIGKILL 升级
+			await vi.advanceTimersByTimeAsync(4500);
+			expect(procRef!.kill.mock.calls.map((c: any[]) => c[0])).toEqual(["SIGTERM", "SIGKILL"]);
 
 			endProcess();
 			await vi.advanceTimersByTimeAsync(0);
 
 			const result = await resultPromise;
 
-			// stopReason should remain "activity_timeout" — hard timer was cleared by finalize.
+			// stopReason should remain "activity_timeout" — 首个超时者胜出
 			expect(result.details.results[0].stopReason).toBe("activity_timeout");
-			// Hard timer should not have called kill
-			const sigkillCalls = procRef!.kill.mock.calls.filter(
-				(call: any[]) => call[0] === "SIGKILL",
-			);
-			expect(sigkillCalls).toHaveLength(1); // only from activity timer
 		});
 
 		it("(b) hard timeout fires first → stopReason should be hard_timeout", async () => {

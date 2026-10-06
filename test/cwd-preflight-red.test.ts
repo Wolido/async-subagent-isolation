@@ -1,42 +1,48 @@
 /**
- * RED-phase tests: preflight validation for subagent cwd + command executable
+ * Tests for the pre-spawn validation (preflight) of the subagent cwd + command.
  *
- * These tests are written against the **desired** behavior described in the
- * product decision doc. They **expect failure** until the coder implements:
- *   1. CWD existence verification (pre-spawn, not post-error-in-stderr).
- *   2. Structured error propagation (isError=true via result channel, not
- *      only stderr text).
- *   3. Command-executable check (process.execPath must exist + be X_OK).
+ * The product contract this file locks:
+ *   1. The call no longer accepts a cwd parameter. The subprocess cwd is always
+ *      the caller's session cwd (`ctx.cwd`), so preflight only ever validates
+ *      that session cwd — a stray `cwd` key in the call params must not reach
+ *      the preflight at all (see the ignored-key case in section C and
+ *      test/cwd-resolution.test.ts).
+ *   2. The four verdict codes and their precedence stay unchanged:
+ *      CWD_MISSING / CWD_NOT_DIR / CWD_INACCESSIBLE / EXEC_MISSING.
+ *   3. Interception is observable through structured result fields and through
+ *      the exact error wording, which attributes the directory to the session
+ *      cwd only. The old "来源: agent cwd 参数" sentence is gone together with
+ *      the parameter it described (the negative guards below keep it from
+ *      reappearing).
+ *   4. `PreflightFacts.source` is always "session" — the param source is gone
+ *      with the parameter, so the field is `source?: "session"` and no fixture
+ *      ever feeds "param" any more.
  *
- * Tests are grouped into eleven families:
- *   A – characterisation (proves current misleading ENOENT symptom via raw Node spawn)
- *   B – behavioural contract (asserts future API shapes / exported functions)
- *   C – behavioral integration via public execute() (spawn mocked for call-count assertion)
- *   D – regression (valid paths unchanged)
- *   E – structured output (error exposes fields on result channel)
+ * Tests are grouped into these families:
+ *   A – characterisation (proves the misleading ENOENT symptom via raw Node spawn)
+ *   B – behavioural contract of the exported async `preflightSpawn`
+ *   C – behavioral integration via public execute() (spawn mocked; rejection is
+ *       driven through the session cwd, the only cwd source left)
+ *   D – regression (valid session cwd paths unchanged)
+ *   E – structured output (error exposes fields on the result channel)
  *   F – R2: the two preflight entries (exported async `preflightSpawn` and the
  *       sync one behind execute()) must map identical errno facts identically
  *   G – R3/R4: CWD_INACCESSIBLE semantics + deterministic permission branch
- *   H – R5: empty / whitespace-only `cwd` param must behave like "no param"
- *   I – R6: `~user/x` must not be silently expanded
+ *   H – R5: a blank `cwd` key behaves like an omitted key (the key itself is
+ *       ignored; cf. test/cwd-resolution.test.ts)
+ *   I – R6: `~user/x` is neither expanded nor rejected any more — the key is
+ *       inert, so the dispatch proceeds at the session cwd
  *   J – G1/D4: a *bare* command name must never be X_OK-checked, in either
  *       preflight entry (mutation-verified: removing `path.isAbsolute(command)`
- *       from src/index.ts:295 / :322 used to leave all 738 tests green)
+ *       used to leave all tests green)
  *   K – G2: the exhaustive cwd/exec probe truth table — "a probe threw" and
  *       "a probe answered false" are different facts and must produce
  *       different verdicts (and never a silent OK)
  *
- * Hint for the implementation round (not asserted here, prevention of the
- * original bug class): the `cwd` schema description (src/index.ts, `cwd:
- * Type.Optional(Type.String({ description: … }))` in the subagent tool schema)
- * must state that a missing directory is a hard error (never auto-created) and
- * that only `~/…` and bare `~` are expanded — `~user/…` is not. That text is
- * read by the model on every dispatch, so it is the cheapest place to keep the
- * misleading-spawn-ENOENT bug from coming back.
- *
  * Fixture conventions (matching existing test files):
  *   tmpBase  → mkdtemp under os.tmpdir()
- *   defaultCwd → path under tmpBase where .pi/agents/tester.md lives
+ *   defaultCwd → path under tmpBase where .pi/agents/tester.md lives; it is
+ *                also the session cwd passed through `ctx.cwd`
  *   getAgentDir(mock) → separate agentDir under tmpBase
  *   Extension loaded once per beforeEach; vi.clearAllMocks() after each.
  */
@@ -84,7 +90,9 @@ interface PreflightResult {
 		 *  true (the code's own meaning: the directory IS there, something else
 		 *  is wrong). */
 		cwdExists?: boolean;
-		source?: "param" | "session";
+		/** The session cwd is the only cwd source left after the cwd call
+		 *  parameter was removed, so the type is narrowed to "session". */
+		source?: "session";
 	};
 }
 
@@ -144,13 +152,11 @@ const ENV_KEYS = [
 class Fixture {
 	tmpBase!: string;
 	agentDir!: string;
+	/** The session cwd. It is the only cwd the subprocess can ever run in
+	 *  (execute() receives it through `ctx.cwd`), and therefore the only cwd
+	 *  the preflight can validate: rejection cases below point `ctx.cwd` at a
+	 *  missing path, a file or an unreadable path. */
 	defaultCwd!: string;
-	/** NOTE: this path never reaches production code. `execute()` receives the
-	 *  session cwd through `ctx.cwd` (== `defaultCwd`), which `runSingleAgent`
-	 *  passes to `resolveAgentCwd({ sessionCwd: defaultCwd })`. Kept only as an
-	 *  extra tmp path; validating "the session cwd itself" must delete
-	 *  `defaultCwd`, not this one (see [c5]). */
-	sessionCwd!: string;
 	spawnCalls: Array<{ command: string; args: string[]; options: unknown }> = [];
 	executeTool!: ExecuteFn;
 	savedEnv: Record<string, string | undefined> = {};
@@ -158,10 +164,8 @@ class Fixture {
 	beforeEach_(): void {
 		this.tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), "subagent-preflight-test-"));
 		this.agentDir = path.join(this.tmpBase, "agent-dir");
-		this.defaultCwd = path.join(this.tmpBase, "default-cwd");
-		this.sessionCwd = path.join(this.tmpBase, "session-cwd");
+		this.defaultCwd = path.join(this.tmpBase, "session-cwd");
 		fs.mkdirSync(path.join(this.defaultCwd, ".pi", "agents"), { recursive: true });
-		fs.mkdirSync(this.sessionCwd, { recursive: true });
 
 		// Write agent config where discoverAgents will find it
 		fs.writeFileSync(
@@ -216,28 +220,44 @@ class Fixture {
 		taskRegistry.clear();
 	}
 
-	async runSubagent(cwdParam?: string, extraParams?: Record<string, unknown>): Promise<any> {
+	/**
+	 * Dispatch through the public execute() seam. `sessionCwd` becomes the
+	 * `ctx.cwd` the tool is called with (defaults to the fixture's session
+	 * cwd); the call params themselves carry no cwd anymore.
+	 */
+	async runSubagent(extraParams?: Record<string, unknown>, sessionCwd?: string): Promise<any> {
 		const params: Record<string, unknown> = { agent: "tester", task: "test task", sessionId: SESSION_ID };
-		if (cwdParam !== undefined) params.cwd = cwdParam;
 		Object.assign(params, extraParams ?? {});
-		return this.executeTool!("call-1", params, undefined, undefined, { cwd: this.defaultCwd, hasUI: false });
+		return this.executeTool!("call-1", params, undefined, undefined, {
+			cwd: sessionCwd ?? this.defaultCwd,
+			hasUI: false,
+		});
 	}
 
 	/**
-	 * Dispatch through the public execute() seam and assert the run was rejected
-	 * before spawn, returning `{ result, row }` where `row` is the structured
-	 * SingleResult carrying `preflightCode` / `preflightFields` — the facts the
-	 * *synchronous* preflight entry produced.
+	 * Dispatch with an intentionally broken session cwd and assert the run was
+	 * rejected before spawn, returning `{ result, row }` where `row` is the
+	 * structured SingleResult carrying `preflightCode` / `preflightFields` —
+	 * the facts the *synchronous* preflight entry produced.
+	 *
+	 * `agentScope: "user"` is the default here on purpose: the fixture also
+	 * keeps the same agent under the mocked user agent dir, so agent discovery
+	 * does not depend on the (deliberately broken) session cwd and the zero-
+	 * spawn assertion cannot become a false green that died at the
+	 * "unknown agent" guard.
 	 */
 	async expectRejection(
-		cwdParam?: string,
+		sessionCwd: string,
 		extraParams?: Record<string, unknown>,
 	): Promise<{ result: any; row: any }> {
-		const result = await this.runSubagent(cwdParam, extraParams);
+		const result = await this.runSubagent({ agentScope: "user", ...(extraParams ?? {}) }, sessionCwd);
 		expect(this.spawnCalls).toHaveLength(0);
 		expect(result.isError).toBe(true);
 		const row = result.details?.results?.[0];
 		expect(row?.preflightCode).toBeTruthy();
+		// The session cwd is the only source left: a rejection must never claim the
+		// directory came from a call parameter (that key no longer exists).
+		expect(row?.preflightFields?.source).toBe("session");
 		return { result, row };
 	}
 }
@@ -247,17 +267,11 @@ class Fixture {
 type AsyncPreflightFn = (opts: {
 	command: string;
 	cwd: string;
-	source?: "param" | "session";
+	source?: "session";
 	checkExists: (p: string) => Promise<boolean>;
 	isDir: (p: string) => Promise<boolean>;
 	hasExec: (p: string) => Promise<boolean>;
 }) => Promise<PreflightResult>;
-
-type ResolveAgentCwdFn = (opts: {
-	paramCwd?: string;
-	sessionCwd: string;
-	homedir: string;
-}) => { cwd: string; source: "param" | "session" };
 
 async function loadExport<T>(name: string): Promise<T> {
 	const mod = await import("../src/index.ts");
@@ -332,41 +346,8 @@ describe("A. Characterisation: current spawn-ENOENT symptom", () => {
 });
 
 /* ═══════════════════════════════════════════════════════════════════
- * B. BEHAVIOURAL CONTRACT — asserts future API shapes
- *    (These fail because the functions don't exist yet.)
+ * B. BEHAVIOURAL CONTRACT — asserts the preflight API shape
  * ═══════════════════════════════════════════════════════════════════ */
-
-describe("B. Contract: resolveAgentCwd utility function must exist", () => {
-	it("[contract-B1] resolveAgentCwd is a named export from the extension module", async () => {
-		const mod = await import("../src/index.ts");
-		expect(("resolveAgentCwd" in mod)).toBe(true); // RED: function not yet exported
-	});
-
-	it("[contract-B2] resolveAgentCwd correctly resolves ~/ relative to injected homedir", async () => {
-		const mod = await import("../src/index.ts");
-		const fn = (mod as any).resolveAgentCwd;
-		expect(typeof fn).toBe("function");
-		const result = fn({ paramCwd: "~/my/task/dir", sessionCwd: "/nonexistent/session", homedir: "/tmp/homedir-fixture" });
-		expect(result.cwd).toBe("/tmp/homedir-fixture/my/task/dir");
-		expect(result.source).toBe("param");
-	});
-
-	it("[contract-B3] resolveAgentCwd resolves relative paths against sessionCwd (not process.cwd())", async () => {
-		const mod = await import("../src/index.ts");
-		const fn = (mod as any).resolveAgentCwd;
-		const result = fn({ paramCwd: "sub/tasks", sessionCwd: "/sessions/base", homedir: "/tmp/homedir" });
-		expect(result.cwd).toBe(path.resolve("/sessions/base", "sub/tasks"));
-		expect(result.source).toBe("param");
-	});
-
-	it("[contract-B4] when no paramCwd, falls back to sessionCwd with source=session", async () => {
-		const mod = await import("../src/index.ts");
-		const fn = (mod as any).resolveAgentCwd;
-		const result = fn({ sessionCwd: "/some/session", homedir: "/tmp/h" });
-		expect(result.cwd).toBe("/some/session");
-		expect(result.source).toBe("session");
-	});
-});
 
 describe("B. Contract: preflightSpawn must return structured results", () => {
 	it("[contract-B5] preflightSpawn is a named export from the extension module", async () => {
@@ -456,19 +437,10 @@ describe("B. Contract: preflightSpawn must return structured results", () => {
 
 /* ═══════════════════════════════════════════════════════════════════
  * C. BEHAVIORAL INTEGRATION — via public execute(), real temp dirs
- *    Spawn IS mocked so we assert call counts; error logic flows
- *    through the full pipeline without the buggy behavior being fixed.
- * ═══════════════════════════════════════════════════════════════════ */
-
-/* ═══════════════════════════════════════════════════════════════════
- * C. BEHAVIORAL INTEGRATION — via public execute(), real temp dirs
  *    Uses Fixture.spawnCalls spy (mock that returns success) to detect
- *    whether spawn was invoked. After preflight is added, spawn must NOT
- *    fire for invalid cwd inputs — this assertion proves that.
- *
- *    Note: result.isError stays undefined under the mock because mock
- *    spawn always succeeds. That's expected — the key behavioral change
- *    we're testing is "no spawn call", not the downstream isError flag.
+ *    whether spawn was invoked. The call no longer accepts a cwd, so
+ *    rejection cases are driven through the session cwd (`ctx.cwd`) — the
+ *    only cwd source left. Spawn must NOT fire for an invalid session cwd.
  * ═══════════════════════════════════════════════════════════════════ */
 
 describe("C. Behavioral integration: execute() enforces preflight before spawn", () => {
@@ -477,103 +449,98 @@ describe("C. Behavioral integration: execute() enforces preflight before spawn",
 	beforeEach(() => f.beforeEach_());
 	afterEach(() => f.afterEach_());
 
-	it("[c1] paramCwd → nonexistent deep dir: spawn never called after fix; cwd value present in output", async () => {
-		const nonExistentDeep = path.join(f.tmpBase, "no/such/deep/nested/dir");
+	it("[c1] a stray cwd key pointing at a nonexistent dir is ignored: dispatch proceeds at the session cwd", async () => {
+		// Second line of defence, at the execute() seam: the schema no longer
+		// advertises cwd (first guard, locked in test/cwd-resolution.test.ts), and
+		// even a stale caller that still sends the key must not change behaviour —
+		// the key is ignored, never validated, so it cannot add an error path
+		// either. The dispatch must behave exactly as if the key were absent.
+		const ignored = path.join(f.tmpBase, "ignored-cwd-key-no-such-dir");
 
-		const result = await f.runSubagent(nonExistentDeep);
+		const result = await f.runSubagent({ cwd: ignored });
 
-		// Post-fix: preflight must catch this BEFORE spawn → zero calls
-		expect(f.spawnCalls).toHaveLength(0);
-
-		// Post-fix: text should mention the cwd so user knows which dir failed
+		// The removed call key must not reach the preflight at all.
+		// Lock: a stray cwd key is ignored before preflight — it can never
+		// produce CWD_MISSING or move the spawn; the case was RED before the
+		// parameter was removed.
+		expect(f.spawnCalls).toHaveLength(1);
+		expect((f.spawnCalls[0].options as any).cwd).toBe(f.defaultCwd);
+		expect(result.isError).toBe(undefined);
 		const text = result.content?.[0]?.text ?? "";
-		expect(text).toContain(nonExistentDeep);
+		expect(text).not.toContain("[CWD_");
+		expect(text).not.toContain("agent cwd 参数");
 	});
 
-	it("[c2a] paramCwd='~/...' expands correctly (target exists → success, spawn called)", async () => {
-		// Create the expanded target directory under a controlled root
-		const homedirReal = os.homedir();
-		const expandedTarget = path.join(homedirReal, "__preflight_expand_ok__");
-		fs.mkdirSync(expandedTarget, { recursive: true });
-		try {
-			const result = await f.runSubagent("~/__preflight_expand_ok__");
-			expect(result.isError).toBe(undefined); // success path
-			expect(f.spawnCalls).toHaveLength(1);
-			// Post-fix: tilde should be resolved to actual homedir path
-			expect((f.spawnCalls[0].options as any).cwd).toBe(expandedTarget);
-		} finally {
-			fs.rmSync(expandedTarget, { recursive: true, force: true });
-		}
-	});
-
-	it("[c2b] paramCwd='~/...' expands correctly (target doesn't exist → spawn NOT called)", async () => {
-		const nonExistentTilde = "~/__preflight_expand_missing_" + Date.now();
-
-		const result = await f.runSubagent(nonExistentTilde);
-
-		// Post-fix: preflight resolves tilde, finds missing dir → no spawn
-		expect(f.spawnCalls).toHaveLength(0);
-	});
-
-	it("[c3] paramCwd relative path resolves against defaultCwd (the effective cwd), not process.cwd()", async () => {
-		// Pass an absolute path pointing into nonexistent deep dir.
-		// In the current code, effectiveCwd = paramCwd if given.
-		// After fix, preflight validates it. Either way, spawn should NOT fire.
-		const fakeResolved = path.join(f.tmpBase, "fake-relative-no-such-dir");
-
-		const result = await f.runSubagent(fakeResolved);
-
-		expect(f.spawnCalls).toHaveLength(0);
-	});
-
-	it("[c4] paramCwd points to a FILE → spawn NOT called (CWD_NOT_DIR)", async () => {
-		const fileTarget = path.join(f.tmpBase, "this-is-a-file-not-a-dir.txt");
-		fs.writeFileSync(fileTarget, "I am content, not a directory", "utf-8");
-
-		const result = await f.runSubagent(fileTarget);
-
-		// After fix: preflight sees a file, returns CWD_NOT_DIR → no spawn
-		expect(f.spawnCalls).toHaveLength(0);
-
-		fs.unlinkSync(fileTarget);
-	});
-
-	it("[c5] session cwd itself doesn't exist → CWD_MISSING attributed to source=session, no spawn", async () => {
-		// R1: agent discovery must not depend on ctx.cwd, otherwise deleting the
-		// session cwd makes the dispatch fail at the "unknown agent" guard and
-		// `spawnCalls.length === 0` would be a FALSE green. So: the agent definition
-		// is also present under the mocked getAgentDir() (see beforeEach_), and this
-		// dispatch pins agentScope:"user" — project discovery (which reads ctx.cwd)
-		// is skipped entirely. What is left failing is the session cwd itself,
-		// i.e. `defaultCwd`, which is the value execute() actually forwards to
-		// runSingleAgent (src/index.ts: runSingleAgent(defaultCwd = ctx.cwd) →
-		// resolveAgentCwd({ sessionCwd: defaultCwd })).
+	it("[c2] a missing session cwd is rejected as CWD_MISSING, naming the directory and the session source", async () => {
+		// Agent discovery must not depend on ctx.cwd (hence the user-scope agent
+		// copy in the fixture + agentScope "user" via expectRejection), otherwise
+		// deleting the session cwd would fail earlier at the "unknown agent" guard
+		// and the zero-spawn assertion would be a false green.
 		fs.rmSync(f.defaultCwd, { recursive: true, force: true });
 
-		const result = await f.runSubagent(undefined, { agentScope: "user" });
-
-		// Effect: the fallback-to-session-cwd path must be validated before spawn.
-		expect(f.spawnCalls).toHaveLength(0);
+		const { result, row } = await f.expectRejection(f.defaultCwd);
 
 		// Cause (locked, not just the symptom): a structured CWD_MISSING on the
 		// result channel, pointing at the session cwd.
-		expect(result.isError).toBe(true);
-		const row = result.details?.results?.[0];
-		// The dispatch must have got PAST agent discovery — the "unknown agent"
-		// guard also leaves spawnCalls empty, which is the false green R1 warns about.
-		expect(row?.agent).toBe("tester");
-		expect(row?.agentSource).toBe("user");
-		expect(row?.preflightCode).toBe("CWD_MISSING");
-		expect(row?.preflightFields?.cwd).toBe(f.defaultCwd);
-		expect(row?.preflightFields?.cwdExists).toBe(false);
-		expect(row?.preflightFields?.source).toBe("session");
+		expect(row.agent).toBe("tester");
+		expect(row.agentSource).toBe("user");
+		expect(row.preflightCode).toBe("CWD_MISSING");
+		expect(row.preflightFields?.cwd).toBe(f.defaultCwd);
+		expect(row.preflightFields?.cwdExists).toBe(false);
+		expect(row.preflightFields?.source).toBe("session");
 
-		// Text surfaced to the model names the code and the offending directory.
+		// Text surfaced to the model names the code and the offending directory,
+		// and never attributes the directory to the removed call parameter (the
+		// key no longer exists, so such a source note would be a lie).
 		const text = result.content?.[0]?.text ?? "";
 		expect(text).toContain("[CWD_MISSING]");
+		expect(text).toContain("子代理工作目录不存在");
 		expect(text).toContain(f.defaultCwd);
+		expect(text).not.toContain("agent cwd 参数");
 		// Must not degrade into the raw Node message that started this bug.
 		expect(text).not.toMatch(/spawn .* ENOENT/);
+	});
+
+	it("[c3] a session cwd that is a FILE is rejected as CWD_NOT_DIR before spawn", async () => {
+		const fileTarget = path.join(f.tmpBase, "this-is-a-file-not-a-dir.txt");
+		fs.writeFileSync(fileTarget, "I am content, not a directory", "utf-8");
+		try {
+			const { result, row } = await f.expectRejection(fileTarget, { agentScope: "user" });
+
+			expect(row.preflightCode).toBe("CWD_NOT_DIR");
+			expect(row.preflightFields?.cwd).toBe(fileTarget);
+			expect(row.preflightFields?.cwdExists).toBe(true);
+			const text = result.content?.[0]?.text ?? "";
+			expect(text).toContain("[CWD_NOT_DIR]");
+			expect(text).toContain("不是目录");
+			expect(text).toContain(fileTarget);
+			expect(text).not.toContain("agent cwd 参数");
+		} finally {
+			fs.unlinkSync(fileTarget);
+		}
+	});
+
+	it("[c4] a nonexistent absolute command is rejected as EXEC_MISSING before spawn", async () => {
+		// Force getPiInvocation() onto an absolute-but-gone runtime path:
+		// process.argv[1] is left alone, so the command is process.execPath.
+		const realExecPath = process.execPath;
+		process.execPath = path.join(f.tmpBase, "gone-runtime", "pi");
+		try {
+			const result = await f.runSubagent();
+
+			expect(f.spawnCalls).toHaveLength(0);
+			expect(result.isError).toBe(true);
+			const row = result.details?.results?.[0];
+			expect(row?.preflightCode).toBe("EXEC_MISSING");
+			expect(row?.preflightFields?.command).toBe(process.execPath);
+			expect(row?.preflightFields?.source).toBe("session");
+			const text = result.content?.[0]?.text ?? "";
+			expect(text).toContain("[EXEC_MISSING]");
+			expect(text).toContain(process.execPath);
+			expect(text).toContain("重启");
+		} finally {
+			process.execPath = realExecPath;
+		}
 	});
 
 	it("[c6] invalid command path → EXEC_MISSING contract verified (see B-contract)", async () => {
@@ -581,7 +548,7 @@ describe("C. Behavioral integration: execute() enforces preflight before spawn",
 		// This integration-layer check verifies preflightSpawn exists:
 		const mod = await import("../src/index.ts");
 		const fn = (mod as any).preflightSpawn;
-		expect(typeof fn).toBe("function"); // RED: will fail until implemented
+		expect(typeof fn).toBe("function"); // guard: the export must stay
 
 		const tmpFile = path.join(os.tmpdir(), "exec-missing-command-test-" + Date.now());
 		fs.writeFileSync(tmpFile, "#!/bin/bash\ntrue", "utf-8");
@@ -625,7 +592,7 @@ describe("C. Behavioral integration: execute() enforces preflight before spawn",
 		// Part 2: preflight path should NOT produce the same misleading pattern
 		const mod = await import("../src/index.ts");
 		const fn = (mod as any).preflightSpawn;
-		expect(typeof fn).toBe("function"); // RED: will fail until implemented
+		expect(typeof fn).toBe("function"); // guard: the export must stay
 		const preflightResult = await fn({
 			command: execPath,
 			cwd: bogusCwd,
@@ -651,24 +618,29 @@ describe("D. Regression: valid paths unchanged", () => {
 	beforeEach(() => f.beforeEach_());
 	afterEach(() => f.afterEach_());
 
-	it("[d1] explicit valid cwd: spawn occurs once with correct cwd option", async () => {
-		const result = await f.runSubagent(f.defaultCwd);
+	it("[d1] valid session cwd: spawn occurs once with the session cwd option", async () => {
+		const result = await f.runSubagent();
 
 		expect(result.isError).toBe(undefined); // success — no isError set
 		expect(f.spawnCalls).toHaveLength(1);
 		expect((f.spawnCalls[0].options as any).cwd).toBe(f.defaultCwd);
 	});
 
-	it("[d2] no cwd param: falls back to session cwd, spawn occurs", async () => {
-		const result = await f.runSubagent(undefined);
+	it("[d2] a stray cwd key does not move the child away from the session cwd", async () => {
+		const otherCwd = path.join(f.tmpBase, "other-valid-cwd");
+		fs.mkdirSync(otherCwd, { recursive: true });
 
+		const result = await f.runSubagent({ cwd: otherCwd });
+
+		// Lock: the call's cwd key is ignored, so the child always starts in
+		// the session cwd; the case was RED before the parameter was removed.
 		expect(result.isError).toBe(undefined); // success
 		expect(f.spawnCalls).toHaveLength(1);
 		expect((f.spawnCalls[0].options as any).cwd).toBe(f.defaultCwd);
 	});
 
 	it("[d3] env vars PI_SUBAGENT_DEPTH and PI_CURRENT_AGENT_NAME are set by spawn", async () => {
-		await f.runSubagent(f.defaultCwd);
+		await f.runSubagent();
 
 		expect(f.spawnCalls).toHaveLength(1);
 		const env = (f.spawnCalls[0].options as any).env;
@@ -688,9 +660,11 @@ describe("E. Structured output: isError result exposes diagnostic fields", () =>
 	afterEach(() => f.afterEach_());
 
 	it("[e1] error result exposes isError=true + details.results with command/cwd info", async () => {
-		const nonExistentCwd = path.join(f.tmpBase, "structured-output-test-no-such-dir");
+		// A broken session cwd is the only rejection trigger left (the call has
+		// no cwd parameter any more).
+		fs.rmSync(f.defaultCwd, { recursive: true, force: true });
 
-		const result = await f.runSubagent(nonExistentCwd);
+		const result = await f.runSubagent({ agentScope: "user" }, f.defaultCwd);
 
 		// Top-level isError flag
 		expect(result.isError).toBe(true);
@@ -701,15 +675,15 @@ describe("E. Structured output: isError result exposes diagnostic fields", () =>
 
 		const r = result.details!.results![0];
 
-		// After fix: stderr should contain structured codes like CWD_MISSING
+		// stderr carries the structured code
 		expect(r.stderr).toContain("CWD_MISSING");
 		// And the content text should mention the cwd value and suggest creation
 		const text = result.content?.[0]?.text ?? "";
-		expect(text).toContain(nonExistentCwd);
+		expect(text).toContain(f.defaultCwd);
 	});
 
 	it("[e2] success result has no isError and no error fields", async () => {
-		const result = await f.runSubagent(f.defaultCwd);
+		const result = await f.runSubagent();
 
 		expect(result.isError).toBe(undefined);
 		expect(result.details?.results?.[0].exitCode).toBe(0);
@@ -799,7 +773,7 @@ describe("G. R3/R4: CWD_INACCESSIBLE is injected-triggerable and carries cwdExis
 		const result = await preflightSpawn({
 			command: process.execPath,
 			cwd: "/injected/eacces/dir",
-			source: "param",
+			source: "session",
 			checkExists: async () => {
 				throw errnoError("EACCES");
 			},
@@ -850,7 +824,7 @@ describe("G. R3/R4: CWD_INACCESSIBLE is injected-triggerable and carries cwdExis
 			result = await preflightSpawn({
 				command: process.execPath,
 				cwd: probe,
-				source: "param",
+				source: "session",
 				...REAL_FS_PROBES,
 			});
 		} else {
@@ -861,7 +835,7 @@ describe("G. R3/R4: CWD_INACCESSIBLE is injected-triggerable and carries cwdExis
 			result = await preflightSpawn({
 				command: process.execPath,
 				cwd: probe,
-				source: "param",
+				source: "session",
 				checkExists: async () => {
 					throw errnoError("EACCES");
 				},
@@ -885,88 +859,57 @@ describe("G. R3/R4: CWD_INACCESSIBLE is injected-triggerable and carries cwdExis
 });
 
 /* ═══════════════════════════════════════════════════════════════════
- * H. R5 — an empty / whitespace-only cwd param means "no cwd param"
+ * H. R5 — a blank cwd key is inert, exactly like an omitted key
  * ═══════════════════════════════════════════════════════════════════ */
 
-describe("H. R5: blank cwd param normalizes to the session cwd with source=session", () => {
-	const SESSION = path.join(path.sep, "sessions", "base");
-	const HOME = path.join(path.sep, "tmp", "homedir-fixture");
+describe("H. R5: a blank cwd key behaves exactly like an omitted key", () => {
+	const f = new Fixture();
 
-	it("[r5-empty] paramCwd='' returns the session cwd verbatim and source='session'", async () => {
-		const resolveAgentCwd = await loadExport<ResolveAgentCwdFn>("resolveAgentCwd");
+	beforeEach(() => f.beforeEach_());
+	afterEach(() => f.afterEach_());
 
-		expect(resolveAgentCwd({ paramCwd: "", sessionCwd: SESSION, homedir: HOME })).toEqual({
-			cwd: SESSION,
-			source: "session",
-		});
+	it("[r5-blank-dispatch] dispatch with cwd='' spawns at the session cwd (no error, no other directory)", async () => {
+		const result = await f.runSubagent({ cwd: "" });
+
+		expect(result.isError).toBe(undefined);
+		expect(f.spawnCalls).toHaveLength(1);
+		expect((f.spawnCalls[0].options as any).cwd).toBe(f.defaultCwd);
 	});
 
-	it("[r5-whitespace-only] paramCwd='   ' returns the session cwd verbatim and source='session'", async () => {
-		const resolveAgentCwd = await loadExport<ResolveAgentCwdFn>("resolveAgentCwd");
+	it("[r5-whitespace-only-dispatch] dispatch with cwd='   ' spawns at the session cwd as well", async () => {
+		const result = await f.runSubagent({ cwd: "   " });
 
-		expect(resolveAgentCwd({ paramCwd: "   ", sessionCwd: SESSION, homedir: HOME })).toEqual({
-			cwd: SESSION,
-			source: "session",
-		});
-	});
-
-	describe("via the public execute() seam", () => {
-		const f = new Fixture();
-
-		beforeEach(() => f.beforeEach_());
-		afterEach(() => f.afterEach_());
-
-		it("[r5-blank-dispatch] dispatch with cwd='' behaves exactly like omitting it (spawn at session cwd)", async () => {
-			const result = await f.runSubagent("");
-
-			expect(result.isError).toBe(undefined);
-			expect(f.spawnCalls).toHaveLength(1);
-			expect((f.spawnCalls[0].options as any).cwd).toBe(f.defaultCwd);
-		});
+		expect(result.isError).toBe(undefined);
+		expect(f.spawnCalls).toHaveLength(1);
+		expect((f.spawnCalls[0].options as any).cwd).toBe(f.defaultCwd);
 	});
 });
 
 /* ═══════════════════════════════════════════════════════════════════
- * I. R6 — `~user/x` (tilde immediately followed by a non-separator) is NOT
- *    supported: no expansion, no lying about it, hard CWD_MISSING.
- *    (Deliberately no os.userInfo()/getent lookup is introduced for this.)
+ * I. R6 — `~user/x` (tilde immediately followed by a non-separator) has no
+ *    special meaning. Since the cwd key itself is inert, the value must be
+ *    neither silently expanded nor rejected: the dispatch simply proceeds at
+ *    the session cwd. (Deliberately no os.userInfo()/getent lookup.)
  * ═══════════════════════════════════════════════════════════════════ */
 
-describe("I. R6: '~user/x' is not expanded and must be rejected as CWD_MISSING", () => {
-	const SESSION = path.join(path.sep, "sessions", "base");
-	const HOME = path.join(path.sep, "tmp", "homedir-fixture");
+describe("I. R6: a '~user/x' cwd key is inert — no expansion, no rejection", () => {
+	const f = new Fixture();
 
-	it("[r6-no-expansion] resolveAgentCwd keeps '~someone/x' literal-bound: no homedir substitution", async () => {
-		const resolveAgentCwd = await loadExport<ResolveAgentCwdFn>("resolveAgentCwd");
+	beforeEach(() => f.beforeEach_());
+	afterEach(() => f.afterEach_());
 
-		const result = resolveAgentCwd({ paramCwd: "~someone/x", sessionCwd: SESSION, homedir: HOME });
+	it("[r6-dispatch] dispatch with cwd='~someone/projects' spawns at the session cwd, never under the real home dir", async () => {
+		const result = await f.runSubagent({ cwd: "~someone/projects" });
 
-		// Not expanded into someone's home …
-		expect(result.cwd).not.toBe(path.join(HOME, "someone", "x"));
-		expect(result.cwd.startsWith(HOME + path.sep)).toBe(false);
-		// … the untouched literal is what gets validated …
-		expect(result.cwd).toContain("~someone/x");
-		// … and a param really was supplied, so the source must not claim session.
-		expect(result.source).toBe("param");
-	});
-
-	describe("via the public execute() seam", () => {
-		const f = new Fixture();
-
-		beforeEach(() => f.beforeEach_());
-		afterEach(() => f.afterEach_());
-
-		it("[r6-dispatch] dispatch with cwd='~someone/projects' → no spawn, CWD_MISSING naming the literal", async () => {
-			const { result, row } = await f.expectRejection("~someone/projects");
-
-			expect(row.preflightCode).toBe("CWD_MISSING");
-			expect(row.preflightFields.cwdExists).toBe(false);
-			const text = result.content?.[0]?.text ?? "";
-			expect(text).toContain("[CWD_MISSING]");
-			expect(text).toContain("~someone/projects");
-			// Must not pretend the path landed under the real home directory.
-			expect(text).not.toContain(path.join(os.homedir(), "someone"));
-		});
+		// Lock: the literal '~user/x' key is never validated nor rejected —
+		// the dispatch proceeds at the session cwd; the case was RED before the
+		// parameter was removed.
+		expect(result.isError).toBe(undefined);
+		expect(f.spawnCalls).toHaveLength(1);
+		const spawnCwd = (f.spawnCalls[0].options as any).cwd;
+		expect(spawnCwd).toBe(f.defaultCwd);
+		// Must not pretend the value landed under the real home directory.
+		expect(spawnCwd).not.toContain(path.join(os.homedir(), "someone"));
 	});
 });
 
@@ -999,13 +942,16 @@ describe("J. G1/D4: bare command names are never X_OK-checked", () => {
 	/** Force `getPiInvocation()` into branch 3 (bare "pi"): the entry script in
 	 *  process.argv[1] must not exist and process.execPath must look like a
 	 *  generic runtime. Both globals are restored before returning. */
-	async function dispatchWithBareCommand(cwdParam?: string, extraParams?: Record<string, unknown>): Promise<any> {
+	async function dispatchWithBareCommand(
+		extraParams?: Record<string, unknown>,
+		sessionCwd?: string,
+	): Promise<any> {
 		const prevArgv1 = process.argv[1];
 		const prevExecPath = process.execPath;
 		process.argv[1] = path.join(f.tmpBase, "pi-entry-script-already-gone.js");
 		process.execPath = path.join(path.sep, "opt", "generic-runtime", "bin", "node");
 		try {
-			return await f.runSubagent(cwdParam, extraParams);
+			return await f.runSubagent(extraParams, sessionCwd);
 		} finally {
 			process.argv[1] = prevArgv1;
 			process.execPath = prevExecPath;
@@ -1033,7 +979,7 @@ describe("J. G1/D4: bare command names are never X_OK-checked", () => {
 		const result = await preflightSpawn({
 			command: "pi",
 			cwd: "/injected/bare-command/dir",
-			source: "param",
+			source: "session",
 			checkExists: async () => true,
 			isDir: async () => true,
 			hasExec,
@@ -1056,7 +1002,7 @@ describe("J. G1/D4: bare command names are never X_OK-checked", () => {
 		const result = await preflightSpawn({
 			command: "pi",
 			cwd: "/injected/bare-command/dir",
-			source: "param",
+			source: "session",
 			checkExists: async () => true,
 			isDir: async () => true,
 			hasExec,
@@ -1074,7 +1020,7 @@ describe("J. G1/D4: bare command names are never X_OK-checked", () => {
 		expect(bareNameIsExecutableHere("pi")).toBe(false);
 		expect(fs.existsSync(path.join(f.tmpBase, "pi-entry-script-already-gone.js"))).toBe(false);
 
-		const result = await dispatchWithBareCommand(f.defaultCwd);
+		const result = await dispatchWithBareCommand();
 
 		// The bare-name branch really was taken (otherwise this proves nothing).
 		expect(f.spawnCalls).toHaveLength(1);
@@ -1093,9 +1039,12 @@ describe("J. G1/D4: bare command names are never X_OK-checked", () => {
 	});
 
 	it("[g1-spawn-bare-cwd-missing] the bare-name exemption must not skip the cwd checks", async () => {
+		// The session cwd is the only cwd source: point ctx.cwd at a path that was
+		// never created (no mkdir, no rmSync needed) and dispatch with the
+		// agentScope pinned to user so agent discovery does not depend on it.
 		const missing = path.join(f.tmpBase, "bare-command-but-missing-cwd");
 
-		const result = await dispatchWithBareCommand(missing);
+		const result = await dispatchWithBareCommand({ agentScope: "user" }, missing);
 
 		// A bare command name only waives the EXEC check — never the cwd one.
 		// (Guards against "if (!path.isAbsolute(command)) return OK" as a
@@ -1115,7 +1064,8 @@ describe("J. G1/D4: bare command names are never X_OK-checked", () => {
  *    returns a boolean (a *determination*) or throws (a *failed probe*, with or
  *    without `.code`). The two must never be collapsed into the same fact —
  *    that collapse is exactly the ENOENT-vs-EACCES bug this whole change set
- *    exists for, and it is still present in two cells (see RED list).
+ *    exists for; every cell below is a regression lock on it (the current src
+ *    already fails closed for the errno-less cells — see the K section notes).
  *
  *    Rules the rows encode (parent-ruled contract, 2026-08-28):
  *      R-a  ENOENT/ENOTDIR from ANY cwd probe  → CWD_MISSING (native semantics:
@@ -1150,7 +1100,7 @@ interface TruthRow {
 	id: string;
 	fact: string;
 	command: string;
-	source: "param" | "session";
+	source: "session";
 	checkExists: ProbeSpec;
 	isDir: ProbeSpec;
 	hasExec: ProbeSpec;
@@ -1180,59 +1130,59 @@ interface TruthRow {
  */
 const REJECT_ROWS: TruthRow[] = [
 	// --- checkExists: "answered no" vs "threw" (the R-a/R-b/R-c frontier) ---
-	{ id: "ce-false", fact: "checkExists returned false (determined: absent)", command: ABS_COMMAND, source: "param", checkExists: { ret: false }, isDir: { ret: true }, hasExec: { ret: true }, code: "CWD_MISSING", cwdExists: false },
-	{ id: "ce-enoent", fact: "checkExists threw ENOENT", command: ABS_COMMAND, source: "param", checkExists: { errno: "ENOENT" }, isDir: { ret: true }, hasExec: { ret: true }, code: "CWD_MISSING", cwdExists: false },
-	{ id: "ce-enotdir", fact: "checkExists threw ENOTDIR", command: ABS_COMMAND, source: "param", checkExists: { errno: "ENOTDIR" }, isDir: { ret: true }, hasExec: { ret: true }, code: "CWD_MISSING", cwdExists: false },
-	{ id: "ce-eacces", fact: "checkExists threw EACCES (absent? unknown — do not lie)", command: ABS_COMMAND, source: "param", checkExists: { errno: "EACCES" }, isDir: { ret: true }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=EACCES/ },
-	{ id: "ce-eloop", fact: "checkExists threw ELOOP", command: ABS_COMMAND, source: "param", checkExists: { errno: "ELOOP" }, isDir: { ret: true }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=ELOOP/ },
-	{ id: "ce-enametoolong", fact: "checkExists threw ENAMETOOLONG", command: ABS_COMMAND, source: "param", checkExists: { errno: "ENAMETOOLONG" }, isDir: { ret: true }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=ENAMETOOLONG/ },
-	{ id: "ce-estale", fact: "checkExists threw ESTALE", command: ABS_COMMAND, source: "param", checkExists: { errno: "ESTALE" }, isDir: { ret: true }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=ESTALE/ },
-	// ✗ RED today: cwdErrno stays undefined → the "no errno = determined absent"
-	// shortcut maps a *broken probe* to CWD_MISSING.
-	{ id: "ce-noerrno", fact: "checkExists threw WITHOUT an errno (.code absent)", command: ABS_COMMAND, source: "param", checkExists: { noErrno: true }, isDir: { ret: true }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=(e?unknown)/i },
+	{ id: "ce-false", fact: "checkExists returned false (determined: absent)", command: ABS_COMMAND, source: "session", checkExists: { ret: false }, isDir: { ret: true }, hasExec: { ret: true }, code: "CWD_MISSING", cwdExists: false },
+	{ id: "ce-enoent", fact: "checkExists threw ENOENT", command: ABS_COMMAND, source: "session", checkExists: { errno: "ENOENT" }, isDir: { ret: true }, hasExec: { ret: true }, code: "CWD_MISSING", cwdExists: false },
+	{ id: "ce-enotdir", fact: "checkExists threw ENOTDIR", command: ABS_COMMAND, source: "session", checkExists: { errno: "ENOTDIR" }, isDir: { ret: true }, hasExec: { ret: true }, code: "CWD_MISSING", cwdExists: false },
+	{ id: "ce-eacces", fact: "checkExists threw EACCES (absent? unknown — do not lie)", command: ABS_COMMAND, source: "session", checkExists: { errno: "EACCES" }, isDir: { ret: true }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=EACCES/ },
+	{ id: "ce-eloop", fact: "checkExists threw ELOOP", command: ABS_COMMAND, source: "session", checkExists: { errno: "ELOOP" }, isDir: { ret: true }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=ELOOP/ },
+	{ id: "ce-enametoolong", fact: "checkExists threw ENAMETOOLONG", command: ABS_COMMAND, source: "session", checkExists: { errno: "ENAMETOOLONG" }, isDir: { ret: true }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=ENAMETOOLONG/ },
+	{ id: "ce-estale", fact: "checkExists threw ESTALE", command: ABS_COMMAND, source: "session", checkExists: { errno: "ESTALE" }, isDir: { ret: true }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=ESTALE/ },
+	// Regression lock: an errno-less throw must NOT be read through the "no errno =
+	// determined absent" shortcut (which would map a *broken probe* to CWD_MISSING).
+	{ id: "ce-noerrno", fact: "checkExists threw WITHOUT an errno (.code absent)", command: ABS_COMMAND, source: "session", checkExists: { noErrno: true }, isDir: { ret: true }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=(e?unknown)/i },
 
 	// --- isDir (only reached once checkExists positively determined "there") ---
-	{ id: "isdir-false", fact: "checkExists true + isDir returned false (determined: not a dir)", command: ABS_COMMAND, source: "param", checkExists: { ret: true }, isDir: { ret: false }, hasExec: { ret: true }, code: "CWD_NOT_DIR", cwdExists: true },
+	{ id: "isdir-false", fact: "checkExists true + isDir returned false (determined: not a dir)", command: ABS_COMMAND, source: "session", checkExists: { ret: true }, isDir: { ret: false }, hasExec: { ret: true }, code: "CWD_NOT_DIR", cwdExists: true },
 	{ id: "isdir-eacces", fact: "checkExists true + isDir threw EACCES", command: ABS_COMMAND, source: "session", checkExists: { ret: true }, isDir: { errno: "EACCES" }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=EACCES/ },
-	{ id: "isdir-enametoolong", fact: "checkExists true + isDir threw ENAMETOOLONG", command: ABS_COMMAND, source: "param", checkExists: { ret: true }, isDir: { errno: "ENAMETOOLONG" }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=ENAMETOOLONG/ },
-	// ✗ RED today. Contract-rule R-a wins over R-b here: ENOENT/ENOTDIR carries a
+	{ id: "isdir-enametoolong", fact: "checkExists true + isDir threw ENAMETOOLONG", command: ABS_COMMAND, source: "session", checkExists: { ret: true }, isDir: { errno: "ENAMETOOLONG" }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=ENAMETOOLONG/ },
+	// Lock: contract-rule R-a wins over R-b here: ENOENT/ENOTDIR carries a
 	// native meaning ("nothing at this path" / "a parent component is a file"), so
 	// a late throw from isDir — the directory vanished between the two probes — is
 	// CWD_MISSING, not "exists but inaccessible". (Row 2 of the ruled contract
 	// table outranks row 6 for these two errnos; both agree it must not be OK.)
-	{ id: "isdir-enoent", fact: "checkExists true + isDir threw ENOENT (rmdir'd in between)", command: ABS_COMMAND, source: "param", checkExists: { ret: true }, isDir: { errno: "ENOENT" }, hasExec: { ret: true }, code: "CWD_MISSING", cwdExists: false },
-	{ id: "isdir-enotdir", fact: "checkExists true + isDir threw ENOTDIR", command: ABS_COMMAND, source: "param", checkExists: { ret: true }, isDir: { errno: "ENOTDIR" }, hasExec: { ret: true }, code: "CWD_MISSING", cwdExists: false },
-	// ✗✗ THE FAIL-OPEN CELL: today the decision falls through every branch and
-	// returns OK, i.e. spawns into a cwd nothing was ever determined about.
-	{ id: "isdir-noerrno", fact: "checkExists true + isDir threw WITHOUT an errno", command: ABS_COMMAND, source: "param", checkExists: { ret: true }, isDir: { noErrno: true }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=(e?unknown)/i },
+	{ id: "isdir-enoent", fact: "checkExists true + isDir threw ENOENT (rmdir'd in between)", command: ABS_COMMAND, source: "session", checkExists: { ret: true }, isDir: { errno: "ENOENT" }, hasExec: { ret: true }, code: "CWD_MISSING", cwdExists: false },
+	{ id: "isdir-enotdir", fact: "checkExists true + isDir threw ENOTDIR", command: ABS_COMMAND, source: "session", checkExists: { ret: true }, isDir: { errno: "ENOTDIR" }, hasExec: { ret: true }, code: "CWD_MISSING", cwdExists: false },
+	// The fail-open cell this row locks: if the decision fell through every branch
+	// and returned OK, the spawn would enter a cwd nothing was ever determined about.
+	{ id: "isdir-noerrno", fact: "checkExists true + isDir threw WITHOUT an errno", command: ABS_COMMAND, source: "session", checkExists: { ret: true }, isDir: { noErrno: true }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=(e?unknown)/i },
 
 	// --- isDir returns a non-boolean value (lying probe: must not be read as "yes") ---
-	{ id: "isdir-undefined", fact: "checkExists true + isDir returned undefined (no throw)", command: ABS_COMMAND, source: "param", checkExists: { ret: true }, isDir: { nonBoolean: undefined }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=(e?unknown)/i, execUnchecked: true },
-	{ id: "isdir-null", fact: "checkExists true + isDir returned null", command: ABS_COMMAND, source: "param", checkExists: { ret: true }, isDir: { nonBoolean: null }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=(e?unknown)/i, execUnchecked: true },
-	{ id: "isdir-zero", fact: "checkExists true + isDir returned 0 (falsy non-boolean)", command: ABS_COMMAND, source: "param", checkExists: { ret: true }, isDir: { nonBoolean: 0 }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=(e?unknown)/i, execUnchecked: true },
-	{ id: "isdir-yes", fact: "checkExists true + isDir returned string 'yes' (truthy non-boolean)", command: ABS_COMMAND, source: "param", checkExists: { ret: true }, isDir: { nonBoolean: "yes" }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=(e?unknown)/i, execUnchecked: true },
+	{ id: "isdir-undefined", fact: "checkExists true + isDir returned undefined (no throw)", command: ABS_COMMAND, source: "session", checkExists: { ret: true }, isDir: { nonBoolean: undefined }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=(e?unknown)/i, execUnchecked: true },
+	{ id: "isdir-null", fact: "checkExists true + isDir returned null", command: ABS_COMMAND, source: "session", checkExists: { ret: true }, isDir: { nonBoolean: null }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=(e?unknown)/i, execUnchecked: true },
+	{ id: "isdir-zero", fact: "checkExists true + isDir returned 0 (falsy non-boolean)", command: ABS_COMMAND, source: "session", checkExists: { ret: true }, isDir: { nonBoolean: 0 }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=(e?unknown)/i, execUnchecked: true },
+	{ id: "isdir-yes", fact: "checkExists true + isDir returned string 'yes' (truthy non-boolean)", command: ABS_COMMAND, source: "session", checkExists: { ret: true }, isDir: { nonBoolean: "yes" }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=(e?unknown)/i, execUnchecked: true },
 
 	// --- exec facts (cwd was determined to be a real directory) ---
-	{ id: "exec-false", fact: "absolute command, hasExec returned false", command: ABS_COMMAND, source: "param", checkExists: { ret: true }, isDir: { ret: true }, hasExec: { ret: false }, code: "EXEC_MISSING", cwdExists: true },
-	{ id: "exec-enoent", fact: "absolute command, hasExec threw ENOENT", command: ABS_COMMAND, source: "param", checkExists: { ret: true }, isDir: { ret: true }, hasExec: { errno: "ENOENT" }, code: "EXEC_MISSING", cwdExists: true, message: /errno=ENOENT/ },
-	{ id: "exec-eacces", fact: "absolute command, hasExec threw EACCES (no x bit)", command: ABS_COMMAND, source: "param", checkExists: { ret: true }, isDir: { ret: true }, hasExec: { errno: "EACCES" }, code: "EXEC_MISSING", cwdExists: true, message: /errno=EACCES/ },
-	{ id: "exec-noerrno", fact: "absolute command, hasExec threw WITHOUT an errno", command: ABS_COMMAND, source: "param", checkExists: { ret: true }, isDir: { ret: true }, hasExec: { noErrno: true }, code: "EXEC_MISSING", cwdExists: true, message: /errno=(e?unknown)/i },
+	{ id: "exec-false", fact: "absolute command, hasExec returned false", command: ABS_COMMAND, source: "session", checkExists: { ret: true }, isDir: { ret: true }, hasExec: { ret: false }, code: "EXEC_MISSING", cwdExists: true },
+	{ id: "exec-enoent", fact: "absolute command, hasExec threw ENOENT", command: ABS_COMMAND, source: "session", checkExists: { ret: true }, isDir: { ret: true }, hasExec: { errno: "ENOENT" }, code: "EXEC_MISSING", cwdExists: true, message: /errno=ENOENT/ },
+	{ id: "exec-eacces", fact: "absolute command, hasExec threw EACCES (no x bit)", command: ABS_COMMAND, source: "session", checkExists: { ret: true }, isDir: { ret: true }, hasExec: { errno: "EACCES" }, code: "EXEC_MISSING", cwdExists: true, message: /errno=EACCES/ },
+	{ id: "exec-noerrno", fact: "absolute command, hasExec threw WITHOUT an errno", command: ABS_COMMAND, source: "session", checkExists: { ret: true }, isDir: { ret: true }, hasExec: { noErrno: true }, code: "EXEC_MISSING", cwdExists: true, message: /errno=(e?unknown)/i },
 
 	// --- a bare command name never reaches the exec check, but every cwd fact
 	//     below still decides exactly the same way (D4 has no side effects) ---
-	{ id: "bare-ce-false", fact: "bare command + checkExists returned false", command: BARE_COMMAND, source: "param", checkExists: { ret: false }, isDir: { ret: true }, hasExec: { ret: false }, code: "CWD_MISSING", cwdExists: false },
+	{ id: "bare-ce-false", fact: "bare command + checkExists returned false", command: BARE_COMMAND, source: "session", checkExists: { ret: false }, isDir: { ret: true }, hasExec: { ret: false }, code: "CWD_MISSING", cwdExists: false },
 	{ id: "bare-isdir-false", fact: "bare command + isDir returned false", command: BARE_COMMAND, source: "session", checkExists: { ret: true }, isDir: { ret: false }, hasExec: { ret: false }, code: "CWD_NOT_DIR", cwdExists: true },
-	{ id: "bare-ce-eacces", fact: "bare command + checkExists threw EACCES", command: BARE_COMMAND, source: "param", checkExists: { errno: "EACCES" }, isDir: { ret: true }, hasExec: { ret: false }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=EACCES/ },
+	{ id: "bare-ce-eacces", fact: "bare command + checkExists threw EACCES", command: BARE_COMMAND, source: "session", checkExists: { errno: "EACCES" }, isDir: { ret: true }, hasExec: { ret: false }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=EACCES/ },
 
 	// --- R-d: cwd outranks command on purpose ---
-	{ id: "prio-missing-vs-exec", fact: "cwd absent AND command not executable", command: ABS_COMMAND, source: "param", checkExists: { ret: false }, isDir: { ret: true }, hasExec: { ret: false }, code: "CWD_MISSING", cwdExists: false },
-	{ id: "prio-notdir-vs-exec", fact: "cwd is a file AND command not executable", command: ABS_COMMAND, source: "param", checkExists: { ret: true }, isDir: { ret: false }, hasExec: { ret: false }, code: "CWD_NOT_DIR", cwdExists: true },
-	{ id: "prio-inaccessible-vs-exec", fact: "isDir threw EACCES AND command not executable", command: ABS_COMMAND, source: "param", checkExists: { ret: true }, isDir: { errno: "EACCES" }, hasExec: { ret: false }, code: "CWD_INACCESSIBLE", cwdExists: true },
+	{ id: "prio-missing-vs-exec", fact: "cwd absent AND command not executable", command: ABS_COMMAND, source: "session", checkExists: { ret: false }, isDir: { ret: true }, hasExec: { ret: false }, code: "CWD_MISSING", cwdExists: false },
+	{ id: "prio-notdir-vs-exec", fact: "cwd is a file AND command not executable", command: ABS_COMMAND, source: "session", checkExists: { ret: true }, isDir: { ret: false }, hasExec: { ret: false }, code: "CWD_NOT_DIR", cwdExists: true },
+	{ id: "prio-inaccessible-vs-exec", fact: "isDir threw EACCES AND command not executable", command: ABS_COMMAND, source: "session", checkExists: { ret: true }, isDir: { errno: "EACCES" }, hasExec: { ret: false }, code: "CWD_INACCESSIBLE", cwdExists: true },
 	// A thrown checkExists outranks an `isDir` that says false: the isDir answer
 	// is meaningless once the existence probe is broken (and calling it at all
 	// would be a second lie).
-	{ id: "prio-throw-vs-false", fact: "checkExists threw EACCES + isDir returned false", command: ABS_COMMAND, source: "param", checkExists: { errno: "EACCES" }, isDir: { ret: false }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true },
-	{ id: "prio-noerrno-vs-false", fact: "checkExists threw without errno + isDir returned false", command: ABS_COMMAND, source: "param", checkExists: { noErrno: true }, isDir: { ret: false }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=(e?unknown)/i },
+	{ id: "prio-throw-vs-false", fact: "checkExists threw EACCES + isDir returned false", command: ABS_COMMAND, source: "session", checkExists: { errno: "EACCES" }, isDir: { ret: false }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true },
+	{ id: "prio-noerrno-vs-false", fact: "checkExists threw without errno + isDir returned false", command: ABS_COMMAND, source: "session", checkExists: { noErrno: true }, isDir: { ret: false }, hasExec: { ret: true }, code: "CWD_INACCESSIBLE", cwdExists: true, message: /errno=(e?unknown)/i },
 ];
 
 const ALLOW_ROWS: Array<{
@@ -1302,7 +1252,7 @@ describe("K. G2: exhaustive cwd-probe truth table (probe threw ≠ probe answere
 			const result = await preflightSpawn({
 				command: row.command,
 				cwd: PROBE_CWD,
-				source: "param",
+				source: "session",
 				checkExists: probeFrom(row.checkExists),
 				isDir: probeFrom(row.isDir),
 				hasExec,
@@ -1324,7 +1274,7 @@ describe("K. G2: exhaustive cwd-probe truth table (probe threw ≠ probe answere
 			preflightSpawn({
 				command: ABS_COMMAND,
 				cwd: PROBE_CWD,
-				source: "param",
+				source: "session",
 				checkExists: async () => true,
 				isDir: probeFrom(isDir),
 				hasExec: async () => true,
@@ -1381,7 +1331,7 @@ describe("K. G2: exhaustive cwd-probe truth table (probe threw ≠ probe answere
 				expect(row.preflightCode).toBe("CWD_NOT_DIR");
 				expect(row.preflightFields.cwd).toBe(fileTarget);
 				expect(row.preflightFields.cwdExists).toBe(true);
-				expect(row.preflightFields.source).toBe("param");
+				expect(row.preflightFields.source).toBe("session");
 			} finally {
 				fs.unlinkSync(fileTarget);
 			}

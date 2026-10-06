@@ -116,7 +116,7 @@ async-subagent-isolation 做的是强制且完全的隔离：
 - **执行能力完全隔离（最小权限）**：主 agent 被剥夺 `write`/`edit`/`bash`，只能委派，无法自己执行。
 - **独立可配置**：每个 agent 单独定义自己的 `tools` 和 `skills`，精确控制它能做什么、不能做什么。
 
-此外，子 agent 只拿到委派的那一句话、看不到主 agent 的执行痕迹（上下文隔离），且不可再委派（递归深度限制为 1）。
+此外，子 agent 只拿到委派的那一句话、看不到主 agent 的执行痕迹（上下文隔离）。委派能力按模式区分：legacy 模式（两级配置都没有 `dispatch` 字段）下子 agent 不可再委派，递归深度限制为 1；名单模式下子 agent 只要自己名单非空，就可以继续嵌套派发（见「派发名单制：dispatch」）。
 
 与彻底隔离配套的，是两条互为支撑的设计决策。
 
@@ -198,13 +198,13 @@ Dispatched coder. taskId: 01912345-6789-7abc-8def-0123456789ab
 
 ### 5. 查看全文（`/subagent-result`）
 
-通知卡片只显示摘要。用 `/subagent-result <taskId>` 在全屏查看器中阅读完整返回：`↑↓`/`jk` 滚动、`Space`/`b` 翻页、`g`/`G` 首尾、`Enter`/`Esc`/`q` 关闭。不带参数时（TUI 模式）弹出选择列表，列出最近 5 个已结束的任务，`Enter` 打开所选任务。
+通知卡片只显示摘要。用 `/subagent-result <taskId>` 在全屏查看器中阅读完整返回：`↑↓`/`jk` 滚动、`Space`/`b` 翻页、`g`/`G` 首尾、`Enter`/`Esc`/`q` 关闭。查看器底部常驻按键栏，文本逐字为 `↑↓/jk line · b/PgUp & Space/PgDn page · g/G top/bottom · Enter/Esc/q close`；`Home`/`End` 同样可用（跳首/跳尾）但**故意不列入**按键栏，`Shift+Q` 与 `q` 一样可以关闭查看器。不带参数时（TUI 模式）弹出选择列表，列出最近 5 个已结束的任务，`Enter` 打开所选任务；全屏查看器与无参选择列表仅 TUI 可用，非 TUI 下直接把完整结果 `console.log` 到终端。
 
 ### 6. 实时观察（`/subagent-watch`）
 
-子 agent 长时间不返回时，不必干等到结束才知道它在做什么。用 `/subagent-watch <taskId>` 打开全屏实时查看器，每 1 秒刷新：正文顶部是 `Original task` 节（主 agent 下发的任务原文），其下 `Conversation log` 节按 `/subagent-result` 同款格式展示已完成内容（`[assistant]` 文本、`→` 工具调用、`←` 工具结果），正在生成的文本以 `[streaming]` 追加在末尾；按键习惯一致（`↑↓`/`jk` 滚动、`Space`/`b` 翻页、`g`/`G` 首尾、`Enter`/`Esc`/`q` 关闭），默认锚定最新输出。
+子 agent 长时间不返回时，不必干等到结束才知道它在做什么。用 `/subagent-watch <taskId>` 打开全屏实时查看器，每 1 秒刷新：正文顶部是 `Original task` 节（主 agent 下发的任务原文），其下 `Conversation log` 节按 `/subagent-result` 同款格式展示已完成内容（`[assistant]` 文本、`→` 工具调用、`←` 工具结果），正在生成的文本以 `[streaming]` 追加在末尾；按键习惯一致（`↑↓`/`jk` 滚动、`Space`/`b` 翻页、`g`/`G` 首尾、`Enter`/`Esc`/`q` 关闭），底部常驻按键栏文本逐字为 `↑↓/jk line · b/PgUp & Space/PgDn page · g/G top/bottom · Enter/Esc/q close`（`Home`/`End` 可用但**故意不列入**按键栏，`Shift+Q` 同样可关闭查看器），默认锚定最新输出。实时查看器仅在 TUI 可用。
 
-查看器**只服务仍在运行的任务**：传入已结束或不存在的 taskId 会被拒绝并提示改用 `/subagent-result`；不带参数时弹出选择列表，只列运行中任务。观看过程中任务结束，刷新自动停止，底部固定提示 `Task finished — live updates stopped. Final result: /subagent-result <taskId>`，查看器保持打开直到你手动关闭。
+查看器**只服务仍在运行的任务**：传入已结束或不存在的 taskId 会被拒绝并提示改用 `/subagent-result`；不带参数时（TUI）弹出选择列表，只列运行中任务，非 TUI 且无参时打印用法提示 `Usage: /subagent-watch <taskId> — watch a running subagent task live.`。观看过程中任务结束，刷新自动停止，底部固定提示 `Task finished — live updates stopped. Final result: /subagent-result <taskId>`，查看器保持打开直到你手动关闭。
 
 ### 完整流程一览
 
@@ -229,7 +229,7 @@ Dispatched coder. taskId: 01912345-6789-7abc-8def-0123456789ab
 
 | 工具 | 作用 | 关键约束 |
 |------|------|----------|
-| `subagent` | 单入口工具（`action` 参数）；`action="dispatch"`（默认）异步派发任务（TUI 模式），非 TUI 自动降级同步 | 回执≠结果；结果以通知到达，勿轮询 |
+| `subagent` | 单入口工具（`action` 参数）；`action="dispatch"`（默认）异步派发任务（TUI 模式），非 TUI 自动降级同步 | 回执≠结果；结果以通知到达，勿轮询；名单模式下只能派本进程名单内的 agent（启动期名单为空时不注册 `subagent` 工具；运行期收紧到空则工具保留、每次派发都被拒绝），legacy 模式无名单限制 |
 | `subagent` `action="cancel"` | 主 agent 取消单个在途任务（两步确认：首次调用返回质询，`confirm:true` + 非空 `reason` 才执行） | 仅当任务明显错误或不再需要，勿因耗时久而取消 |
 
 > **v1.2.0 提示**：`subagent` 工具的 `action="status"` 已作为 cleanup 移除。在途任务信息改由 `[subagent-result]` 通知信封的“在途任务”块提供，不再提供主动查询入口。
@@ -238,10 +238,11 @@ Dispatched coder. taskId: 01912345-6789-7abc-8def-0123456789ab
 
 | 命令 | 作用 |
 |------|------|
-| `/subagent-cancel <taskId>` | 取消单个运行中的后台任务（不带参数时弹出运行中任务的交互选择列表，Enter 取消所选） |
+| `/subagent-cancel <taskId>` | 取消单个运行中的后台任务（不带参数时弹出运行中任务的交互选择列表，Enter 取消所选；交互选择器仅 TUI，非 TUI 无参时改为通知列出运行中任务） |
 | `/subagent-cancel-all` | 一键取消全部运行中的后台任务 |
-| `/subagent-result <taskId>` | 全屏查看某任务的完整返回（不带参数时弹出最近 5 个已结束任务的交互选择列表） |
-| `/subagent-watch <taskId>` | 实时查看运行中任务的输出（全屏，1 秒刷新；不带参数时弹出运行中任务的交互选择列表） |
+| `/subagent-result <taskId>` | 全屏查看某任务的完整返回（不带参数时弹出最近 5 个已结束任务的交互选择列表；全屏查看器与无参选择列表仅 TUI，非 TUI 下直接把完整结果 `console.log` 到终端） |
+| `/subagent-watch <taskId>` | 实时查看运行中任务的输出（全屏，1 秒刷新；不带参数时弹出运行中任务的交互选择列表；实时查看器仅 TUI 可用，非 TUI 且无参时打印用法提示） |
+| `/subagent-dispatch` | 打印有效名单（S × C 合成交集）+ 反查（谁派它）+ 校验发现；启动校验 fail-closed 时该命令仍可用，用于排查 |
 | `/subagent-config [agent]` | 唯一的交互式配置入口：agent 选择菜单直接标注每个 agent 的生效 model/thinking，可编辑 description/tools/skills/body/model & thinking 五字段（name 只读）并管理可用 model 列表（带参数直进指定 agent） |
 
 ---
@@ -256,7 +257,7 @@ Dispatched coder. taskId: 01912345-6789-7abc-8def-0123456789ab
 | [`reviewer`](https://github.com/Wolido/async-subagent-isolation/blob/main/examples/pi/agent/agents/reviewer.md) | 只读评审，输出可操作的反馈 | `read, grep, find, ls` | _(无)_ |
 | [`writer`](https://github.com/Wolido/async-subagent-isolation/blob/main/examples/pi/agent/agents/writer.md) | 写文档、改 README、生成 commit message | `read, write, edit, grep, find, ls` | `writing-clearly-and-concisely` |
 
-复制到 `~/.pi/agent/agents/`（用户级）或 `.pi/agents/`（项目级，同名时 project 覆盖 user）即可使用，可按需修改或新建。修改或新建 agent 文件后运行 `/reload`，刷新注入主 agent 提示词的子 agent 清单（见“配置管理”一节）。
+复制到 `~/.pi/agent/agents/`（用户级）或 `.pi/agents/`（项目级，同名时 project 覆盖 user）即可使用，可按需修改或新建。修改或新建 agent 文件后，legacy 模式运行 `/reload` 刷新注入主 agent 提示词的子 agent 清单（名单模式下清单每轮重建，无需 `/reload`；改 `dispatch` 字段并非一律需要 `/reload`：在 C 仍保留该字段时，收紧（删条目）即时生效，放宽（加条目）仅当条目已在启动快照 S 的同一行中才即时生效、否则需 `/reload`，见“配置管理”一节）。
 
 ---
 
@@ -284,6 +285,40 @@ thinking 等级、优先级与合并规则详见 [ADVANCED.md](ADVANCED.md)。
 
 ---
 
+## 派发名单制：`dispatch`
+
+**为什么用名单（Why a roster）**：旧深度锁只能表达「几层」，名单能表达「A 能派 B、不能派 C」；名单里没有「层/深度」概念——层级是名单的结果、不是前提，新增角色只需在对应名单行里加名字，不用改全局配置结构。管事（中间层）必须是只读人设：决策与执行分离，能改文件的执行者不配派发权，只有只读且 `tools` 声明 `subagent` 才允许派。能力从零构建：没有名单行 = 叶子（不注册 `subagent` 工具）；配置写错时启动即阻断、不注册工具，绝不退回更宽松的旧行为（fail-closed）；未进任何名单的 agent 只提示、不报错。结构是名单（DAG）而不是树：同一 agent 可被多行引用，指向同一节点、能力只有单份，删一行只影响该行。S×C 交集的安全动机：启动快照 S 与运行时配置 C 任一来源收紧都生效——运行时读不到 `dispatch` 时绝不退回 legacy 放行。兼容性上，两级都没有 `dispatch` 字段 = 与改造前完全一致（零迁移成本）。
+
+`subagent-isolation.json` 顶层的 `dispatch` 字段把「谁能派谁」显式写成一张名单表，形如 `{ "管事的": ["可派子 agent", ...] }`，值为字符串数组：
+
+```json
+{
+  "dispatch": {
+    "main": ["coder", "reviewer"],
+    "coder": ["reviewer"]
+  }
+}
+```
+
+字段语义：
+
+- **`main` 是入口行**：主 agent 的派发名单就是 `dispatch.main`。
+- **缺行 = 叶子**：没有出现在任何一行左边的 agent 是叶子，不可再派。
+- **同名 agent 可被多行引用**：指向的是同一节点，能力只有单份（不是复制多份）。
+- **形状规范**：`dispatch` 必须是对象，每一行的值必须是数组，元素必须是非空白字符串。
+
+配置查找与模型配置一致：用户级 `~/.pi/agent/subagent-isolation.json` + 从 cwd 向上最近的项目级 `.pi/subagent-isolation.json`。但替换语义不同：项目级 `dispatch` **整体替换**用户级（不是按 key 合并）；项目级文件没有该字段则沿用用户级。
+
+**S×C 合成**：S = 启动时（或 `/reload`）读到的快照，C = 每次派发/注入时按当前 cwd 读到的运行时配置。某个 agent（或 `main`）的生效名单 = 存在的来源各按该行**求交集**（来源存在但缺该行时按空行参与；整份配置缺席的来源不参与），顺序在 S 存在时取 S（S 不存在取 C），结果去重。故主进程里改 `dispatch` 字段是：在 C 仍保留该字段时，收紧（删条目）即时生效（C 每次派发/注入都重读，交集立即变小）；放宽（加条目）仅当该条目已在启动快照 S 的同一行中才即时生效，否则需 `/reload` 才重算（S 固定于启动时）。整份字段/文件被删除或改坏、`dispatch` 形状非法、启动即 fail-closed、以及子进程按 `PI_SUBAGENT_ALLOWED` 的边界，见 [ADVANCED.md](ADVANCED.md) 的「reload 语义」。
+
+**空名单 = fail-closed**：注册门在 factory 期判定——启动期生效名单为空的进程不注册 `subagent` 工具，派不了任何 agent；若名单在运行期才收紧到空，工具保留但每次派发都被调用门禁拒绝。名单外的派发被拒绝，报错文案逐字为 `Cannot dispatch "X". Allowed subagents: a, b.`（X 为目标 agent 名，允许列表按逗号+空格分隔；名单为空时列表为空，即 `Cannot dispatch "X". Allowed subagents: .`）。
+
+**legacy 回退**：两级都没有 `dispatch` 字段 = legacy 模式，行为与改造前完全一致（仍由深度锁限制）。
+
+启动校验（阻断项 ①-⑦ 与非阻断提示）、fail-closed 后果、嵌套派发与 `/subagent-dispatch` 排查命令见「安全与权限纪律」一节；S×C 合成算法、子进程 `PI_SUBAGENT_ALLOWED` 传递等完整细节见 [ADVANCED.md](ADVANCED.md) 的「派发名单制（dispatch）」。
+
+---
+
 ## 配置管理：`/subagent-config`
 
 TUI 模式下用 `/subagent-config` 统一管理子 agent 配置，全程交互，不用手动编辑文件：
@@ -295,18 +330,18 @@ TUI 模式下用 `/subagent-config` 统一管理子 agent 配置，全程交互�
 
 | 字段 | 编辑方式 |
 |------|----------|
-| `description` | 单行输入，输入框预填当前值；改后需 `/reload` 才刷新注入清单 |
+| `description` | 单行输入，输入框预填当前值；改后需 `/reload` 才刷新注入清单（legacy 模式的清单启动时缓存；名单模式清单每轮重建，不需 reload） |
 | `tools` / `skills` | 逗号分隔输入；输入空串即从 frontmatter 移除该 key |
 | `body` | 在外部编辑器中编辑（`$EDITOR`，未设置回退 `$VISUAL`，再回退 vi）；取消、未改动、改完全空白都不写盘 |
 | `model & thinking` | 合并为一个编辑项：进入子流程先选动作——`edit model & thinking`（标注当前生效值与各自来源）/ `clear model & thinking (reset to frontmatter)`；edit 分支依次为 model 值步（`$models` 列表非空时从列表选择、为空时自由输入并预填生效值）→ thinking 值步（官方 7 级 + `not set` 选项，当前生效标 (current)）→ 写入目标（`this process` / `user` / `project`）→ 一次写入两字段；clear 分支选写入目标后整条覆盖清除，反馈 model 与 thinking 各自回退值 |
 
 `name` 是只读身份标识，不可编辑。
 
-生效时机（reload 语义）：改 `description` 后需 `/reload` 才刷新注入清单（注入主 agent 系统提示词的子 agent 清单在启动时构建并缓存，见“安全与权限纪律”一节）；改 `tools` / `skills` / `body` / `model & thinking` 即时生效，每次派发都会重新发现 agent 并重读配置。
+生效时机（reload 语义）：legacy 模式下改 `description` 后需 `/reload` 才刷新注入清单（注入主 agent 系统提示词的子 agent 清单在启动时构建并缓存，见“安全与权限纪律”一节；名单模式下清单每轮触发重建，不受此限）；改 `tools` / `skills` / `body` / `model & thinking` 即时生效，每次派发都会重新发现 agent 并重读配置。另：主进程里改 `dispatch` 字段时，在 C 仍保留该字段的前提下，收紧（删条目）即时生效（C 每次派发/注入都重读，交集立即变小）；放宽（加条目）仅当该条目已在启动快照 S 的同一行中才即时生效，否则需 `/reload`（`/reload` 重新执行 factory 才刷新 S）。完整边界见上文 S×C 合成与 [ADVANCED.md](ADVANCED.md) 的「reload 语义」。
 
 菜单标注实时刷新：写回成功后，字段选择与 agent 选择列表的标注（model/thinking 总览、来源、排序，含 `[saved: ...]` 片段）在同一命令会话内立即反映新值，无需退出重进命令。
 
-`/subagent-config <name>` 带参数可跳过 agent 选择、直进该 agent 的配置；名字不存在会报错。非 TUI 模式下命令只提示用法，不弹对话框。
+`/subagent-config <name>` 带参数可跳过 agent 选择、直进该 agent 的配置；名字不存在会报错。非 TUI 模式下命令只提示 `/subagent-config requires TUI mode (interactive config editor).`，不弹对话框。
 
 配置流程全程支持 ESC 逐级回退：编辑 → 字段选择 → agent 选择 → 退出，仅最顶层退出；model & thinking 子流程内值步或写入目标 ESC 回动作选择层，动作选择 ESC 回父流程的字段选择。任何回退路径零写入。
 
@@ -331,7 +366,7 @@ TUI 模式下用 `/subagent-config` 统一管理子 agent 配置，全程交互�
 
 - Status: succeeded
 - Task: Refactor the auth middleware to use async/await.
-- Duration: 02:34 · Usage: 5 turns/↑12.5k/↓3.2k/$0.0042
+- Duration: 02:34 · Usage: 5 turns ↑13k ↓3.2k $0.0042
 - Session: 01912345-6789-7abc-8def-0123456789ab
 
 Other tasks in flight when this task ended: 1
@@ -343,11 +378,11 @@ Other tasks in flight when this task ended: 1
 
 - **触发行**：标题行下的固定引用行，所有信封逐字相同；提醒主 agent 这是任务完成通知，不是用户新指令，消化前先锚定当前主线任务与进度。
 - **状态**：`succeeded` / `failed` / `timed out` / `cancelled`。
-- **耗时**：子 agent 的真实运行时长（格式 `MM:SS`，≥1 小时为 `H:MM:SS`），四种状态都有；取消或内部错误（无结果返回）时从派发时刻起算。
-- **在途任务块**：本任务结束时其余仍在运行的后台任务快照，送达时可能滞后；与本回合派发记录冲突时以派发记录为准。剩余不为 0 时，主 agent 不应向你汇报“全部完成”。
+- **耗时**：子 agent 的真实运行时长（格式 `MM:SS`，≥1 小时为 `H:MM:SS`），四种状态都有；取消或内部错误（无结果返回）时从派发时刻起算。用量摘要空格分隔，字段顺序为 turns、↑input、↓output、R cacheRead、W cacheWrite、$cost、ctx:…、model（可带 model），缺省字段省略。
+- **在途任务块**：本任务结束时其余仍在运行的后台任务快照，送达时可能滞后；与本回合派发记录冲突时以派发记录为准。（使用建议）剩余不为 0 时，主 agent 不应向你汇报“全部完成”。
 - **完整结果**：正文全量进入 LLM 上下文，不截断。
 
-用户在 TUI 中看到的是**带底色的摘要卡片**（非全文）：succeeded 绿色（✓）、failed 红色（✗）、timed out / cancelled 黄色。卡片显示 agent、状态、taskId、耗时和用量摘要，并提示 `View full result: /subagent-result <taskId>`；完整结果保存在任务会话文件中。
+用户在 TUI 中看到的是**带底色的摘要卡片**（非全文）：succeeded 用成功底色（`toolSuccessBg`）+ 绿色 ✓，failed 用错误底色（`toolErrorBg`）+ 红色 ✗，timed out / cancelled（及未知状态）用中性（pending）底色（`toolPendingBg`）+ error 红色状态词——状态词是红色，底色是中性 pending。卡片显示 agent、状态、taskId、耗时和用量摘要，并提示 `View full result: /subagent-result <taskId>`；完整结果保存在任务会话文件中。
 
 触发行的设计意图、状态语义与取消来源区分等完整细节见 [ADVANCED.md](ADVANCED.md)。
 
@@ -362,8 +397,11 @@ Other tasks in flight when this task ended: 1
 - **通知消化流程**：`[subagent-result]` 是任务完成通知而非用户新指令；处理前先锚定当前主线任务与进度，对照派发记录消化，基于结果自主决定下一步；与主线冲突时暂缓优先，勿让通知改写主线计划。此纪律由信封触发行与工具描述中的“通知消化流程”条目共同内嵌。
 - **防滥用取消**：`action="cancel"` 为两步确认（首次调用只返回含已运行时长/最近进度的质询回执，零副作用；`confirm:true` + 非空 `reason` 才执行，理由记入任务记录并随取消信封正文返回），且内嵌提示词——仅当任务明显错误或不再需要时取消，勿因耗时长而取消（后台任务本就预期长时间运行）。等待 = 不发起任何工具调用、直接结束回合；对在途任务不存在查询/催办/状态确认类动作（刻意设计）。
 - **资源冲突纪律**：并行派发多个任务前，考虑它们是否会改同一批文件或代码区域；冲突时串行派发或先问用户。
-- **子 agent 不可调用 subagent 工具**：子 agent（深度 ≥ 1）不可调用任何 `subagent` action（含 `action="cancel"`），深度限制为 1。
-- **子 agent 清单注入**：启动时扩展把所有已发现子 agent（用户级 + 项目级）的 `name — description` 清单（含 user/project 来源标记）自动追加进主 agent 系统提示词，主 agent 每轮都能看到全部子 agent 的职责，`master.md` 无需再手写 agent 用法表。清单在启动（或 `/reload`）时构建并缓存：改了 agent 文件的 `name` / `description`，要 `/reload` 才会刷新。子 agent 进程内不注入（子 agent 没有 `subagent` 工具面，注入纯属污染）。
+- **子 agent 不可调用 subagent 工具（legacy 模式）**：legacy 模式下子 agent（深度 ≥ 1）不可调用任何 `subagent` action（含 `action="cancel"`），深度限制为 1（报错含 `depth limit reached (depth: N, max: 1)`）。名单模式下没有这条深度锁：子 agent 按父进程注入的 `PI_SUBAGENT_ALLOWED` 名单派发，且子 agent 进程内 `action="cancel"` 仍可达（任务注册表是进程内私有的，无跨进程影响）。
+- **嵌套派发规则**：名单模式下允许嵌套——管事的 agent 只要自己的名单非空，就可以继续派下级；legacy 模式保持原深度锁（`MAX_SUBAGENT_DEPTH = 1`，报错含 `depth limit reached (depth: N, max: 1)`）。
+- **管事约束**：名单里的管事 agent（`main` 以外的 key）必须只读，且 `tools` 必须声明 `subagent`，否则被启动校验阻断（见下）。
+- **子 agent 清单注入**：名单模式下只注入**本进程生效名单内的** agent（S×C 合成交集；fail-closed 时整段不注入，名单为空不注入），**每轮触发重建**（名单来自 env/config，不来自缓存的 agent 文件）；子 agent 进程也注入它自己名单内的清单（按父进程注入的 `PI_SUBAGENT_ALLOWED`）。legacy 模式下启动时把所有已发现子 agent（用户级 + 项目级）的 `name — description` 清单（含 user/project 来源标记）自动追加进主 agent 系统提示词，主 agent 每轮都能看到全部子 agent 的职责，`master.md` 无需再手写 agent 用法表；清单在启动（或 `/reload`）时构建并缓存：改了 agent 文件的 `name` / `description`，要 `/reload` 才会刷新；改 `dispatch` 字段并非一律需要 `/reload`：在 C 仍保留该字段时，收紧（删条目）即时生效，放宽（加条目）仅当条目已在启动快照 S 的同一行中才即时生效、否则需 `/reload` 才重算生效名单（S 快照在启动时固定；完整边界见 [ADVANCED.md](ADVANCED.md) 的「reload 语义」）。legacy 模式子 agent 进程内不注入（子 agent 没有 `subagent` 工具面，注入纯属污染）。
+- **启动校验与 fail-closed**：配置了 `dispatch` 字段时，启动即校验，阻断项：① `dispatch` 形状非法（非对象 / 某行不是数组 / 某元素非字符串或空白）；② 缺 `main` 行（入口）；③ 表中某个名字找不到对应 agent `.md`；④ 管事的 agent 不是只读人设（未声明 `tools`，或 `tools` 含 `write`/`edit`；`bash` 不算 write/edit）；⑤ 管事的 agent 的 `tools` 已声明且非空、但未声明 `subagent`（`--tools` 白名单同时管辖扩展工具，缺它则无法派发；`tools` 缺失或为空由 ④ 覆盖）；⑥ 表中存在环（含自环）；⑦ 某名字从 `main` 沿名单边不可达。非阻断提示：发现到的 agent 不在任何名单里（仅提示）。fail-closed 后果：任一阻断项 → 启动逐行 `console.warn("[async-subagent-isolation] …")`、**不注册 `subagent` 工具**、系统提示词的清单注入整段跳过；`/subagent-dispatch` 保持可用，用于排查。
 - **TUI 异步 / 非 TUI 同步降级**：只在 TUI 模式走异步路径；print/json 等非 TUI 模式降级为同步阻塞。
 
 ---
@@ -371,6 +409,9 @@ Other tasks in flight when this task ended: 1
 ## 进阶用法
 
 手写 `subagent` 调用、复用 `sessionId`、信封与在途任务块细节、`action="cancel"` 取消任务、清单注入缓存、配置写回保证、环境变量等见 [ADVANCED.md](ADVANCED.md)。
+
+- **活性心跳**：同步派发时父进程在等待下级期间经工具进度通道上报活性 + 静默期周期心跳，防上游活动超时误杀；心跳周期 H = clamp(活动超时/3, 5s, 30s)。完整描述见 [ADVANCED.md](ADVANCED.md) 的「超时与终止」。
+- **超时终止顺序**：超时/取消杀进程一律 SIGTERM 优先——先 `SIGTERM`，再经 **5000ms 固定宽限**（源码常量 `SIGTERM_GRACE_MS`，不受环境变量影响）补 `SIGKILL`。环境变量 `PI_SUBAGENT_SHUTDOWN_KILL_GRACE_MS`（默认 5000，上界 24 小时）只控制 session_shutdown 时 detached 辅助进程补 `SIGKILL` 的宽限期。详见 [ADVANCED.md](ADVANCED.md) 的「超时与终止」。
 
 ---
 

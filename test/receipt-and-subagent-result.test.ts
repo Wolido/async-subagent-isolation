@@ -1018,14 +1018,14 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 	});
 
 	// ================================================================
-	// 6. /subagent-result 操作提示位置（红阶段）
-	// 修复目标：操作提示从底部 footer 移到标题行（第一行永远可见）：
-	//   Subagent Result: <taskId>  ↑↓/jk 滚动 · Space/b 翻页 · g/G 首尾 · Enter/Esc/q 关闭
-	// 当前实现：提示在底部 footer 行（被挤到屏幕外），标题行只有 taskId → 以下测试红。
-	// 渲染结构：[顶部边框, 标题行, body..., footer, 底部边框]，标题行 = 第一行内容行。
+	// 6. /subagent-result 操作提示位置（新规格：标题行与底部按键栏）
+	// 用户要求与 /subagent-watch 对齐：标题行只留 "Subagent Result: <taskId>"，
+	// 按键提示移到下边框之前的常驻按键栏（dim），措辞与 watch 一致：
+	//   ↑↓/jk line · b/PgUp & Space/PgDn page · g/G top/bottom · Enter/Esc/q close
+	// 渲染结构：[顶部边框, 标题行, body..., 按键栏, 底部边框]。
 	// ================================================================
-	describe("/subagent-result 操作提示位置（红阶段）", () => {
-		/** 操作提示关键词（取自 footer 提示文本，任一命中即视为含提示）。 */
+	describe("/subagent-result 操作提示位置（标题行 / 底部按键栏）", () => {
+		/** 操作提示关键词（取自按键栏文本，任一命中即视为含提示）。 */
 		const HINT_PATTERN = /Space|scroll|page|top\/bottom|close/i;
 
 		/** 用受控短文本打开查看器（内容不含提示关键词，避免误判）。 */
@@ -1058,39 +1058,40 @@ describe("回执精简 & /subagent-result 命令 — 红阶段测试", () => {
 			return renderedLines(viewer).find((line) => line.includes("Subagent Result")) ?? "";
 		}
 
-		it("标题行（第一行内容行）应包含操作提示关键词（当前提示在底部 footer → 红）", async () => {
+		it("标题行只保留 'Subagent Result: <taskId>'，不再含操作提示", async () => {
 			// Arrange: 打开查看器
-			const viewer = await openShortViewer("hint-title-red");
+			const viewer = await openShortViewer("hint-title-only");
 
 			// Act: 取标题行
 			const title = titleLine(viewer);
 
-			// Assert: 标题行应含操作提示关键词（如 "Space" / "翻页" / "关闭"）
-			// 当前实现标题行仅 "Subagent Result: <taskId>"，提示在底部 footer → 红
-			expect(title).toMatch(HINT_PATTERN);
-		});
-
-		it("第一行（标题行）应同时包含标题与操作提示 → 红", async () => {
-			const viewer = await openShortViewer("hint-title-both");
-
-			const title = titleLine(viewer);
-
-			// 标题行应包含标题本身……
+			// Assert: 标题行含标题本身，且不含任何按键提示
 			expect(title).toContain("Subagent Result");
-			// ……且同一行还包含操作提示（当前提示在 footer，不同行 → 红）
-			expect(title).toMatch(HINT_PATTERN);
+			expect(title).not.toMatch(HINT_PATTERN);
 		});
 
-		it("操作提示不应残留在底部 footer 行（footer 删除 → 红）", async () => {
-			const viewer = await openShortViewer("hint-footer-removed");
+		it("按键提示位于下边框之前的常驻按键栏，包含全部键名", async () => {
+			const viewer = await openShortViewer("hint-key-bar");
 
-			// 渲染结构：[顶部边框, 标题, body..., footer, 底部边框]
-			// 底部边框前的最后一行内容（当前是 footer 提示行）
+			// 渲染结构：[顶部边框, 标题, body..., 按键栏, 底部边框]
+			// 底部边框前的最后一行（按键栏）
 			const lines = renderedLines(viewer);
-			const lastContentLine = lines[lines.length - 2] ?? "";
+			const keyBar = lines[lines.length - 2] ?? "";
 
-			// 当前 footer 行含提示关键词 → 红
-			expect(lastContentLine).not.toMatch(HINT_PATTERN);
+			for (const keyName of ["↑", "↓", "j", "k", "b", "PgUp", "PgDn", "Space", "g", "G", "Enter", "Esc", "q"]) {
+				expect(keyBar, `按键栏行须包含键名 ${keyName}`).toContain(keyName);
+			}
+		});
+
+		it("操作提示出现在底部按键栏而非标题行", async () => {
+			const viewer = await openShortViewer("hint-bottom-key-bar");
+
+			const lines = renderedLines(viewer);
+			const title = lines.find((line) => line.includes("Subagent Result")) ?? "";
+			const keyBar = lines[lines.length - 2] ?? "";
+
+			expect(title).not.toMatch(HINT_PATTERN);
+			expect(keyBar).toMatch(HINT_PATTERN);
 		});
 	});
 });

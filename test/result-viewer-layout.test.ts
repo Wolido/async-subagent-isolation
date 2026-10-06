@@ -19,8 +19,12 @@
  * 不会被裁。
  *
  * 组件契约（coder 待实现）：
- *   返回恰好 rows 行 = 顶边框 1 + 标题行 1 + 正文窗口 rows-3 + 底边框 1
- *   （短内容按内容行数收缩，行数 ≤ rows）。
+ *   返回恰好 rows 行 = 顶边框 1 + 标题行 1 + 正文窗口 rows-4 + 按键栏 1 +
+ *   底边框 1（短内容按内容行数收缩，行数 ≤ rows）。
+ *   标题行只保留 "Subagent Result: <taskId>"，不含按键提示。
+ *   下边框之前恒有一行 dim 按键栏，措辞与 /subagent-watch 一致：
+ *   "↑↓/jk line · b/PgUp & Space/PgDn page · g/G top/bottom · Enter/Esc/q close"；
+ *   宽度不足用 truncateToWidth 截断、不折行。
  *   打开即定位到末尾（结果优先）；g/Home 顶部，G/End 底部。
  *   正文末尾空行需 trim（极小视口下最后一行必须是真实内容）。
  *   键位：↑/k、↓/j、PgUp/b、PgDn/Space、g/Home、G/End、Enter/Esc/q→onClose；
@@ -38,6 +42,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import extension, { taskRegistry, createResultViewer } from "../src/index.ts";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 
 vi.mock("@earendil-works/pi-coding-agent", async () => {
 	const actual = await vi.importActual("@earendil-works/pi-coding-agent");
@@ -59,6 +64,26 @@ const themeStub = {
 	bold: (text: string) => text,
 	dim: (text: string) => text,
 };
+
+/** 一次 theme.fg 调用记录（用于断言按键栏的 dim 样式）。 */
+interface ThemeFgCall {
+	color: string;
+	text: string;
+}
+
+/** theme 替身 + theme.fg 调用记录（plain text 恒等返回）。 */
+function createRecordingTheme(): { theme: any; fgCalls: ThemeFgCall[] } {
+	const fgCalls: ThemeFgCall[] = [];
+	const theme = {
+		fg: (color: string, text: string) => {
+			fgCalls.push({ color, text });
+			return text;
+		},
+		bold: (text: string) => text,
+		dim: (text: string) => text,
+	};
+	return { theme, fgCalls };
+}
 
 /** 注入 process.stdout.rows 并在 finally 还原（与 progress-manager 既有写法一致）。 */
 function withRows(rows: number, fn: () => void): void {
@@ -84,13 +109,13 @@ function makeViewerText(lineCount: number): string {
 	return lines.join("\n");
 }
 
-/** 从 render 输出中取出正文窗口行（去掉顶边框、标题行、底边框各 1 行）。 */
+/** 从 render 输出中取出正文窗口行（去掉顶边框、标题行、按键栏、底边框各 1 行）。 */
 function bodyLines(rendered: string[]): string[] {
-	return rendered.slice(2, rendered.length - 1);
+	return rendered.slice(2, rendered.length - 2);
 }
 
-function createViewer(text: string, onClose: () => void = () => {}, tui: any = null) {
-	return createResultViewer({ text, taskId: "task-0000", theme: themeStub, tui, onClose });
+function createViewer(text: string, onClose: () => void = () => {}, tui: any = null, theme: any = themeStub) {
+	return createResultViewer({ text, taskId: "task-0000", theme, tui, onClose });
 }
 
 /** 捕获 /subagent-result handler 调用的 ui.custom(factory, options)。 */
@@ -217,6 +242,111 @@ describe("/subagent-result overlay 查看器（第三轮返工，红阶段）", 
 	});
 
 	// ------------------------------------------------------------------
+	// 底部常驻按键栏（新规格）：标题行只留标题；下边框之前恒有一行 dim 按键栏
+	// （措辞与 /subagent-watch 一致），宽度不足 truncateToWidth 截断、不折行；
+	// 正文窗口 = rows - 4（上边框 / 标题 / 下边框 / 按键栏开销）。
+	// 以下用例为红阶段规格（coder 待实现）。
+	// ------------------------------------------------------------------
+	describe("底部常驻按键栏（红阶段）", () => {
+		const ROWS = 24;
+		const NARROW_WIDTH = 30;
+		const KEY_BAR_TEXT = "↑↓/jk line · b/PgUp & Space/PgDn page · g/G top/bottom · Enter/Esc/q close";
+
+		it("should render the watch-wording key bar in dim directly above the bottom border", () => {
+			withRows(ROWS, () => {
+				// Arrange: 记录 theme.fg 调用的替身
+				const { theme, fgCalls } = createRecordingTheme();
+				const viewer = createViewer(makeViewerText(200), () => {}, null, theme);
+
+				// Act
+				const lines = viewer.component.render(WIDTH);
+
+				// Assert: 下边框是最后一行，按键栏是它前面紧邻的一行，措辞与 watch 逐字一致
+				expect(lines).toHaveLength(ROWS);
+				expect(lines[lines.length - 2]).toContain(KEY_BAR_TEXT);
+				expect(
+					fgCalls.some((call) => call.color === "dim" && call.text.includes("PgUp")),
+					'按键栏须以 dim 样式渲染（theme.fg("dim", …)）',
+				).toBe(true);
+			});
+		});
+
+		it("should keep the title row to only 'Subagent Result: <taskId>' with no key hints", () => {
+			withRows(ROWS, () => {
+				const viewer = createViewer(makeViewerText(200));
+
+				const titleLine = viewer.component.render(WIDTH)[1];
+
+				expect(titleLine).toContain("Subagent Result: task-0000");
+				for (const hint of ["↑", "↓", "PgUp", "PgDn", "Space", "Enter", "Esc", "scroll", "page", "close"]) {
+					expect(titleLine, `标题行不得再含按键提示 ${hint}`).not.toContain(hint);
+				}
+			});
+		});
+
+		it("should size the body window to rows - 4 with the key bar at rows - 2", () => {
+			withRows(ROWS, () => {
+				const viewer = createViewer(makeViewerText(500));
+
+				const lines = viewer.component.render(WIDTH);
+
+				// 顶边框 1 + 标题 1 + 正文 rows-4 + 按键栏 1 + 底边框 1
+				expect(lines).toHaveLength(ROWS);
+				const keyBarIndex = lines.findIndex((line) => line.includes("↑↓/jk line"));
+				expect(keyBarIndex, "按键栏须存在").toBe(ROWS - 2);
+				expect(lines.slice(2, keyBarIndex), "正文窗口高度须为 rows - 4").toHaveLength(ROWS - 4);
+			});
+		});
+
+		it("should render the key bar for short content too", () => {
+			withRows(ROWS, () => {
+				const viewer = createViewer("The answer is 4.");
+
+				const lines = viewer.component.render(WIDTH);
+
+				expect(lines.join("\n")).toContain("The answer is 4.");
+				const keyBarLine = lines[lines.length - 2];
+				expect(keyBarLine).toContain("↑");
+				expect(keyBarLine).toContain("Enter");
+			});
+		});
+
+		it("should truncate the key bar to the render width without wrapping it onto extra rows", () => {
+			withRows(ROWS, () => {
+				const viewer = createViewer(makeViewerText(200));
+
+				const lines = viewer.component.render(NARROW_WIDTH);
+
+				// 总行数不变（未折行）；按键栏不超宽；行首键位保留、尾部键位被截掉
+				expect(lines, "按键栏不得折行（总行数仍须为 rows）").toHaveLength(ROWS);
+				const keyBarLine = lines[lines.length - 2];
+				expect(visibleWidth(keyBarLine), "按键栏不得超出渲染宽度").toBeLessThanOrEqual(NARROW_WIDTH);
+				expect(keyBarLine, "截断须保留行首键位（↑↓/jk）").toContain("↑");
+				expect(keyBarLine, "截断须保留前部键位（PgUp）").toContain("PgUp");
+				expect(keyBarLine, "超窄宽度下尾部键位应被截掉").not.toContain("Enter");
+			});
+		});
+
+		// 按键栏不改变滚动行为：翻页步长仍 = 可视高度 = rows - 4。
+		// 用窗口内可见 LINE-xxx 标记的最大线号之差测步长，不依赖正文行索引。
+		it("should page by rows - 4 lines with Space after the key bar is added", () => {
+			withRows(12, () => {
+				const viewer = createViewer(makeViewerText(200));
+				const highestLineIndex = (rendered: string) =>
+					Math.max(...[...rendered.matchAll(/LINE-(\d{3})/g)].map((m) => Number(m[1])));
+
+				viewer.scrollToStart();
+				const atTop = viewer.component.render(WIDTH).join("\n");
+
+				viewer.component.handleInput(" "); // Space = PgDn，向下翻一页
+
+				const afterPageDown = viewer.component.render(WIDTH).join("\n");
+				expect(highestLineIndex(afterPageDown) - highestLineIndex(atTop), "翻页步长须为 rows - 4").toBe(8);
+			});
+		});
+	});
+
+	// ------------------------------------------------------------------
 	// 极小视口 rows=6：末行必须是真实内容（ZZ-END-MARKER），不是 Markdown 尾随空白
 	// ------------------------------------------------------------------
 	it("should show ZZ-END-MARKER as the last body line at a 6-row viewport", () => {
@@ -225,12 +355,14 @@ describe("/subagent-result overlay 查看器（第三轮返工，红阶段）", 
 			viewer.scrollToEnd();
 			const out = viewer.component.render(WIDTH);
 
-			// 6 行：顶边框 + 标题 + 正文 3 行 + 底边框
+			// 6 行：顶边框 + 标题 + 正文 2 行 + 按键栏 + 底边框
 			expect(out.length).toBe(6);
 			const body = bodyLines(out);
-			expect(body).toHaveLength(3);
+			expect(body).toHaveLength(2);
 			// 尾随空行必须被 trim：最后一行正文是 ZZ-END-MARKER 而非空白
 			expect(body[body.length - 1]).toContain("ZZ-END-MARKER");
+			// 按键栏恒在下边框之前
+			expect(out[out.length - 2]).toContain("Enter");
 		});
 	});
 

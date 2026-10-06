@@ -1,7 +1,8 @@
 /**
  * Contract + regression test suite for /subagent-watch (GitHub issue #1: TUI 中
- * 实时观察运行中子 agent 的输出). 当前 30 个用例全部通过；其中若干用例是
- * 随真实缺陷修复与体验增强追加的回归锁（见「缺陷回归」「增强」用例块）。
+ * 实时观察运行中子 agent 的输出). 当前 40 个用例全部通过；其中规格 10
+ * 「底部常驻按键栏」锁定底部按键栏布局，其余用例包含随真实缺陷修复与体验
+ * 增强追加的回归锁（见「缺陷回归」「增强」用例块）。
  *
  * 行为契约（验收文案已锁定，以下测试逐条编码，文案逐字断言）：
  *  1. 注册命令 subagent-watch，description 逐字：
@@ -26,6 +27,11 @@
  *  8. 非 TUI（mode "json"/print）→ 不打开查看器，console.log 一行，逐字：
  *     "[subagent-watch] taskId: ${taskId} — live view requires TUI mode."
  *  9. 既有全量测试保持通过（由全量 npx vitest run 验证）。
+ * 10. 底部常驻按键栏（用户实测反馈：标题行按键提示被窄终端截断）：
+ *     下边框之前恒有一行 dim 按键栏，须含全部键名（↑↓/jk、b/PgUp、
+ *     Space/PgDn、g/G、Enter/Esc/q）；标题行只留 "Subagent Watch: ${taskId}"；
+ *     完成行仍恰一次且位于正文与按键栏之间；可视高度 =
+ *     rows - 4 - (finish ? 1 : 0)；宽度不足时 truncateToWidth 截断、不折行。
  *
  * 数据来源的接口选型（测试驱动的「新输出」注入缝）：
  * 契约第 4 条点名 message_end / message_update / text_delta —— 这些是子进程
@@ -44,6 +50,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AsyncSubagentTask } from "../src/index.ts";
+import { visibleWidth } from "@earendil-works/pi-tui";
 
 vi.mock("@earendil-works/pi-coding-agent", async () => {
 	const actual = await vi.importActual("@earendil-works/pi-coding-agent");
@@ -170,19 +177,32 @@ interface CapturedComponent {
 	handleInput: (data: string) => void;
 }
 
+/** 一次 theme.fg 调用记录（用于断言按键栏的 dim 样式）。 */
+interface ThemeFgCall {
+	color: string;
+	text: string;
+}
+
 /**
  * Mock a TUI command ctx whose ui.custom() captures the created component and
  * returns a promise resolving when the component calls done() (mirrors real pi:
  * the overlay lives until the component finishes). captured[0] = 选择列表或
- * 查看器；picker 选中后 captured[1] = 查看器。
+ * 查看器；picker 选中后 captured[1] = 查看器。可选 fgCalls 记录 theme.fg
+ * 调用（不改变既有调用方的行为）。
  */
-function createCustomCtx() {
+function createCustomCtx(fgCalls?: ThemeFgCall[]) {
 	const notifyMock = vi.fn();
 	const captured: CapturedComponent[] = [];
 	const customMock = vi.fn(
 		(cb: any) =>
 			new Promise((resolve) => {
-				const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
+				const theme = {
+					fg: (color: string, s: string) => {
+						fgCalls?.push({ color, text: s });
+						return s;
+					},
+					bold: (s: string) => s,
+				};
 				const tui = { requestRender: vi.fn() };
 				const done = vi.fn((value?: unknown) => resolve(value));
 				const component = cb(tui, theme, null, done);
@@ -273,6 +293,9 @@ function toolEndEvent(toolName: string, resultText: string): object {
 }
 
 const countOccurrences = (haystack: string, needle: string) => haystack.split(needle).length - 1;
+
+/** 长正文（120 行唯一编号）：可视窗口必被填满，按键栏布局与滚动可精确断言。 */
+const LONG_SCROLL_BODY = Array.from({ length: 120 }, (_, i) => `Line ${i + 1}: watch scroll content.`).join("\n");
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1087,6 +1110,276 @@ describe("缺陷回归（第二轮）— 空白结尾文本不得重复渲染", 
 
 			captured[0].handleInput(KEY_ESC);
 			await handlerPromise;
+		});
+	});
+
+	// ================================================================
+	// 规格 10 — 底部常驻按键栏（用户实测反馈：标题行的按键提示被窄终端
+	// 截断，用户不知道有 PgUp/PgDn 等键）。新规格：标题行只留
+	// "Subagent Watch: <taskId>"；全部键位常驻在下边框之前的独立一行
+	//（dim 样式），宽度不足时用 truncateToWidth 截断、不折行；完成行仍恰
+	// 一次且位于正文与按键栏之间。开销增加 1 行后：可视高度 =
+	// rows - 4 - (finish ? 1 : 0)。以下用例为红阶段规格（coder 待实现），
+	// 同时锁定滚动/翻页/首尾键位行为不变（关闭键位见规格 7）。
+	// ================================================================
+	describe("规格 10 — 底部常驻按键栏（全部键位 + 布局）", () => {
+		const ROWS = 24;
+		const WIDTH = 80;
+		const NARROW_WIDTH = 30;
+
+		let savedRows: number;
+		beforeEach(() => {
+			savedRows = process.stdout.rows;
+			process.stdout.rows = ROWS;
+		});
+		afterEach(() => {
+			process.stdout.rows = savedRows;
+		});
+
+		/** 派发一个运行中任务并先喂入长正文（120 行），再打开查看器。 */
+		async function openLongViewer(n: number) {
+			const taskId = await dispatchRunningTask(n);
+			feedEvent(lastProc(), assistantEndEvent(LONG_SCROLL_BODY));
+			const fgCalls: ThemeFgCall[] = [];
+			const { ctx, captured } = createCustomCtx(fgCalls);
+			const handlerPromise = watchCommand.handler(taskId, ctx);
+			await waitForCustomCalls(captured, 1);
+			return { taskId, captured, fgCalls, handlerPromise };
+		}
+
+		it("should render a dim key bar directly above the bottom border listing every key name", async () => {
+			expect(watchCommand, "功能缺失：未注册 subagent-watch 命令").toBeDefined();
+			const { captured, fgCalls, handlerPromise } = await openLongViewer(910);
+
+			const lines = captured[0].component.render(WIDTH);
+
+			// 下边框是最后一行；按键栏必须是它前面紧邻的一行
+			expect(lines).toHaveLength(ROWS);
+			const keyBarLine = lines[lines.length - 2];
+			for (const keyName of ["↑", "↓", "j", "k", "b", "PgUp", "PgDn", "Space", "g", "G", "Enter", "Esc", "q"]) {
+				expect(keyBarLine, `按键栏行须包含键名 ${keyName}`).toContain(keyName);
+			}
+			expect(
+				fgCalls.some((call) => call.color === "dim" && call.text.includes("PgUp")),
+				'按键栏须以 dim 样式渲染（theme.fg("dim", …)）',
+			).toBe(true);
+
+			captured[0].handleInput(KEY_ESC);
+			await handlerPromise;
+		});
+
+		it("should render the key bar even when the task has not produced any output yet", async () => {
+			expect(watchCommand, "功能缺失：未注册 subagent-watch 命令").toBeDefined();
+			// Arrange: 运行中任务，无任何输出事件
+			const taskId = await dispatchRunningTask(911);
+			const { ctx, captured } = createCustomCtx();
+			const handlerPromise = watchCommand.handler(taskId, ctx);
+			await waitForCustomCalls(captured, 1);
+
+			// Act
+			const lines = captured[0].component.render(WIDTH);
+
+			// Assert: 短正文下按键栏仍是下边框前的最后一行
+			const keyBarLine = lines[lines.length - 2];
+			expect(keyBarLine).toContain("↑");
+			expect(keyBarLine).toContain("Enter");
+
+			captured[0].handleInput(KEY_ESC);
+			await handlerPromise;
+		});
+
+		it("should keep the title row to only 'Subagent Watch: <taskId>' with no key hints", async () => {
+			expect(watchCommand, "功能缺失：未注册 subagent-watch 命令").toBeDefined();
+			const { taskId, captured, handlerPromise } = await openLongViewer(912);
+
+			const titleLine = captured[0].component.render(WIDTH)[1];
+
+			expect(titleLine).toContain(TITLE(taskId));
+			for (const hint of ["↑", "↓", "PgUp", "PgDn", "Space", "Enter", "Esc", "scroll", "page", "close"]) {
+				expect(titleLine, `标题行不得再含按键提示 ${hint}`).not.toContain(hint);
+			}
+
+			captured[0].handleInput(KEY_ESC);
+			await handlerPromise;
+		});
+
+		it("should render the finish line exactly once between the body and the key bar", async () => {
+			expect(watchCommand, "功能缺失：未注册 subagent-watch 命令").toBeDefined();
+			// Arrange: 长正文运行中任务 + 打开查看器
+			const taskId = await dispatchRunningTask(913);
+			feedEvent(lastProc(), assistantEndEvent(LONG_SCROLL_BODY));
+			const { ctx, captured } = createCustomCtx();
+			const handlerPromise = watchCommand.handler(taskId, ctx);
+			await waitForCustomCalls(captured, 1);
+
+			// Act: 任务结束 + 一个刷新周期
+			endProcess(lastProc(), 0);
+			await vi.advanceTimersByTimeAsync(REFRESH_MS);
+
+			// Assert: 总行数仍为 rows；完成行恰一次，紧邻按键栏之上；按键栏紧邻下边框
+			const lines = captured[0].component.render(WIDTH);
+			expect(lines).toHaveLength(ROWS);
+			expect(countOccurrences(lines.join("\n"), FINISH_LINE(taskId)), "完成行须恰好出现一次").toBe(1);
+			const keyBarIndex = lines.length - 2;
+			const finishIndex = lines.findIndex((line) => line.includes(FINISH_LINE(taskId)));
+			expect(finishIndex, "完成行须位于按键栏之上（正文与按键栏之间）").toBe(keyBarIndex - 1);
+			expect(lines[keyBarIndex]).toContain("↑");
+			expect(lines[keyBarIndex]).toContain("Enter");
+
+			captured[0].handleInput(KEY_ESC);
+			await handlerPromise;
+		});
+
+		it("should size the scrollable body window to rows - 4 while the task is running", async () => {
+			expect(watchCommand, "功能缺失：未注册 subagent-watch 命令").toBeDefined();
+			const { captured, handlerPromise } = await openLongViewer(914);
+
+			// Act: 长正文 + 打开的查看器 → 正文窗口必被填满
+			const lines = captured[0].component.render(WIDTH);
+
+			// Assert: 顶边框 1 + 标题 1 + 正文 rows-4 + 按键栏 1 + 底边框 1
+			const keyBarIndex = lines.findIndex((line) => line.includes("↑"));
+			expect(keyBarIndex, "按键栏须存在").toBeGreaterThanOrEqual(0);
+			expect(keyBarIndex, "按键栏须紧邻下边框之前").toBe(ROWS - 2);
+			expect(lines.slice(2, keyBarIndex), "正文窗口高度须为 rows - 4").toHaveLength(ROWS - 4);
+
+			captured[0].handleInput(KEY_ESC);
+			await handlerPromise;
+		});
+
+		it("should size the scrollable body window to rows - 5 after the task finishes", async () => {
+			expect(watchCommand, "功能缺失：未注册 subagent-watch 命令").toBeDefined();
+			// Arrange: 长正文运行中任务 + 查看器
+			const taskId = await dispatchRunningTask(915);
+			feedEvent(lastProc(), assistantEndEvent(LONG_SCROLL_BODY));
+			const { ctx, captured } = createCustomCtx();
+			const handlerPromise = watchCommand.handler(taskId, ctx);
+			await waitForCustomCalls(captured, 1);
+
+			// Act: 结束 + 刷新
+			endProcess(lastProc(), 0);
+			await vi.advanceTimersByTimeAsync(REFRESH_MS);
+			const lines = captured[0].component.render(WIDTH);
+
+			// Assert: 顶边框 1 + 标题 1 + 正文 rows-5 + 完成行 1 + 按键栏 1 + 底边框 1
+			const keyBarIndex = lines.findIndex((line) => line.includes("↑"));
+			const finishIndex = lines.findIndex((line) => line.includes(FINISH_LINE(taskId)));
+			expect(keyBarIndex).toBe(ROWS - 2);
+			expect(finishIndex).toBe(ROWS - 3);
+			expect(lines.slice(2, finishIndex), "完成前正文窗口高度须为 rows - 5").toHaveLength(ROWS - 5);
+
+			captured[0].handleInput(KEY_ESC);
+			await handlerPromise;
+		});
+
+		it("should truncate the key bar to the render width without wrapping it onto extra rows", async () => {
+			expect(watchCommand, "功能缺失：未注册 subagent-watch 命令").toBeDefined();
+			const { captured, handlerPromise } = await openLongViewer(916);
+
+			// Act: 窄宽度渲染
+			const lines = captured[0].component.render(NARROW_WIDTH);
+
+			// Assert: 总行数不变（未折行）；按键栏不超宽；行首键位保留、尾部键位被截掉
+			expect(lines, "按键栏不得折行（总行数仍须为 rows）").toHaveLength(ROWS);
+			const keyBarLine = lines[lines.length - 2];
+			expect(visibleWidth(keyBarLine), "按键栏不得超出渲染宽度").toBeLessThanOrEqual(NARROW_WIDTH);
+			expect(keyBarLine, "截断须保留行首键位（↑↓/jk）").toContain("↑");
+			expect(keyBarLine, "截断须保留前部键位（PgUp）").toContain("PgUp");
+			expect(keyBarLine, "超窄宽度下尾部键位应被截掉").not.toContain("Enter");
+
+			captured[0].handleInput(KEY_ESC);
+			await handlerPromise;
+		});
+
+		// ----------------------------------------------------------------
+		// 键位回归：按键栏列出的全部键位行为保持不变
+		// ----------------------------------------------------------------
+		describe("键位回归 — 滚动/翻页/首尾", () => {
+			it("should scroll one line with j/↓ down and k/↑ up without closing the viewer", async () => {
+				expect(watchCommand, "功能缺失：未注册 subagent-watch 命令").toBeDefined();
+				const { captured, handlerPromise } = await openLongViewer(920);
+
+				// 顶部：首行可见
+				captured[0].handleInput("g");
+				const top = captured[0].getRendered();
+				expect(top).toContain("Line 1:");
+
+				// j 下移一行；k 对称回顶
+				captured[0].handleInput("j");
+				const afterJ = captured[0].getRendered();
+				expect(afterJ, "j 应向下滚动一行").not.toBe(top);
+				captured[0].handleInput("k");
+				expect(captured[0].getRendered(), "k 应向上滚回（与 j 对称）").toBe(top);
+
+				// ↓ 下移一行；↑ 对称回顶
+				captured[0].handleInput("\x1b[B");
+				const afterDown = captured[0].getRendered();
+				expect(afterDown, "↓ 应向下滚动一行").not.toBe(top);
+				captured[0].handleInput("\x1b[A");
+				expect(captured[0].getRendered(), "↑ 应向上滚回（与 ↓ 对称）").toBe(top);
+
+				expect(captured[0].done, "滚动键不得关闭查看器").not.toHaveBeenCalled();
+				captured[0].handleInput(KEY_ESC);
+				await handlerPromise;
+			});
+
+			it("should page with PgDn/Space down and PgUp/b up", async () => {
+				expect(watchCommand, "功能缺失：未注册 subagent-watch 命令").toBeDefined();
+				const { captured, handlerPromise } = await openLongViewer(921);
+
+				captured[0].handleInput("g");
+				const top = captured[0].getRendered();
+				expect(top).toContain("Line 1:");
+
+				// PgDn 向下翻页：首行移出窗口；PgUp 翻回
+				captured[0].handleInput("\x1b[6~");
+				const afterPgDn = captured[0].getRendered();
+				expect(afterPgDn, "PgDn 应向下翻页").not.toBe(top);
+				expect(afterPgDn, "PgDn 后首行应移出窗口").not.toContain("Line 1:");
+				captured[0].handleInput("\x1b[5~");
+				expect(captured[0].getRendered(), "PgUp 应翻回顶部").toBe(top);
+
+				// Space 向下翻页；b 翻回
+				captured[0].handleInput(" ");
+				const afterSpace = captured[0].getRendered();
+				expect(afterSpace, "Space 应向下翻页").not.toBe(top);
+				expect(afterSpace, "Space 后首行应移出窗口").not.toContain("Line 1:");
+				captured[0].handleInput("b");
+				expect(captured[0].getRendered(), "b 应翻回顶部").toBe(top);
+
+				captured[0].handleInput(KEY_ESC);
+				await handlerPromise;
+			});
+
+			it("should jump to top with g/Home and to bottom with G/End", async () => {
+				expect(watchCommand, "功能缺失：未注册 subagent-watch 命令").toBeDefined();
+				const { captured, handlerPromise } = await openLongViewer(922);
+
+				// 打开即定位末尾
+				expect(captured[0].getRendered()).toContain("Line 120:");
+
+				// g 回顶
+				captured[0].handleInput("g");
+				expect(captured[0].getRendered()).toContain("Line 1:");
+				expect(captured[0].getRendered()).not.toContain("Line 120:");
+
+				// G 到底
+				captured[0].handleInput("G");
+				expect(captured[0].getRendered()).toContain("Line 120:");
+
+				// Home 回顶
+				captured[0].handleInput("\x1b[H");
+				expect(captured[0].getRendered()).toContain("Line 1:");
+				expect(captured[0].getRendered()).not.toContain("Line 120:");
+
+				// End 到底
+				captured[0].handleInput("\x1b[F");
+				expect(captured[0].getRendered()).toContain("Line 120:");
+				expect(captured[0].getRendered()).not.toContain("Line 1:");
+
+				captured[0].handleInput(KEY_ESC);
+				await handlerPromise;
+			});
 		});
 	});
 });
