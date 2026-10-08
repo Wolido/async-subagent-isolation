@@ -18,6 +18,7 @@
   "files": [
     "src",
     "logo.svg",
+    "assets",
     "README.md",
     "README.en.md",
     "ADVANCED.md",

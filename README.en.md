@@ -19,6 +19,24 @@ The core constraint is unchanged: **the main agent can't touch code**. No `write
 
 ---
 
+## Legion Mode: write "who may dispatch whom" as one DAG roster
+
+Legion mode does exactly one thing: it writes "who may dispatch whom" into a roster, so the whole picture grows into a directed acyclic graph (DAG).
+
+- **Hierarchy is a result of the roster, not a premise.** Who sits under whom is decided by the edges in the roster; adding a role means adding one line to the roster.
+- **Context goes entirely to decisions, not to control.** The main agent keeps only "what to do" and "what came back"; process and detail stay inside each subagent's own process. The context you save is spent entirely on judgment and decision.
+- **Discipline is written into the structure.** A manager must be read-only (decision and execution are separated — no `write`, no `edit`); a dispatch outside the roster is rejected; a config mistake blocks at startup (fail-closed).
+- **A DAG is not a tree:** the same agent can be referenced by several rows — one node, one capability. In the example below, `executor` is shared by two legions, while `writer` is referenced by the main agent and two legions at once.
+- **Async is the perfect complement:** in TUI mode, dispatch returns immediately and the result arrives as a system notification — the main path is never blocked; in non-TUI (print/json) it automatically falls back to synchronous, with the result returned right at the call site — perfect for scripts. This design is especially handy in legion mode, where delegation is multi-layer.
+
+<img src="assets/legion-mode-example.svg" alt="Example: a real legion roster — 16 roles, 19 dispatch edges" width="560">
+
+*Example: one real configuration — 16 roles, 19 dispatch edges (`executor` and `writer` are shared multi-parent nodes).*
+
+For the mechanics in detail, see "Dispatch roster: `dispatch`" and "Sync vs async" below.
+
+---
+
 ## Is your agent showing these symptoms
 
 All five symptoms trace back to structural root causes, and each has a structural fix:
