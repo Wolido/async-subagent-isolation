@@ -168,7 +168,7 @@ async-subagent-isolation 做的是强制且完全的隔离：
 
 同步版里，每次委派都阻塞等待，体验上你面对的是一个“智能体集群”：主 agent 派完活就沉默，等子 agent 干完才回来，中间是一段段接力执行的空白。异步版把这一点翻了过来，**你的对话对象始终只有主 agent 一个**。
 
-主 agent 是调度者：理解需求、拆任务、派发、汇总结果。子 agent 是幕后工人，每个都在后台独立进程里跑，完成后用 `[subagent-result]` 通知把结果送回主 agent。你不直接和子 agent 对话，也不需要；查看结果用 `/subagent-result`，实时观察运行中的任务用 `/subagent-watch`，取消任务用 `/subagent-cancel`，中间过程交给调度者。
+主 agent 是调度者：理解需求、拆任务、派发、汇总结果。子 agent 是幕后工人，每个都在后台独立进程里跑，完成后用 `[subagent-result]` 通知把结果送回主 agent。你不直接和子 agent 对话，也不需要；查看结果用 `/subagent-result`，实时观察运行中的任务用 `/subagent-watch`，在浏览器里看实时转录用 `/subagent-web`，取消任务用 `/subagent-cancel`，中间过程交给调度者。
 
 更关键的是**派发之后的自由**。任务在后台跑的时候，你可以继续和主 agent 聊天：细化需求、调整规划、商量下一步，或提出新任务。主 agent 不必干等，可以继续规划，甚至并行派发更多任务。前台对话与后台工作并行推进。
 
@@ -224,6 +224,25 @@ Dispatched coder. taskId: 01912345-6789-7abc-8def-0123456789ab
 
 查看器**只服务仍在运行的任务**：传入已结束或不存在的 taskId 会被拒绝并提示改用 `/subagent-result`；不带参数时（TUI）弹出选择列表，只列运行中任务，非 TUI 且无参时打印用法提示 `Usage: /subagent-watch <taskId> — watch a running subagent task live.`。观看过程中任务结束，刷新自动停止，底部固定提示 `Task finished — live updates stopped. Final result: /subagent-result <taskId>`，查看器保持打开直到你手动关闭。
 
+### 7. 浏览器视图（`/subagent-web`）
+
+`/subagent-watch` 与 `/subagent-result` 是全屏 TUI 查看器；`/subagent-web` 把同一批子 agent 会话搬进浏览器。命令注册描述逐字为 `Open the live subagent web view in the browser (usage: /subagent-web [taskId] [--stop] [--no-open])`。
+
+- `/subagent-web`：启动本地服务并打开浏览器，落在本次会话直接派发任务的列表。
+- `/subagent-web <taskId>`：直接打开该任务，运行中或已结束都可以。
+- `/subagent-web --stop`：关闭服务。
+- `/subagent-web --no-open`：只启动服务并给出 URL，不拉起浏览器。
+
+侧栏只列本次会话直接派发的任务，按最旧在上、最新在下的日志顺序排列。每行依次显示状态点、状态词、agent 名、taskId 前 8 位、耗时与任务文本。任务文本超过 200 个码点时截断。行尾是子任务聚合徽章，形如 `3 children · 2 running · 1 failed`；子节点尚未扫描时留空。打开页面时自动滚到最新的在跑任务；没有在跑任务就滚到最后一行；用户手动滚动后不再自动滚；深链进入时以选中行为准。顶层条目被丢弃时显示 `显示最新 N / 共 M`。侧栏可收起、可展开，也可拖拽调宽（最小 200px）；窗口宽度小于 700px 时自动收起。
+
+状态分六种：running、recent、pending、rejected、failed、finished。判定优先级固定：进程内注册表 running > 指针且无更晚同步收据 > 同步收据 > 完成记录 > 子会话最后条目时间戳（10 秒窗口）。异步收据只表示已派发，不作为完成信号；`pending` 表示尚未拿到收据或指针；rejected / failed 按最新事件胜。
+
+转录里每次 `subagent` 派发调用都是可点导航项，显示形如 `→ open <agent> (<status>)`。点击后在同页切换到该子任务的转录（`#/t/<taskId>`）。子任务 id 先查父会话里的收据，再查该任务的 `children.jsonl` 指针（agent 与任务原文精确匹配）；两者都没有时显示 `waiting for receipt`，收据落盘后自动变为可点。深层页面顶部有面包屑 `祖先 › 当前`（每节可点、带状态点，当前节标记 `aria-current="page"`）；`← Back` 仅在 depth ≥ 2（有祖先）时显示，回直接上级，depth ≤1 不显示、`Alt+←` 无动作。当 `#/t/<taskId>` 指向不存在或不可达的任务时，页面显示「未找到该任务」并提供返回任务列表的入口（`#/`）。转录区右上角有吸顶的状态 pill，显示 `status | duration`。侧栏行支持键盘导航：`↑`/`↓` 移动焦点、`Home`/`End` 跳首/尾行、`Enter`（或 `Space`）打开所选任务（行带拒绝/失败原因时展开/收起原因面板）、`Alt+←` 返回上一级；详见 [ADVANCED.md](ADVANCED.md) 的「浏览器视图（/subagent-web）」。
+
+取数上，顶层列表每次请求重建。在跑与刚结束的节点即时扫子节点；已完结节点只回计数（`childCount` / `childSummary`），打开时用 `?expand=` 按需拉取并缓存。转录用 Markdown 渲染，`marked`（MIT）与 `highlight.js`（BSD-3-Clause）两份随包文件内联进页面，页面不发起外部请求。thinking 与工具结果折叠；代码块带语法高亮；`mermaid` 代码块按普通代码块显示。图片按需加载（`/api/image`）；外部图片不自动加载，显示占位与可点链接。Markdown 里的原始 HTML 按文本显示；非 `http(s)` / `#` 的链接目标改写为纯文本。转录不截断：首屏用服务端尾窗口，随后客户端自动向前分片补齐到会话开头。
+
+服务只监听 `127.0.0.1`，端口随机，每次启动生成随机 token 放进 URL 的 `t` 参数。请求按 方法 → `Host` → `Origin` → token 的顺序校验；taskId 必须落在 subagent 会话根目录内，先做词法校验再做 realpath 校验。非 TUI（print/json）模式不拉浏览器，打印一行 `[subagent-web] http://127.0.0.1:<port>/?t=<token>`。接口 `apiVersion` 与页面不一致时，顶部横幅提示刷新（⌘⇧R）；取数失败时右上角以红字写明原因（健康时不显示该文本）。安全模型、生命周期、状态判定与取数细节见 [ADVANCED.md](ADVANCED.md) 的「浏览器视图（/subagent-web）」。
+
 ### 完整流程一览
 
 ```
@@ -260,7 +279,8 @@ Dispatched coder. taskId: 01912345-6789-7abc-8def-0123456789ab
 | `/subagent-cancel-all` | 一键取消全部运行中的后台任务 |
 | `/subagent-result <taskId>` | 全屏查看某任务的完整返回（不带参数时弹出最近 5 个已结束任务的交互选择列表；全屏查看器与无参选择列表仅 TUI，非 TUI 下直接把完整结果 `console.log` 到终端） |
 | `/subagent-watch <taskId>` | 实时查看运行中任务的输出（全屏，1 秒刷新；不带参数时弹出运行中任务的交互选择列表；实时查看器仅 TUI 可用，非 TUI 且无参时打印用法提示） |
-| `/subagent-dispatch` | 打印有效名单（S × C 合成交集）+ 反查（谁派它）+ 校验发现；启动校验 fail-closed 时该命令仍可用，用于排查 |
+| `/subagent-web [taskId] [--stop] [--no-open]` | 在浏览器里查看实时子 agent 会话：无参数打开本次会话直接派发任务的列表，`<taskId>` 直接打开该任务（运行中或已结束），`--stop` 关闭服务，`--no-open` 只启动服务并给出 URL；非 TUI 模式打印一行 `[subagent-web] <url>`，不拉浏览器；页面提供日志式侧栏列表、面包屑下钻、`→ open <agent> (<status>)` 转录导航、Markdown 渲染、图片按需加载与转录自动补齐全量 |
+| `/subagent-dispatch` | 打印 subagent-isolation.json 的有效派发名单（S × C 合成交集）与校验发现；启动校验 fail-closed 时该命令仍可用，用于排查 |
 | `/subagent-config [agent]` | 唯一的交互式配置入口：agent 选择菜单直接标注每个 agent 的生效 model/thinking，可编辑 description/tools/skills/body/model & thinking 五字段（name 只读）并管理可用 model 列表（带参数直进指定 agent） |
 
 ---
@@ -435,7 +455,8 @@ Other tasks in flight when this task ended: 1
 
 ## 项目结构
 
-- `src/index.ts` — 扩展主源码
+- `src/index.ts` — 扩展主源码（命令接线与生命周期）
+- `src/web/` — `/subagent-web` 的本地服务与页面（`server.ts` 服务与路由、`tail.ts` 增量读取、`tree.ts` 会话树、`tree-view.ts` 侧栏视图辅助、`session-source.ts` 解析缓存、`children.ts` 派发指针、`images.ts` 图片按需加载、`markdown.ts` Markdown 渲染、`page.ts` 自包含页面、`api-version.ts` 接口版本号、`vendor.ts` 随包浏览器文件）
 - `examples/pi/agent/` — 示例 agent 和 skill 定义（`master.md`、`agents/`、`skills/`）
 - `package.json` — npm 包清单
 - `tsconfig.json` — TypeScript 配置

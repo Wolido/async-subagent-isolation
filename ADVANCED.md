@@ -227,13 +227,36 @@ Delegate tasks to these specialized subagents via the `subagent` tool:
 
 **legacy 兼容**：两级都没有 `dispatch` 字段 = legacy 模式，行为与改造前完全一致（仍由深度锁限制、零迁移成本）。
 
-**`/subagent-dispatch` 输出结构**：
+**`/subagent-dispatch` 输出结构**（命令描述逐字为 `Show the effective dispatch roster from subagent-isolation.json with validation findings`）：
 
-1. 有效名单（S × C 合成交集）：逐 agent（或 `main`）一行 `<agent 名> → <合成名单>`；
-2. 反查（谁派它）：`<child> ← <parents>`；
-3. 校验发现：S 与 C 各自的校验发现，分别标 `[S <cwd>]` / `[C <cwd>]` 前缀。
+首行固定为 `Dispatch roster (from subagent-isolation.json):`；空行后逐 agent（或 `main`）一行 `<agent 名> → <合成名单>`，合成名单为空显示 `(none)`；再空一行后是 `Validation findings: none` 或 `Validation findings:` 加分条发现。发现按消息文本去重：两个来源（S 与 C）的发现集合一致时全部不加前缀；集合不一致时只给单侧独有的发现加 `[S <cwd>]` / `[C <cwd>]` 前缀，两侧一致的发现不带前缀（发现文案来自校验实现，当前为中文）。若 on-disk 的 C 里有条目尚未进入生效名单（需要 `/reload`），末尾追加空行与一段 `Not yet active (in subagent-isolation.json, needs /reload):`，每行 `<agent 名> → <新增条目>`。
 
-两级都无 `dispatch` 时输出 `未配置 dispatch（legacy 模式）：subagent 工具不受名单限制，子进程内的派发仍由深度锁（PI_SUBAGENT_DEPTH）拦截。`。两模式（TUI/非 TUI）均可用：TUI 用 notify，非 TUI 用 console.log。
+无发现时：
+
+```text
+Dispatch roster (from subagent-isolation.json):
+
+main → coder, reviewer
+coder → reviewer
+
+Validation findings: none
+```
+
+有单侧发现与未生效条目时：
+
+```text
+Dispatch roster (from subagent-isolation.json):
+
+main → coder
+
+Validation findings:
+[S /home/me/project] dispatch 里的 "docs" 找不到对应的 agent 文件
+
+Not yet active (in subagent-isolation.json, needs /reload):
+main → writer
+```
+
+两级都无 `dispatch` 时输出一行英文说明：`No dispatch config (legacy mode): the subagent tool is not limited by a roster; dispatch inside a subagent process is still blocked by the depth lock (PI_SUBAGENT_DEPTH).` 两模式（TUI/非 TUI）均可用：TUI 用 notify，非 TUI 用 console.log。
 
 **reload 语义**：S 在启动时固定、C 每次派发/注入都重读，生效名单是两者求交集。因此改 `dispatch` 字段并非一律需要 `/reload`：在 C 仍保留该字段时，收紧（删条目）即时生效——C 重读后交集立即变小；放宽（加条目）是否即时取决于该条目是否已在快照 S 的同一行中——已在同一行即时生效，不在则需 `/reload`（`/reload` 重新执行 factory 才刷新 S）。边界（以下均指主进程）：① 两级都不再提供该字段（key 被移除、文件被删、JSON 解析失败、或顶层不是对象）时 C 才整体缺席，名单回退为 S 单独决定、一条都不收紧，`/reload` 后才切换（届时两级皆无字段即回退 legacy）；只删/改坏其中一级而另一级仍有该字段时，C 回退到另一级的行，交集可能立即变化；与之相对，编辑被遮蔽层级的文件不改变 C，`/reload` 也无效（项目级有该字段时整份替换用户级）。② `dispatch` 键仍在但形状非法（整体不是对象、某行不是数组、某元素非字符串或空白）不算缺席：整体非法或某行不是数组时，该行按空行参与交集（`main` 行被丢弃即清零全拒）；某元素非法时只丢弃该元素、该行其余条目仍在，交集至多即时收紧、绝不放宽。③ 启动时即 fail-closed 或启动快照名单为空的会话根本没注册 `subagent` 工具，该会话内任何配置改动（含修复 agent 文件的 `tools`）都不生效，须 `/reload` 重跑 factory。④ 子进程（`PI_SUBAGENT_DEPTH >= 1`）的名单在父进程派发时按 `PI_SUBAGENT_ALLOWED` 定死，运行中改配置与 `/reload` 都不刷新，只有父进程重新派发才会变；在子进程侧把 `dispatch` 字段删光也不会立即回退 legacy——S 仍在期间仍是名单模式、名单仍按 `PI_SUBAGENT_ALLOWED`（与 ① 同理），须在子进程内 `/reload` 刷新 S 后才回退 legacy 深度锁。⑤ 启动时两级都没有 `dispatch`（S 缺席）的会话注册不受名单限制，会话中新建 `dispatch` 后名单只由 C 决定，增删都即时生效（该字段不经过启动校验）。
 
@@ -421,9 +444,127 @@ widget 行中的 taskId 可直接复制，用于 `/subagent-watch` 实时观察�
 | /subagent-cancel-all | 可用 | 可用 |
 | /subagent-watch | 可用（全屏实时查看器） | 可用（打印一行 `… live view requires TUI mode.`，不打开查看器） |
 | /subagent-result | 可用（全屏查看器；无参弹最近 5 个已结束任务） | 可用（带 taskId 时把完整结果输出到终端） |
+| /subagent-web | 可用（打开浏览器；`--no-open` 只给 URL） | 可用（打印一行 `[subagent-web] <url>`，不拉浏览器） |
 | /subagent-config | 可用（交互配置） | 可用但只提示 `/subagent-config requires TUI mode (interactive config editor).` |
 | /subagent-dispatch | 可用（notify） | 可用（console.log） |
 | 并行派发 | 支持（无依赖任务可同时派出） | 不支持（每次调用阻塞） |
+
+## 浏览器视图（/subagent-web）
+
+把子 agent 会话搬进浏览器。命令注册描述逐字为 `Open the live subagent web view in the browser (usage: /subagent-web [taskId] [--stop] [--no-open])`。
+
+```
+/subagent-web              # 打开本次会话直接派发任务的列表
+/subagent-web <taskId>     # 直接打开该任务（运行中或已结束）
+/subagent-web --stop       # 关闭服务
+/subagent-web --no-open    # 只启动服务并给出 URL，不拉起浏览器
+```
+
+- 带 `<taskId>` 时先校验：形状非法或会话目录不存在 → 提示 `No subagent session found for taskId: <taskId>`，不打开页面。
+- `--stop` 关闭服务：TUI 提示 `Subagent web server stopped.`，非 TUI 打印同一句。
+- 非 TUI（print/json）模式不拉浏览器：无参数时打印一行 `[subagent-web] http://127.0.0.1:<port>/?t=<token>`，带 taskId 时同一行附加深链 `#/t/<taskId>`。TUI 下 `--no-open` 只提示 `Web view: <url>`。
+- 页面每 1 秒向前取转录增量，每 3 秒刷新列表；页面不可见时暂停。流式增量（`text_delta`）不落盘，页面按消息与工具调用粒度刷新。
+
+### 安全模型
+
+- 只监听 `127.0.0.1`，端口随机；每次启动生成随机 token，放在 URL 的 `t` 参数里。
+- 每个请求按 方法 → `Host` → `Origin` → token 的顺序校验：只接受 GET；`Host` 必须是 `127.0.0.1:<端口>`（或 `localhost` / `[::1]`）；跨源的 `Origin` 被拒绝。这两步防 DNS rebinding。token 用常量时间比较。
+- taskId 必须落在 subagent 会话根目录内：先做词法校验，再做 realpath 校验。`../` 穿越与符号链接逃逸返回 403；随后才是 UUID 形状检查（400）。
+- `GET /` 返回自包含页面；`/api/tree`、`/api/session`、`/api/image` 三个接口共用同一套鉴权与路径校验。
+- 响应头默认带 `Cache-Control: no-store` 与 `Referrer-Policy: no-referrer`；`/api/tree` 用 `ETag` + `If-None-Match` 协商（内容未变返回 304 空正文），它的 `Cache-Control` 是 `no-cache`。
+- 页面完全自包含：`marked` 与 `highlight.js` 内联进页面，页面不向外部发起任何请求。
+
+### 生命周期
+
+- 服务在命令触发时惰性启动，扩展工厂阶段不监听 socket。
+- 句柄放在进程级单例上；`/reload` 后新实例接管同一端口与 token，已打开的标签页不失效。
+- `session_shutdown` 时幂等关闭（从未启动过也不报错）；pi 进程退出或被强杀时端口随进程释放。
+- 服务端空闲时不跑定时器、不读文件；读取只由页面轮询触发。连续 5 次取数失败后页面显示 `offline` 与连接丢失横幅；取数恢复后自动继续。
+- 会话文件尚未出现时，转录区右上角的状态 pill 显示 `waiting for session file`，页面继续轮询。
+
+### 数据来源与取数
+
+- 服务读取 subagent 会话的 JSONL（`~/.pi/agent/subagent-sessions/<taskId>/`），按字节偏移增量读取并对齐行边界。首次取数（`tail=1`）从文件末尾最多 512 KiB 的窗口开始。
+- 会话解析结果按「路径 + 大小 + 修改时间」缓存；超过 20 MiB 的会话只解析尾窗。主会话索引没有增量解析：文件一变就整份重读。
+- 顶层列表每次请求重建。在跑、刚结束与异常结束的节点即时扫子节点；已完结节点只回 `childCount` 与 `childSummary`，子树冻结。
+- 打开已完结节点时，页面用 `?expand=<taskId>` 拉取子树；服务端按会话文件与 `children.jsonl` 的 stat、注册表与完成记录摘要、时间分桶组成缓存键，命中就复用，不再扫描。
+- `/api/tree` 返回 `truncated {total, showing, dropped}`，统计顶层派发条目；`/api/session` 返回 `links`，供转录导航使用。
+
+### 状态语义
+
+六种状态：running、recent、pending、rejected、failed、finished。判定优先级自上而下，先命中先定：
+
+| 优先级 | 条件 | 状态 |
+|---|---|---|
+| 1 | 进程内注册表列出该 taskId，且状态为 running | running |
+| 2 | 有指针行，且没有比最新指针行更晚的同步收据 | running；子会话最后条目超过 10 分钟无更新时降级为 recent |
+| 3 | 有同步收据（比指针新，或没有指针） | finished，`finishedAt` 取收据时间戳 |
+| 4 | 有完成记录（进程内 completedTasks） | finished，`finishedAt` 取记录值 |
+| 5 | 子会话最后条目时间戳落在 `[now − 10 秒, now]` 内 | recent |
+| 6 | 其余情况 | depth ≥ 1，且没有同步收据、没有指针 → pending；depth 0 按最后条目时间戳（取不到则按 `startedAt`）判 finished |
+
+- 无收据、无匹配指针的派发（未知链接）单独记为 pending，taskId 为空，界面显示 `waiting for receipt`。
+- rejected / failed 在注册表检查之后直接短路，按最新事件胜：同一个 taskId 在新一轮派发后能正确翻转。
+- 异步收据只表示「已派发」，本身不是完成信号；等待收据的节点不显示成 finished。
+- 指针行来自派发方的 `children.jsonl`，记录子 id、agent、任务原文与时间；同一子 id 多次派发时以最新指针行的时间为准。
+
+### 侧栏
+
+- 只列本次会话直接派发的任务（顶层），不缩进显示孙任务；更深的任务通过转录导航与面包屑进入。
+- 顺序为日志式：最旧在上、最新在下，服务端按 `startedAt` 升序返回。
+- 每行依次显示状态点、状态词、agent 名、taskId 前 8 位、耗时与任务文本。任务文本超过 200 个 Unicode 码点时截断。行尾是子任务聚合徽章，格式如 `3 children · 2 running · 1 failed`；已完结节点在按需展开后显示徽章。
+- 打开页面时自动滚到最新的在跑任务；没有在跑任务就滚到最后一行。用户手动滚动后自动滚动停用。深链进入时以选中行为准，不自动滚动。
+- 顶层条目被丢弃时显示 `显示最新 N / 共 M`（N 为返回数，M 为发现总数）。
+- 点击行立即切换选中样式（乐观更新），随后的列表刷新只做校正。
+- 侧栏可收起、可展开，也可拖拽调宽：最小 200px；窗口宽 700–1000px 时最大为窗口宽度的 45%，更宽时为 60%。收起状态与宽度保存在浏览器本地，刷新后保持。窗口宽度小于 700px 时自动收起，不遮挡正文。调宽手柄可键盘聚焦，方向键按 16px 步进调整。
+
+#### 键盘导航
+
+- `↑`/`↓` 在行间移动焦点；`Home`/`End` 跳首/尾行。
+- 整列表只有一个 Tab 停靠点（roving tabindex）：Tab 进入列表时停在当前选中任务自身的行；该任务下钻到深层、自身没有行时停在首行。
+- `Enter`（或 `Space`）打开所选任务；带拒绝/失败原因的行则展开/收起身下的原因面板，不导航。
+- `Alt+←` 返回上一级，与 `← Back` 等价；depth ≤ 1 时无动作。
+- 树每 3 秒轮询重建；重建后键盘焦点回到原行，侧栏滚动位置保持不变。
+
+### 下钻导航
+
+- 转录里每次 `subagent` 派发调用都是可点导航项，显示形如 `→ open <agent> (<status>)`。点击后在同页切换到该子任务的转录（哈希路由 `#/t/<taskId>`）。没有任务文本、也没有收据或指针的 `subagent` 调用不生成导航项。
+- 当 `#/t/<taskId>` 指向不存在或不可达的任务时，页面显示「未找到该任务」并提供返回任务列表的入口（`#/`）。
+- 状态 pill 位于转录区右上角（吸顶，显示 `status | duration`）。
+- 子任务 id 先查父会话里的收据，再查该任务的 `children.jsonl` 指针（agent 与任务原文精确匹配）。两者都没有时显示 `waiting for receipt`，收据落盘后自动变为可点。
+- 深层页面顶部有面包屑 `祖先 › 当前`：每节可点、带状态点，当前节标记 `aria-current="page"`。`← Back` 仅在 depth ≥ 2（有祖先）时显示，回直接上级；depth ≤1 不显示，`Alt+←` 无动作。
+- 祖先链与转录导航用同一批链接来源：已结束任务从父会话的工具结果收据取子任务 id（UUID 直连）；在飞任务用派发方写下的指针文件。树构建不枚举会话根目录：每个 taskId 只做一次定向 stat 与它自己目录的 readdir。深度上限 6；顶层上限 1000，其余每层上限 200；超出时保留最新的节点。非 UUID 命名与隐藏目录被忽略。
+
+### 转录渲染
+
+- assistant 文本与工具结果文本按 Markdown 渲染（标题、列表、表格、引用、链接、代码块）；代码块用 `highlight.js` 高亮。
+- thinking、工具调用与工具结果折叠显示。
+- Markdown 里的原始 HTML 在解析前转义为文本，模型输出无法注入活动标记。链接目标只接受 `http(s)` 与页内 `#` 锚点；`javascript:`、`data:` 等降级为纯文本。
+- `mermaid` 代码块按普通代码块显示（等宽、可横向滚动、可复制），不做图形渲染。
+- 图片按需加载：`/api/session` 剥离 base64，只回 `imageRef`；点击 `Load image` 后从 `/api/image` 取字节并显示。外部图片不自动加载：`http(s)` 图片变成占位与可点链接，其余降级为纯文本。
+- 转录不截断：首屏用服务端尾窗口，客户端随后自动向前分片补齐到会话开头（`before` 游标），到底显示 `Beginning of session`。
+- 不在底部时显示 `New content` 提示，点击回到底部。取数失败按指数退避重试（1 秒起，最多 30 秒）。
+
+### 自诊断
+
+- 接口 `apiVersion`（当前 2）与页面内联值不一致时，顶部横幅显示 `页面代码与后端不匹配，请刷新（⌘⇧R）`。该横幅优先于离线提示。
+- 取数失败时右上角以红字写明原因（健康时不显示该文本）。
+
+### 第三方许可
+
+- 页面内联两份随包发布的 vendor 文件：`assets/vendor/marked.min.js`（marked v18.0.5，MIT）与 `assets/vendor/highlight.min.js`（highlight.js v11.9.0，BSD-3-Clause）。许可证声明与来源见 `assets/vendor/NOTICE`。
+
+## 本地加载扩展（绝对路径）
+
+从本地检出加载扩展时，把扩展入口的绝对路径写进 `.pi/settings.json` 的 `extensions` 数组：
+
+```json
+{
+  "extensions": ["/Users/you/async-subagent-isolation/src/index.ts"]
+}
+```
+
+项目级设置里的相对路径按设置文件所在目录解析，也就是 `.pi/` 目录。这类路径通常指向不存在的目录，pi 对找不到的资源静默跳过：扩展不会加载，也没有报错提示。路径写绝对路径；`~` 开头的路径也支持，不要写相对路径。
 
 ## 手动调用
 

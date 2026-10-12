@@ -168,7 +168,7 @@ This project is the async evolution of [subagent-isolation](https://github.com/W
 
 In the sync version, every delegation blocks, so the experience feels like facing a "swarm of agents": the main agent dispatches and goes silent until the subagent finishes, leaving you with stretches of relayed execution. The async version flips this — **your conversation is always with the main agent alone**.
 
-The main agent is the dispatcher: it understands the request, splits it into tasks, dispatches them, and summarizes the results. Subagents are behind-the-scenes workers, each running in its own background process and reporting back through a `[subagent-result]` notification. You never talk to a subagent directly, and you shouldn't need to: read results with `/subagent-result`, watch a running task live with `/subagent-watch`, cancel with `/subagent-cancel`, and leave everything in between to the dispatcher.
+The main agent is the dispatcher: it understands the request, splits it into tasks, dispatches them, and summarizes the results. Subagents are behind-the-scenes workers, each running in its own background process and reporting back through a `[subagent-result]` notification. You never talk to a subagent directly, and you shouldn't need to: read results with `/subagent-result`, watch a running task live with `/subagent-watch`, read the live transcript in a browser with `/subagent-web`, cancel with `/subagent-cancel`, and leave everything in between to the dispatcher.
 
 More important is **the freedom after dispatch**. While a task runs in the background, you keep talking to the main agent — refine the requirements, adjust the plan, discuss next steps, or raise a new task. The main agent doesn't wait idle; it can keep planning and even dispatch more tasks in parallel. Foreground conversation and background work move forward together.
 
@@ -224,6 +224,25 @@ When a subagent runs long, you don't have to wait for it to finish to see what i
 
 The viewer **serves running tasks only**: a finished or unknown taskId is refused with a pointer to `/subagent-result`; with no argument it opens a picker that lists running tasks only (TUI), while a non-TUI invocation with no argument prints the usage hint `Usage: /subagent-watch <taskId> — watch a running subagent task live.`. If the watched task finishes while you watch, refreshing stops and a fixed line stays at the bottom — `Task finished — live updates stopped. Final result: /subagent-result <taskId>` — and the viewer stays open until you close it.
 
+### 7. Browser view (`/subagent-web`)
+
+`/subagent-watch` and `/subagent-result` are full-screen TUI viewers; `/subagent-web` moves the same subagent sessions into the browser. The registered command description is verbatim `Open the live subagent web view in the browser (usage: /subagent-web [taskId] [--stop] [--no-open])`.
+
+- `/subagent-web`: starts the local server and opens the browser at the list of tasks dispatched directly by this session.
+- `/subagent-web <taskId>`: opens that task directly, running or finished.
+- `/subagent-web --stop`: stops the server.
+- `/subagent-web --no-open`: starts the server and prints the URL only, without launching a browser.
+
+The sidebar lists only the tasks this session dispatched directly, in log order: oldest first, newest last. Each row shows a status dot, the status word, the agent, the first 8 characters of the taskId, the elapsed time and the task text. A task text longer than 200 code points is cut. A row whose children were scanned carries an aggregate badge at the tail, such as `3 children · 2 running · 1 failed`. On open the page scrolls to the newest running task, or to the last row when none is running; a manual scroll stops that, and a deep link leaves the selection in charge. When top-level entries were dropped the sidebar shows `显示最新 N / 共 M`. The sidebar collapses, expands and drags to resize (minimum 200px); below 700px of window width it collapses automatically.
+
+Six statuses exist: running, recent, pending, rejected, failed, finished. The priority is fixed: in-process registry running > pointer without a newer sync receipt > sync receipt > completion record > the child session's last entry timestamp inside a 10-second window. An async receipt only means the task was dispatched and is never a completion signal; `pending` means no receipt or pointer has landed yet; a rejected or failed outcome follows the latest event.
+
+Every `subagent` dispatch call in the transcript is a clickable nav item showing `→ open <agent> (<status>)`. Clicking it switches to that subtask's transcript in the same page (`#/t/<taskId>`). The subtask id resolves through the receipt in the parent session first, then through the task's `children.jsonl` pointer (an exact match on the agent and the task text); when neither exists, the item shows `waiting for receipt`, and it becomes clickable once the receipt lands. A deeper page carries breadcrumbs `ancestors › current` (every section clickable, with a status dot, and the current section marked `aria-current="page"`); `← Back` only appears at depth ≥ 2 (with ancestors) and steps up to the direct parent, while at depth ≤1 it is not shown and `Alt+←` does nothing. When `#/t/<taskId>` points to a task that does not exist or is unreachable, the page shows "未找到该任务" with a back-to-list entry (`#/`). The status pill sits at the top-right of the transcript area (sticky) and shows `status | duration`. The sidebar rows support keyboard navigation: `↑`/`↓` move focus, `Home`/`End` jump to the first/last row, `Enter` (or `Space`) opens the selected task (a row with a rejection/failure reason expands/collapses its reason panel instead), and `Alt+←` goes back one level; see "Browser view (/subagent-web)" in [ADVANCED.en.md](ADVANCED.en.md).
+
+The top-level list is rebuilt on every request. Running and recently finished nodes have their children scanned immediately; a finished node returns counts only (`childCount` / `childSummary`) and fetches its subtree on demand through `?expand=`, which the server caches. The transcript renders as Markdown, with the shipped `marked` (MIT) and `highlight.js` (BSD-3-Clause) files inlined into the page; the page makes no external request. Thinking and tool results fold, code blocks are syntax-highlighted, and `mermaid` code blocks stay ordinary code blocks. Images load on demand through `/api/image`; external images never auto-load and become a placeholder with a clickable link. Raw HTML inside Markdown displays as text, and link targets outside `http(s)` / `#` are rewritten to plain text. The transcript is not truncated: the first screen comes from the server's tail window, and the client backfills earlier chunks automatically until the start of the session.
+
+The server listens on `127.0.0.1` only, on a random port, with a fresh random token in the URL's `t` parameter. Every request is validated in the order method → `Host` → `Origin` → token, and a taskId must stay inside the subagent sessions root (a lexical check first, then a realpath check). In non-TUI (print/json) mode it launches no browser and prints one line: `[subagent-web] http://127.0.0.1:<port>/?t=<token>`. When the API `apiVersion` and the page disagree, a top banner asks for a refresh (⌘⇧R); on a failed fetch the top-right corner states the reason in red (nothing is shown there while healthy). For the security model, lifecycle, status resolution and read strategy, see "Browser view (/subagent-web)" in [ADVANCED.en.md](ADVANCED.en.md).
+
 ### The flow at a glance
 
 ```
@@ -260,7 +279,8 @@ User runs /subagent-result <taskId> to read the full output
 | `/subagent-cancel-all` | Cancel all running background tasks at once |
 | `/subagent-result <taskId>` | Read a task's full result in a full-screen viewer (no argument opens an interactive picker of the 5 most recent finished tasks; the full-screen viewer and the no-argument picker are TUI-only — in non-TUI mode the full result is printed to the terminal with `console.log`) |
 | `/subagent-watch <taskId>` | Watch a running task's output live (full-screen, 1s refresh; no argument opens an interactive picker of running tasks; the live viewer is TUI-only, and a non-TUI invocation with no argument prints a usage hint) |
-| `/subagent-dispatch` | Print the effective roster (the S × C intersection) + reverse lookup (who dispatches it) + validation findings; the command stays available for troubleshooting even when startup validation fail-closes |
+| `/subagent-web [taskId] [--stop] [--no-open]` | View live subagent sessions in the browser: no argument opens the list of tasks this session dispatched directly, `<taskId>` opens that task directly (running or finished), `--stop` closes the server, `--no-open` starts the server and prints the URL only; non-TUI mode prints one `[subagent-web] <url>` line and launches no browser; the page provides a log-ordered sidebar list, breadcrumb drill-down, `→ open <agent> (<status>)` transcript navigation, Markdown rendering, on-demand image loading and automatic full backfill of the transcript |
+| `/subagent-dispatch` | Print the effective dispatch roster (the S × C intersection) and validation findings from subagent-isolation.json; the command stays available for troubleshooting even when startup validation fail-closes |
 | `/subagent-config [agent]` | The single interactive config entry: the agent picker annotates each agent's effective model/thinking; edit the five fields description/tools/skills/body/model & thinking (name is read-only) and manage the available model list (with an argument, jumps straight to that agent) |
 
 ---
@@ -435,7 +455,8 @@ Manual `subagent` calls, `sessionId` reuse, envelope and in-flight block details
 
 ## Project structure
 
-- `src/index.ts` — main extension source
+- `src/index.ts` — main extension source (command wiring and lifecycle)
+- `src/web/` — the local server and page behind `/subagent-web` (`server.ts` server and routes, `tail.ts` incremental reader, `tree.ts` session tree, `tree-view.ts` sidebar view helpers, `session-source.ts` parse cache, `children.ts` dispatch pointers, `images.ts` on-demand image loading, `markdown.ts` Markdown rendering, `page.ts` self-contained page, `api-version.ts` API version, `vendor.ts` vendored browser bundles)
 - `examples/pi/agent/` — example agent and skill definitions (`master.md`, `agents/`, `skills/`)
 - `package.json` — npm package manifest
 - `tsconfig.json` — TypeScript configuration

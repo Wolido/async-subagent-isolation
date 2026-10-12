@@ -1,0 +1,3 @@
+Vendored browser assets (copied verbatim, license headers preserved)
+- marked.min.js  : marked v18.0.5, MIT License, source @earendil-works/pi-coding-agent dist/core/export-html/vendor/marked.min.js
+- highlight.min.js: highlight.js v11.9.0, BSD-3-Clause, source @earendil-works/pi-coding-agent dist/core/export-html/vendor/highlight.min.js

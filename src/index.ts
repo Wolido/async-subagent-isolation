@@ -29,6 +29,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Input, Key, Markdown, matchesKey, SelectList, type SelectItem, Spacer, Text, truncateToWidth, visibleWidth, sliceByColumn } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { appendChildPointer, CHILDREN_FILE_NAME } from "./web/children.ts";
+import { getGlobalServer, startWebServer } from "./web/server.ts";
 
 // ===== UUID v7 helper =====
 
@@ -2567,7 +2569,7 @@ export function findSessionFile(taskId: string): string | null {
 	let newest: string | null = null;
 	let newestMtime = -1;
 	for (const entry of entries) {
-		if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+		if (!entry.isFile() || !entry.name.endsWith(".jsonl") || entry.name === CHILDREN_FILE_NAME) continue;
 		const filePath = path.join(sessionDir, entry.name);
 		try {
 			const mtime = fs.statSync(filePath).mtimeMs;
@@ -2794,6 +2796,9 @@ function spawnShutdownEscalationHelper(proc: ChildProcess): void {
 }
 
 const UUID_V7_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+/** Generic UUID shape (any version), used for read-path taskId validation. */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** Validate an explicit sessionId. Returns an error message, or null when valid. */
 function validateSessionId(sessionId: unknown): string | null {
@@ -3651,6 +3656,13 @@ function recordCompletedTask(task: AsyncSubagentTask, status: SubagentTaskStatus
 	if (completedTasks.length > COMPLETED_TASKS_KEEP) {
 		completedTasks.splice(0, completedTasks.length - COMPLETED_TASKS_KEEP);
 	}
+}
+
+/** Read-only snapshot of recently finished tasks for the web tree (taskId -> {status, finishedAt}). */
+export function getCompletedTasksSnapshot(): ReadonlyMap<string, { status?: string; finishedAt: number }> {
+	const snapshot = new Map<string, { status?: string; finishedAt: number }>();
+	for (const record of completedTasks) snapshot.set(record.taskId, { status: record.status, finishedAt: record.finishedAt });
+	return snapshot;
 }
 
 /**
@@ -4743,6 +4755,27 @@ export default function (pi: ExtensionAPI) {
 					};
 				}
 
+				// Record the parent -> child link before the dispatch branches into the
+				// async (TUI) and sync paths, so the web tree can show an in-flight
+				// child before its receipt lands. Best-effort: a failed pointer write
+				// must never break dispatch.
+				if (currentDepth >= 1) {
+					try {
+						const parentTaskId = ctx.sessionManager?.getSessionId?.();
+						if (typeof parentTaskId === "string" && parentTaskId !== "") {
+							appendChildPointer(getSubagentSessionDir(parentTaskId), {
+								childTaskId: effectiveSessionId,
+								agent: agentName,
+								task,
+								startedAt: Date.now(),
+								depth: currentDepth + 1,
+							});
+						}
+					} catch {
+						/* best-effort: a failed pointer write must never break dispatch */
+					}
+				}
+
 				progressManager.register(ctx, effectiveSessionId, agentName);
 
 				// TUI mode: dispatch asynchronously. execute() returns a receipt
@@ -5031,67 +5064,94 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// /subagent-dispatch prints the effective dispatch roster (the S × C
-	// composition used by the gate), the reverse lookup, and the validation
-	// findings for both the startup snapshot S and the execution cwd C. It is
-	// registered even when startup validation fails closed, so a misconfigured
-	// roster stays inspectable.
+	// composition used by the gate) for the union of the factory snapshot S and
+	// the execution cwd C rosters, the validation findings for both sources
+	// (deduplicated by message, with an [S <cwd>] / [C <cwd>] prefix only for
+	// findings unique to one side), and the "not yet active" diff of C rows that
+	// still need /reload. It is registered even when startup validation fails
+	// closed, so a misconfigured roster stays inspectable.
 	pi.registerCommand?.("subagent-dispatch", {
-		description: "Show the effective dispatch roster (S × C) with reverse lookup and validation findings",
+		description: "Show the effective dispatch roster from subagent-isolation.json with validation findings",
 		handler: async (_args, cmdCtx) => {
 			const callCwd = typeof cmdCtx.cwd === "string" ? cmdCtx.cwd : factoryCwd;
 			const runtimeDispatch = loadDispatchConfig(callCwd);
 			const lines: string[] = [];
 			if (!factoryDispatch.present && !runtimeDispatch.present) {
 				lines.push(
-					"未配置 dispatch（legacy 模式）：subagent 工具不受名单限制，子进程内的派发仍由深度锁（PI_SUBAGENT_DEPTH）拦截。",
+					"No dispatch config (legacy mode): the subagent tool is not limited by a roster; dispatch inside a subagent process is still blocked by the depth lock (PI_SUBAGENT_DEPTH).",
 				);
 			} else {
-				const managers = new Set<string>();
-				if (factoryDispatch.present) {
-					for (const manager of Object.keys(factoryDispatch.roster)) managers.add(manager);
+				const managers: string[] = [];
+				const seenManagers = new Set<string>();
+				for (const manager of [...Object.keys(factoryDispatch.roster), ...Object.keys(runtimeDispatch.roster)]) {
+					if (seenManagers.has(manager)) continue;
+					seenManagers.add(manager);
+					managers.push(manager);
 				}
-				if (runtimeDispatch.present) {
-					for (const manager of Object.keys(runtimeDispatch.roster)) managers.add(manager);
-				}
-				lines.push("有效名单（S × C 合成交集）：");
-				if (managers.size === 0) lines.push("(空)");
-				const reverse = new Map<string, string[]>();
+				lines.push("Dispatch roster (from subagent-isolation.json):", "");
 				for (const manager of managers) {
 					const composed = composeEffectiveRoster(factoryDispatch, runtimeDispatch, manager);
-					lines.push(`${manager} → ${composed.join(", ")}`);
-					for (const child of composed) {
-						const parents = reverse.get(child);
-						if (parents) {
-							if (!parents.includes(manager)) parents.push(manager);
-						} else {
-							reverse.set(child, [manager]);
-						}
-					}
+					lines.push(`${manager} → ${composed.length ? composed.join(", ") : "(none)"}`);
 				}
 				lines.push("");
-				lines.push("反查（谁派它）：");
-				if (reverse.size === 0) lines.push("(空)");
-				for (const [child, parents] of reverse) lines.push(`${child} ← ${parents.join(", ")}`);
-			}
-			// Validation findings for both sources: S at the factory cwd and C at
-			// the command's cwd (identical configs report the same findings twice).
-			const findings: string[] = [];
-			if (factoryDispatch.present) {
-				for (const finding of validateDispatchConfig(factoryDispatch, discoverAgents(factoryCwd, "both").agents)) {
-					findings.push(`[S ${factoryCwd}] ${finding.message}`);
+				// Validation findings for both sources: identical message sets are
+				// reported once without a prefix; otherwise the findings unique to one
+				// side carry the [S <cwd>] / [C <cwd>] prefix.
+				const sFindings = factoryDispatch.present
+					? validateDispatchConfig(factoryDispatch, discoverAgents(factoryCwd, "both").agents).map(
+							(finding) => finding.message,
+						)
+					: [];
+				const cFindings = runtimeDispatch.present
+					? validateDispatchConfig(runtimeDispatch, discoverAgents(callCwd, "both").agents).map(
+							(finding) => finding.message,
+						)
+					: [];
+				const sSet = new Set(sFindings);
+				const cSet = new Set(cFindings);
+				const identicalFindings = sSet.size === cSet.size && [...sSet].every((message) => cSet.has(message));
+				const findings: string[] = [];
+				const seenFindings = new Set<string>();
+				if (identicalFindings) {
+					for (const message of sFindings) {
+						if (seenFindings.has(message)) continue;
+						seenFindings.add(message);
+						findings.push(message);
+					}
+				} else {
+					for (const message of sFindings) {
+						if (seenFindings.has(message)) continue;
+						seenFindings.add(message);
+						findings.push(cSet.has(message) ? message : `[S ${factoryCwd}] ${message}`);
+					}
+					for (const message of cFindings) {
+						if (seenFindings.has(message)) continue;
+						seenFindings.add(message);
+						findings.push(`[C ${callCwd}] ${message}`);
+					}
+				}
+				if (findings.length === 0) lines.push("Validation findings: none");
+				else lines.push("Validation findings:", ...findings);
+				// Rows in the on-disk C config that the S × C composition does not
+				// expose yet (the file changed after the factory snapshot; /reload picks
+				// it up).
+				if (runtimeDispatch.present) {
+					const diffs: string[] = [];
+					for (const manager of Object.keys(runtimeDispatch.roster)) {
+						const composed = composeEffectiveRoster(factoryDispatch, runtimeDispatch, manager);
+						const diff = runtimeDispatch.roster[manager].filter((name) => !composed.includes(name));
+						if (diff.length > 0) diffs.push(`${manager} → ${diff.join(", ")}`);
+					}
+					if (diffs.length > 0) {
+						lines.push("");
+						lines.push("Not yet active (in subagent-isolation.json, needs /reload):", ...diffs);
+					}
 				}
 			}
-			if (runtimeDispatch.present) {
-				for (const finding of validateDispatchConfig(runtimeDispatch, discoverAgents(callCwd, "both").agents)) {
-					findings.push(`[C ${callCwd}] ${finding.message}`);
-				}
-			}
-			lines.push("");
-			lines.push("校验发现：");
-			if (findings.length === 0) lines.push("(无)");
-			else lines.push(...findings);
 			const text = lines.join("\n");
-			if (cmdCtx.ui?.notify) cmdCtx.ui.notify(text, "info");
+			// notify() defaults to the "info" severity; the explicit argument is
+			// dropped so text-only output channels (print/json captures) stay exact.
+			if (cmdCtx.ui?.notify) cmdCtx.ui.notify(text);
 			else console.log(text);
 		},
 	});
@@ -5300,6 +5360,109 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	// /subagent-web [taskId] opens the process-wide live subagent viewer (a
+	// loopback HTTP server serving a self-contained page) in the browser.
+	// --stop closes the server, --no-open only reveals the URL. The server
+	// starts lazily on first use (never at factory time) and the separate
+	// session_shutdown handler below closes it idempotently.
+	pi.registerCommand?.("subagent-web", {
+		description: "Open the live subagent web view in the browser (usage: /subagent-web [taskId] [--stop] [--no-open])",
+		handler: async (args, cmdCtx) => {
+			const words = (args ?? "").trim().split(/\s+/).filter(Boolean);
+			const stop = words.includes("--stop");
+			const noOpen = words.includes("--no-open");
+			const taskId = words.find((word) => !word.startsWith("--"));
+			const isTui = !!cmdCtx.hasUI && cmdCtx.mode === "tui";
+
+			if (stop) {
+				const handle = getGlobalServer();
+				if (handle) await handle.close();
+				if (isTui) cmdCtx.ui?.notify?.("Subagent web server stopped.", "info");
+				else console.log("Subagent web server stopped.");
+				return;
+			}
+
+			let handle = getGlobalServer();
+			if (!handle) {
+				handle = await startWebServer({
+					// Re-read per request: the session file can change after a
+					// session switch, and a missing sessionManager must not throw.
+					mainSessionFile: () => {
+						try {
+							return cmdCtx.sessionManager?.getSessionFile?.() ?? null;
+						} catch {
+							return null;
+						}
+					},
+					registry: taskRegistry,
+					rootDir: path.join(getAgentDir(), "subagent-sessions"),
+					resolveSessionDir: getSubagentSessionDir,
+					findSessionFile,
+					completedTasks: getCompletedTasksSnapshot,
+				});
+			}
+
+			if (taskId !== undefined) {
+				let sessionDir: string | null = null;
+				try {
+					sessionDir = getSubagentSessionDir(taskId);
+				} catch {
+					sessionDir = null;
+				}
+				if (!UUID_PATTERN.test(taskId) || sessionDir === null || !fs.existsSync(sessionDir)) {
+					// Non-TUI (print/json) normally has no ui, so a ui-only warning would
+					// be invisible and look like success; console.warn keeps it visible.
+					const warning = `No subagent session found for taskId: ${taskId}`;
+					if (isTui) cmdCtx.ui?.notify?.(warning, "warning");
+					else console.warn(warning);
+					return;
+				}
+			}
+
+			const url = taskId === undefined ? `${handle.url}#/` : `${handle.url}#/t/${taskId}`;
+
+			if (!isTui) {
+				// The no-taskId line is locked verbatim by the command contract tests;
+				// with a taskId, deep-link straight to that task's route.
+				console.log(
+					taskId === undefined ? `[subagent-web] ${handle.url}` : `[subagent-web] ${handle.url}#/t/${taskId}`,
+				);
+				return;
+			}
+			if (noOpen) {
+				cmdCtx.ui?.notify?.(`Web view: ${url}`, "info");
+				return;
+			}
+
+			// Platform opener, best-effort: a sync throw, an async "error" or a
+			// non-zero exit falls back to notifying the URL (never an uncaught
+			// error out of the command handler).
+			// Guard: a process may emit both "error" and a non-zero "exit", which
+			// must still produce at most one fallback notification.
+			let fired = false;
+			const fallback = (): void => {
+				if (fired) return;
+				fired = true;
+				cmdCtx.ui?.notify?.(`Could not open the browser — open this URL manually: ${url}`, "warning");
+			};
+			try {
+				const proc =
+					process.platform === "darwin"
+						? spawn("open", [url], { detached: true, stdio: "ignore" })
+						: process.platform === "win32"
+							? spawn("cmd", ["/c", "start", "", url], { detached: true, stdio: "ignore" })
+							: spawn("xdg-open", [url], { detached: true, stdio: "ignore" });
+				proc.unref();
+				proc.once("error", fallback);
+				proc.once("exit", (code) => {
+					if (code !== 0) fallback();
+				});
+			} catch {
+				fallback();
+			}
+		},
+	});
+
 	// Inject the discovered subagent roster (name — description + source) into
 	// the main agent's system prompt so it knows what it can delegate without a
 	// hand-written agent list in its prompt. Built lazily on the first trigger
@@ -5383,6 +5546,18 @@ export default function (pi: ExtensionAPI) {
 				}
 				spawnShutdownEscalationHelper(proc);
 			}
+		}
+	});
+
+	// Close the process-wide web viewer server when the session goes away.
+	// Idempotent (the singleton may be absent when /subagent-web was never
+	// used) and intentionally separate from the task-teardown handler above so
+	// a server close failure can never affect the subagent kill cascade.
+	pi.on?.("session_shutdown", async () => {
+		try {
+			await getGlobalServer()?.close();
+		} catch {
+			/* best-effort: shutdown must never throw */
 		}
 	});
 

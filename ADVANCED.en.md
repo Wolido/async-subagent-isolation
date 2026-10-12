@@ -227,13 +227,36 @@ Non-blocking notice: a discovered agent that appears in no roster (notice only).
 
 **legacy compatibility**: neither config level defining a `dispatch` field means legacy mode, whose behavior is exactly as before the change (still bounded by the depth lock, with zero migration cost).
 
-**`/subagent-dispatch` output structure**:
+**`/subagent-dispatch` output structure** (the registered command description is verbatim `Show the effective dispatch roster from subagent-isolation.json with validation findings`):
 
-1. Effective roster (the S × C intersection): one line per agent (or `main`), `<agent name> → <composed roster>`;
-2. Reverse lookup (who dispatches it): `<child> ← <parents>`;
-3. Validation findings: the validation findings of S and C respectively, each prefixed `[S <cwd>]` / `[C <cwd>]`.
+The first line is always `Dispatch roster (from subagent-isolation.json):`; after a blank line, one `<agent name> → <composed roster>` line per agent (or `main`), with `(none)` for an empty roster; after another blank line comes `Validation findings: none` or `Validation findings:` followed by one line per finding. Findings are deduplicated by message text: when the two sources (S and C) produce identical finding sets, none of them gets a prefix; when the sets differ, only the findings unique to one side carry the `[S <cwd>]` / `[C <cwd>]` prefix, while findings present on both sides stay unprefixed (the finding text comes from the validation implementation and is currently Chinese). If the on-disk C carries entries that have not entered the effective roster yet (they need `/reload`), a blank line and a `Not yet active (in subagent-isolation.json, needs /reload):` section follow, one `<agent name> → <new entries>` line each.
 
-When neither level defines `dispatch`, it prints `未配置 dispatch（legacy 模式）：subagent 工具不受名单限制，子进程内的派发仍由深度锁（PI_SUBAGENT_DEPTH）拦截。` Available in both modes (TUI and non-TUI): TUI uses notify, non-TUI uses console.log.
+With no findings:
+
+```text
+Dispatch roster (from subagent-isolation.json):
+
+main → coder, reviewer
+coder → reviewer
+
+Validation findings: none
+```
+
+With a one-sided finding and a not-yet-active entry:
+
+```text
+Dispatch roster (from subagent-isolation.json):
+
+main → coder
+
+Validation findings:
+[S /home/me/project] dispatch 里的 "docs" 找不到对应的 agent 文件
+
+Not yet active (in subagent-isolation.json, needs /reload):
+main → writer
+```
+
+When neither level defines `dispatch`, the command prints one English line: `No dispatch config (legacy mode): the subagent tool is not limited by a roster; dispatch inside a subagent process is still blocked by the depth lock (PI_SUBAGENT_DEPTH).` Available in both modes (TUI and non-TUI): TUI uses notify, non-TUI uses console.log.
 
 **Reload semantics**: S is fixed at startup and C is re-read on every dispatch/injection, and the effective roster is their intersection. So editing the `dispatch` field is not always a `/reload` matter: as long as C still carries the field, tightening (removing entries) takes effect immediately (the re-read C shrinks the intersection at once), whereas widening (adding entries) is immediate only for entries already in the same row of the snapshot S and otherwise requires `/reload` (which re-executes the factory to refresh S). Edges (all for the main process): ① C is absent wholesale only when neither level provides the field any more (the key was removed, the file was deleted, its JSON fails to parse, or its top level is not an object) — then the roster falls back to S alone, nothing tightens, and `/reload` is needed for the switch (with no field at either level after the reload it falls back to legacy); deleting/corrupting only one level while the other still carries the field makes C fall back to the other level's row, and the intersection may change at once; by contrast, editing a shadowed level's file does not change C at all, and `/reload` does not help either (a project-level field replaces the user-level one wholesale). ② A `dispatch` key still present but shape-invalid (not an object, a row that is not an array, an element that is not a string or is blank) does not count as absent: a non-object or invalid-row case makes that row participate as an empty row (a dropped `main` row rejects everything), whereas an invalid element is merely dropped with the rest of its row kept — so the intersection tightens at most immediately and never widens. ③ A session that already fail-closed at startup, or whose startup roster was empty, never registered the `subagent` tool at all, so no config change in it (fixing an agent file's `tools` included) takes effect until `/reload` re-executes the factory. ④ A child process (`PI_SUBAGENT_DEPTH >= 1`) has its roster fixed when the parent dispatches it, via the parent-injected `PI_SUBAGENT_ALLOWED`; neither config edits nor `/reload` refresh it — only a fresh dispatch from the parent does — and deleting the `dispatch` field on the child's own side does not fall back to the legacy depth lock immediately either: while its S is still present the process stays in list mode with the roster still coming from `PI_SUBAGENT_ALLOWED` (same as in ①), and only a `/reload` inside the child refreshes S and falls back to the legacy depth lock. ⑤ A session that started with no `dispatch` at either level (S absent) registered the tool unconditionally, and once a `dispatch` field appears mid-session the roster comes from C alone, so additions and removals alike take effect immediately (that field never goes through startup validation).
 
@@ -421,9 +444,127 @@ On quit, session switch, or reload, every in-flight child process is sent `SIGTE
 | /subagent-cancel-all | Available | Available |
 | /subagent-watch | Available (full-screen live viewer) | Available (prints one `… live view requires TUI mode.` line, no viewer) |
 | /subagent-result | Available (full-screen viewer; no argument opens a picker of the 5 most recent finished tasks) | Available (with a taskId, the full result goes to the terminal) |
+| /subagent-web | Available (opens the browser; `--no-open` only prints the URL) | Available (prints one `[subagent-web] <url>` line, no browser) |
 | /subagent-config | Available (interactive config) | Available but only prints `/subagent-config requires TUI mode (interactive config editor).` |
 | /subagent-dispatch | Available (notify) | Available (console.log) |
 | Parallel dispatch | Supported (independent tasks can be dispatched together) | Not supported (each call blocks) |
+
+## Browser view (/subagent-web)
+
+Moves subagent sessions into the browser. The registered command description is verbatim `Open the live subagent web view in the browser (usage: /subagent-web [taskId] [--stop] [--no-open])`.
+
+```
+/subagent-web              # open the list of tasks this session dispatched directly
+/subagent-web <taskId>     # open that task directly (running or finished)
+/subagent-web --stop       # stop the server
+/subagent-web --no-open    # start the server and print the URL only, no browser
+```
+
+- With a `<taskId>`, the command validates first: a malformed taskId or a missing session directory prints `No subagent session found for taskId: <taskId>` and opens nothing.
+- `--stop` stops the server: the TUI notifies `Subagent web server stopped.` and non-TUI prints the same line.
+- Non-TUI (print/json) mode launches no browser: with no argument it prints one line `[subagent-web] http://127.0.0.1:<port>/?t=<token>`, and with a taskId the same line carries the deep link `#/t/<taskId>`. In the TUI, `--no-open` only notifies `Web view: <url>`.
+- The page pulls transcript increments every second and refreshes the list every three seconds; refreshing pauses while the page is hidden. Streaming deltas (`text_delta`) never hit disk, so the page refreshes at message and tool-call granularity.
+
+### Security model
+
+- The server listens on `127.0.0.1` only, on a random port; each start generates a random token carried in the URL's `t` parameter.
+- Every request is validated in the order method → `Host` → `Origin` → token: only GET is accepted; `Host` must be `127.0.0.1:<port>` (or `localhost` / `[::1]`); a cross-origin `Origin` is rejected. These two steps defend against DNS rebinding. The token is compared in constant time.
+- A taskId must stay inside the subagent sessions root: a lexical check runs first, then a realpath check. A `../` traversal or a symlink escape is a 403; the UUID shape check (400) comes after that.
+- `GET /` returns the self-contained page; `/api/tree`, `/api/session` and `/api/image` share the same authorization and path validation.
+- Responses carry `Cache-Control: no-store` and `Referrer-Policy: no-referrer` by default; `/api/tree` negotiates with `ETag` + `If-None-Match` (304 with an empty body when unchanged) and sends `Cache-Control: no-cache`.
+- The page is fully self-contained: `marked` and `highlight.js` are inlined into the page, and the page never makes an external request.
+
+### Lifecycle
+
+- The server starts lazily on the first command use, never at extension factory time.
+- The handle lives on a process-level singleton; after `/reload` the new instance takes over the same port and token, so open tabs stay valid.
+- `session_shutdown` closes it idempotently (a never-started server is a no-op); when the pi process exits or is force-killed, the port is released with the process.
+- While idle the server runs no timers and reads no files; reads are triggered only by page polling. After 5 failed fetches the page shows `offline` and a connection-lost banner; it recovers on its own when fetches succeed again.
+- Before the session file exists, the status pill at the top-right of the transcript area shows `waiting for session file`, and the page keeps polling.
+
+### Data source and reads
+
+- The server reads the subagent session JSONL (`~/.pi/agent/subagent-sessions/<taskId>/`) incrementally by byte offset, aligned to line boundaries. The first read (`tail=1`) starts at most 512 KiB before the end of the file.
+- Parsed sessions are cached by path + size + mtime; a session larger than 20 MiB is parsed as a tail window only. The main-session index has no incremental parsing: any file change re-reads the whole file.
+- The top-level list is rebuilt on every request. Running, recently finished and abnormally ended nodes have their children scanned immediately; a finished node returns only `childCount` and `childSummary`, with its subtree frozen.
+- Opening a finished node makes the page request its subtree with `?expand=<taskId>`; the server caches the result under a key built from the session file and `children.jsonl` stats, the registry and completion-record summaries, and a time bucket, so a cache hit never scans again.
+- `/api/tree` returns `truncated {total, showing, dropped}` for top-level dispatch entries; `/api/session` returns the `links` used by transcript navigation.
+
+### Status semantics
+
+Six statuses exist: running, recent, pending, rejected, failed, finished. The priority is top-down; the first match decides:
+
+| Priority | Condition | Status |
+|---|---|---|
+| 1 | The in-process registry lists this taskId as running | running |
+| 2 | A pointer row exists and no sync receipt is newer than the newest pointer row | running; degrades to recent when the child session's last entry is older than 10 minutes |
+| 3 | A sync receipt exists (newer than the pointer, or without a pointer) | finished, `finishedAt` = the receipt timestamp |
+| 4 | A completion record exists (in-process completedTasks) | finished, `finishedAt` = the record value |
+| 5 | The child session's last entry timestamp falls inside `[now − 10 s, now]` | recent |
+| 6 | Anything else | depth ≥ 1 with neither a sync receipt nor a pointer → pending; depth 0 falls back to finished by the last entry timestamp (`startedAt` when absent) |
+
+- A dispatch with neither a receipt nor a matching pointer (an unknown link) is pending on its own, with an empty taskId; the UI shows `waiting for receipt`.
+- rejected / failed short-circuit right after the registry check and follow the latest event: a reused taskId flips correctly on a new dispatch.
+- An async receipt only means the task was dispatched; it is never a completion signal, and a node waiting for its receipt never shows finished.
+- Pointer rows come from the dispatcher's `children.jsonl` and record the child id, agent, task text and time; with repeated dispatches of one child id, the newest pointer row's time wins.
+
+### Sidebar
+
+- Lists only the tasks this session dispatched directly (top level); grandchild tasks are not indented here and stay reachable through transcript navigation and breadcrumbs.
+- Log order: oldest first, newest last; the server returns nodes in ascending `startedAt` order.
+- Each row shows a status dot, the status word, the agent, the first 8 characters of the taskId, the elapsed time and the task text. A task text longer than 200 Unicode code points is cut. The row tail carries an aggregate child badge such as `3 children · 2 running · 1 failed`; a finished node shows the badge after its on-demand expansion.
+- On open the page scrolls to the newest running task, or to the last row when none is running. A manual scroll disables that auto-scroll. A deep link leaves the selection in charge and does not auto-scroll.
+- When top-level entries were dropped the sidebar shows `显示最新 N / 共 M` (N returned, M discovered).
+- Clicking a row switches the selection style at once (an optimistic update); the following list refresh only corrects it.
+- The sidebar collapses, expands and drags to resize: minimum 200px; at most 45% of the window width for windows 700–1000px wide and 60% above that. The collapsed state and width persist in browser local storage across refreshes. Below 700px of window width the sidebar collapses automatically and does not cover the transcript. The resize handle is keyboard-focusable, and the arrow keys step it by 16px.
+
+#### Keyboard navigation
+
+- `↑`/`↓` move focus between rows; `Home`/`End` jump to the first/last row.
+- The list is a single Tab stop (roving tabindex): Tab enters the list on the row of the current task itself; when a deep-linked task has no row of its own, focus lands on the first row.
+- `Enter` (or `Space`) opens the selected task; a row with a rejection/failure reason expands/collapses the reason panel below it instead of navigating.
+- `Alt+←` goes back one level, the same as `← Back`; at depth ≤ 1 it does nothing.
+- The tree is rebuilt on every 3-second poll; after a rebuild the keyboard focus returns to the same row and the sidebar scroll position stays put.
+
+### Drill-down navigation
+
+- Every `subagent` dispatch call in the transcript is a clickable nav item showing `→ open <agent> (<status>)`. Clicking it switches to that subtask's transcript in the same page (hash route `#/t/<taskId>`). A `subagent` call with no task text and no receipt or pointer produces no nav item.
+- When `#/t/<taskId>` points to a task that does not exist or is unreachable, the page shows "未找到该任务" with a back-to-list entry (`#/`).
+- The status pill sits at the top-right of the transcript area (sticky) and shows `status | duration`.
+- The subtask id resolves through the receipt in the parent session first, then through the task's `children.jsonl` pointer (an exact match on agent and task text). When neither exists, the item shows `waiting for receipt`, and it becomes clickable once the receipt lands.
+- A deeper page carries breadcrumbs `ancestors › current`: every section is clickable and carries a status dot, and the current section is marked `aria-current="page"`. `← Back` only appears at depth ≥ 2 (with ancestors) and steps up to the direct parent; at depth ≤1 it is not shown and `Alt+←` does nothing.
+- The ancestor chain comes from the same link sources: a finished task's child id comes directly from the parent session's tool-result receipt (a direct UUID link); an in-flight child is linked through the pointer file written by the dispatcher. Tree building never enumerates the sessions root: each taskId gets one directed stat and a readdir of its own directory. The depth limit is 6; the top level holds at most 1000 entries and every other level at most 200; an over-budget level keeps the newest nodes. Non-UUID names and hidden directories are ignored.
+
+### Transcript rendering
+
+- Assistant text and tool-result text render as Markdown (headings, lists, tables, blockquotes, links, code blocks); code blocks are highlighted by `highlight.js`.
+- Thinking, tool calls and tool results render folded.
+- Raw HTML inside Markdown is escaped to text before parsing, so model output can never inject live markup. Link targets accept only `http(s)` and in-page `#` anchors; `javascript:`, `data:` and other targets degrade to plain text.
+- `mermaid` code blocks render as ordinary code blocks (monospace, horizontally scrollable, copyable); no diagram rendering.
+- Images load on demand: `/api/session` strips base64 and returns only `imageRef`; clicking `Load image` fetches the bytes from `/api/image`. External images never auto-load: an `http(s)` image becomes a placeholder with a clickable link, and any other source degrades to plain text.
+- The transcript is not truncated: the first screen comes from the server's tail window, and the client then backfills earlier chunks automatically until the start of the session (the `before` cursor), ending at `Beginning of session`.
+- When the viewport is not at the bottom, a `New content` hint appears and a click returns to the end. Failed fetches retry with exponential backoff (from 1 second up to 30 seconds).
+
+### Self-diagnosis
+
+- When the API `apiVersion` (currently 2) and the page's inlined value disagree, a top banner shows `页面代码与后端不匹配，请刷新（⌘⇧R）`. That banner outranks the offline notice.
+- On a failed fetch the top-right corner states the reason in red (nothing is shown there while healthy).
+
+### Third-party licenses
+
+- The page inlines two vendored files shipped with the package: `assets/vendor/marked.min.js` (marked v18.0.5, MIT) and `assets/vendor/highlight.min.js` (highlight.js v11.9.0, BSD-3-Clause). License notices and provenance are in `assets/vendor/NOTICE`.
+
+## Loading the extension locally (absolute path)
+
+To load the extension from a local checkout, put the absolute path of the extension entry into the `extensions` array of `.pi/settings.json`:
+
+```json
+{
+  "extensions": ["/Users/you/async-subagent-isolation/src/index.ts"]
+}
+```
+
+A relative path in project settings resolves against the settings file's directory, that is the `.pi/` directory. Such a path usually points to a directory that does not exist, and pi silently skips a resource it cannot find: the extension does not load and no error is reported. Write an absolute path; a path starting with `~` also works. Do not write a relative path.
 
 ## Manual invocation
 
