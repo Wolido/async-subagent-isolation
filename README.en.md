@@ -28,6 +28,7 @@ Legion mode does exactly one thing: it writes "who may dispatch whom" into a ros
 - **Discipline is written into the structure.** A manager must be read-only (decision and execution are separated — no `write`, no `edit`); a dispatch outside the roster is rejected; a config mistake blocks at startup (fail-closed).
 - **A DAG is not a tree:** the same agent can be referenced by several rows — one node, one capability. In the example below, `executor` is shared by two legions, while `writer` is referenced by the main agent and two legions at once.
 - **Async is the perfect complement:** in TUI mode, dispatch returns immediately and the result arrives as a system notification — the main path is never blocked; in non-TUI (print/json) it automatically falls back to synchronous, with the result returned right at the call site — perfect for scripts. This design is especially handy in legion mode, where delegation is multi-layer.
+- **See it live:** the whole roster can be watched in a browser — `/subagent-web` serves a loopback-only page with every subagent's live transcript and breadcrumb drill-down from the main agent to any depth (see *Browser view (`/subagent-web`)* below).
 
 <img src="assets/legion-mode-example.svg" alt="Example: a real legion roster — 16 roles, 19 dispatch edges" width="560">
 
