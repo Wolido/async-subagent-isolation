@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.0] - 2026-10-13
+
+### Added
+
+- Clicking an agent's name in the bottom progress panel opens that task's browser view (`#/t/<taskId>`), reusing the same process-level web server and platform opener as `/subagent-web` (fullscreen TUI only; in non-TUI mode the command still works and a copyable taskId remains the keyboard path).
+
 ## [1.13.0] - 2026-10-13
 
 ### Added

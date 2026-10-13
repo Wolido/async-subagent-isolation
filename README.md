@@ -204,6 +204,8 @@ Dispatched coder. taskId: 01912345-6789-7abc-8def-0123456789ab
 ● 01912345-abcd... coder    ⚡ read...         01:23
 ```
 
+点击底部面板中的 agent 名字即打开该任务的浏览器视图（仅 fullscreen TUI；非 TUI 仍用命令）。
+
 ### 4. 结果通知（`[subagent-result]`）
 
 子 agent 完成后，结果以 **`[subagent-result]` 系统通知**推送到对话（系统消息，不是用户请求）：

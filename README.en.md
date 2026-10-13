@@ -204,6 +204,8 @@ The subagent runs in a background process. A progress widget appears above the T
 ● 01912345-abcd... coder    ⚡ read...         01:23
 ```
 
+Click an agent's name in the bottom panel to open that task's browser view (fullscreen TUI only; in non-TUI mode use the command).
+
 ### 4. Result notification (`[subagent-result]`)
 
 When the subagent finishes, its result is pushed as a **`[subagent-result]` system notification** (a system message, not a user request):

@@ -368,6 +368,8 @@ widget 行的耗时是"存活至今"的实时时钟（`formatElapsed`，仅 `MM:
 
 widget 行中的 taskId 可直接复制，用于 `/subagent-watch` 实时观察（仅限运行中）、`/subagent-result` 查看结果或 `/subagent-cancel` 取消任务。
 
+点击底部面板中的 agent 名字即打开该任务的浏览器视图（仅 fullscreen TUI；非 TUI 仍用命令）。
+
 ### 取消后台任务
 
 取消运行中的后台子 agent 任务有两条路径，底层共享同一套取消流程（SIGTERM → 5s → SIGKILL 级联，最终推送 `[subagent-result]` 通知）。

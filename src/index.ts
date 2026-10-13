@@ -28,9 +28,11 @@ import {
 	parseFrontmatter,
 } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Input, Key, Markdown, matchesKey, SelectList, type SelectItem, Spacer, Text, truncateToWidth, visibleWidth, sliceByColumn } from "@earendil-works/pi-tui";
+import type { TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { appendChildPointer, CHILDREN_FILE_NAME } from "./web/children.ts";
 import { getGlobalServer, startWebServer } from "./web/server.ts";
+import type { WebServerHandle } from "./web/server.ts";
 
 // ===== UUID v7 helper =====
 
@@ -2500,6 +2502,37 @@ export class SubagentProgressManager {
 					...visible.map((a) => renderRow(a, width)),
 					...bottomBorder.render(width),
 				],
+				// Left-clicking a task's name column opens that task in the web viewer.
+				handleMouse: (event: TuiMouseEvent): TuiMouseEventResult | undefined => {
+					const ctx = this.ctx;
+					if (!ctx) return undefined;
+					if (event.type !== "click" || event.button !== "left") return undefined;
+					// Row 0 is the top border; y=1 maps to the first task row. The
+					// bottom border and out-of-range rows are never consumed.
+					const rowIndex = event.y - 1;
+					if (rowIndex < 0 || rowIndex >= visible.length) return undefined;
+					const agent = visible[rowIndex];
+					// Hit zone is the display-column span of the (possibly truncated)
+					// name column, right after "● " + taskId + " ".
+					const prefixWidth = visibleWidth("● ") + visibleWidth(agent.taskId) + visibleWidth(" ");
+					const end = Math.min(event.width, prefixWidth + nameColWidth);
+					if (event.x < prefixWidth || event.x >= end) return undefined;
+					// Kick the async open off synchronously: concurrent clicks dedupe
+					// onto the same in-flight server start inside the helper.
+					void (async () => {
+						try {
+							const handle = await ensureSubagentWebServer(ctx);
+							openWebUrl(
+								`${handle.url}#/t/${agent.taskId}`,
+								(m, k) => ctx.ui?.notify?.(m, k as "info" | "warning" | "error"),
+								(m) => console.warn(m),
+							);
+						} catch {
+							ctx.ui?.notify?.("Could not start the subagent web view.", "warning");
+						}
+					})();
+					return { handled: true };
+				},
 				invalidate: () => bottomBorder.invalidate(),
 			};
 		});
@@ -4443,6 +4476,84 @@ function createWatchViewer(options: WatchViewerOptions) {
 	return { component };
 }
 
+/**
+ * In-flight start promise for the process-wide web viewer. While the first
+ * start is still binding, `getGlobalServer()` returns null, so concurrent
+ * callers must await the same promise instead of starting extra servers.
+ * Cleared once the start settles (success or rejection) so a later restart
+ * after `--stop` never receives a closed handle.
+ */
+let pendingWebServerStart: Promise<WebServerHandle> | null = null;
+
+/**
+ * Shared process-wide web viewer lifecycle for `/subagent-web` and the progress
+ * widget's mouse handler: reuse the running singleton when present, otherwise
+ * start one whose main-session endpoint reads from `cmdCtx`'s session file.
+ */
+async function ensureSubagentWebServer(cmdCtx: ExtensionContext): Promise<WebServerHandle> {
+	const existing = getGlobalServer();
+	if (existing) return existing;
+	if (!pendingWebServerStart) {
+		// Dedupe concurrent starts: while the first start is still binding,
+		// getGlobalServer() is still null, so a second click must await the
+		// same in-flight promise instead of starting a second server.
+		pendingWebServerStart = startWebServer({
+			// Re-read per request: the session file can change after a
+			// session switch, and a missing sessionManager must not throw.
+			mainSessionFile: () => {
+				try {
+					return cmdCtx.sessionManager?.getSessionFile?.() ?? null;
+				} catch {
+					return null;
+				}
+			},
+			registry: taskRegistry,
+			rootDir: path.join(getAgentDir(), "subagent-sessions"),
+			resolveSessionDir: getSubagentSessionDir,
+			findSessionFile,
+			completedTasks: getCompletedTasksSnapshot,
+		}).finally(() => {
+			pendingWebServerStart = null;
+		});
+	}
+	return pendingWebServerStart;
+}
+
+/**
+ * Shared best-effort platform browser opener. A sync throw, an async "error"
+ * event or a non-zero exit falls back exactly once: to `notify` when given
+ * (TUI callers), otherwise to `log` (headless callers).
+ */
+function openWebUrl(
+	url: string,
+	notify?: (message: string, type?: string) => void,
+	log?: (message: string) => void,
+): void {
+	let fired = false;
+	const fallback = (): void => {
+		if (fired) return;
+		fired = true;
+		const message = `Could not open the browser — open this URL manually: ${url}`;
+		if (notify) notify(message, "warning");
+		else log?.(message);
+	};
+	try {
+		const proc =
+			process.platform === "darwin"
+				? spawn("open", [url], { detached: true, stdio: "ignore" })
+				: process.platform === "win32"
+					? spawn("cmd", ["/c", "start", "", url], { detached: true, stdio: "ignore" })
+					: spawn("xdg-open", [url], { detached: true, stdio: "ignore" });
+		proc.unref();
+		proc.once("error", fallback);
+		proc.once("exit", (code) => {
+			if (code !== 0) fallback();
+		});
+	} catch {
+		fallback();
+	}
+}
+
 export default function (pi: ExtensionAPI) {
 	// List-mode registration gate (design §4.1 / I2): when a `dispatch` field is
 	// configured, the subagent tool exists only for a process with a non-empty
@@ -5382,25 +5493,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			let handle = getGlobalServer();
-			if (!handle) {
-				handle = await startWebServer({
-					// Re-read per request: the session file can change after a
-					// session switch, and a missing sessionManager must not throw.
-					mainSessionFile: () => {
-						try {
-							return cmdCtx.sessionManager?.getSessionFile?.() ?? null;
-						} catch {
-							return null;
-						}
-					},
-					registry: taskRegistry,
-					rootDir: path.join(getAgentDir(), "subagent-sessions"),
-					resolveSessionDir: getSubagentSessionDir,
-					findSessionFile,
-					completedTasks: getCompletedTasksSnapshot,
-				});
-			}
+			const handle = await ensureSubagentWebServer(cmdCtx);
 
 			if (taskId !== undefined) {
 				let sessionDir: string | null = null;
@@ -5439,27 +5532,11 @@ export default function (pi: ExtensionAPI) {
 			// error out of the command handler).
 			// Guard: a process may emit both "error" and a non-zero "exit", which
 			// must still produce at most one fallback notification.
-			let fired = false;
-			const fallback = (): void => {
-				if (fired) return;
-				fired = true;
-				cmdCtx.ui?.notify?.(`Could not open the browser — open this URL manually: ${url}`, "warning");
-			};
-			try {
-				const proc =
-					process.platform === "darwin"
-						? spawn("open", [url], { detached: true, stdio: "ignore" })
-						: process.platform === "win32"
-							? spawn("cmd", ["/c", "start", "", url], { detached: true, stdio: "ignore" })
-							: spawn("xdg-open", [url], { detached: true, stdio: "ignore" });
-				proc.unref();
-				proc.once("error", fallback);
-				proc.once("exit", (code) => {
-					if (code !== 0) fallback();
-				});
-			} catch {
-				fallback();
-			}
+			openWebUrl(
+				url,
+				(m, k) => cmdCtx.ui?.notify?.(m, k as "info" | "warning" | "error"),
+				(m) => console.warn(m),
+			);
 		},
 	});
 

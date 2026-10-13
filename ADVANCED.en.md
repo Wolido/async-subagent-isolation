@@ -368,6 +368,8 @@ The widget's time is a live "alive since" clock (`formatElapsed`, `MM:SS` only, 
 
 The taskId in the widget row can be copied for `/subagent-watch` (watch a running task live), `/subagent-result` (view full result) or `/subagent-cancel` (cancel the task).
 
+Click an agent's name in the bottom panel to open that task's browser view (fullscreen TUI only; in non-TUI mode use the command).
+
 ### Cancelling background tasks
 
 Cancelling a running background subagent task has two paths, both sharing the same underlying cancel flow (SIGTERM → 5s → SIGKILL cascade, followed by a `[subagent-result]` notification).
