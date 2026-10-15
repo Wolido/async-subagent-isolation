@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.1] - 2026-10-15
+
+### Fixed
+
+- Tool results in the `/subagent-web` transcript are no longer parsed as Markdown: shell output containing two `~` characters no longer renders as a GFM strikethrough, and newlines in tool output are no longer collapsed into soft line breaks.
+- Fenced code blocks (``` / ~~~) in the plain-text tool-result path are now also highlighted with `highlight.js` (previously only the Markdown path highlighted them).
+
 ## [1.14.0] - 2026-10-13
 
 ### Added
