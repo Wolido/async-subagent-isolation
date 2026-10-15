@@ -1488,7 +1488,7 @@ ${HIGHLIGHT_JS}
 		}
 	}
 
-	// Assistant text and tool results are markdown: every raw "<" is escaped
+	// Assistant text is markdown: every raw "<" is escaped
 	// before parsing, links outside the http(s)/# whitelist degrade to plain
 	// text, and code blocks are highlighted. Without the inlined vendor bundles
 	// the whole pipeline falls back to a plain pre-wrap block.
@@ -1595,7 +1595,13 @@ ${HIGHLIGHT_JS}
 				if (firstBreak !== -1) { body = body.slice(firstBreak + 1); }
 				if (body.charAt(body.length - 1) === NL) { body = body.slice(0, -1); }
 				var pre = el("pre");
-				pre.appendChild(el("code", null, body));
+				var code = el("code", null, body);
+				try {
+					if (typeof hljs !== "undefined" && hljs && typeof hljs.highlightElement === "function") { hljs.highlightElement(code); }
+				} catch (error) {
+					/* highlighting is best-effort: keep the unhighlighted code */
+				}
+				pre.appendChild(code);
 				wrap.appendChild(pre);
 			} else if (segment) {
 				appendInline(wrap, segment);
@@ -1662,7 +1668,7 @@ ${HIGHLIGHT_JS}
 		}
 		if (role === "toolResult") {
 			var label = "tool result · " + (message.toolName || "tool") + (message.isError ? " (error)" : "");
-			var resultWrap = details(label, message.content, "tool-result", true);
+			var resultWrap = details(label, message.content, "tool-result");
 			if (message.isError) { resultWrap.classList.add("error"); }
 			return resultWrap;
 		}

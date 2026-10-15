@@ -539,7 +539,7 @@ Six statuses exist: running, recent, pending, rejected, failed, finished. The pr
 
 ### Transcript rendering
 
-- Assistant text and tool-result text render as Markdown (headings, lists, tables, blockquotes, links, code blocks); code blocks are highlighted by `highlight.js`.
+- Assistant text renders as Markdown (headings, lists, tables, blockquotes, links, code blocks), with code blocks highlighted by `highlight.js`; tool results display as plain text (whitespace and newlines preserved; Markdown structure is not parsed, though backticks and ``` fences still render as code snippets).
 - Thinking, tool calls and tool results render folded.
 - Raw HTML inside Markdown is escaped to text before parsing, so model output can never inject live markup. Link targets accept only `http(s)` and in-page `#` anchors; `javascript:`, `data:` and other targets degrade to plain text.
 - `mermaid` code blocks render as ordinary code blocks (monospace, horizontally scrollable, copyable); no diagram rendering.

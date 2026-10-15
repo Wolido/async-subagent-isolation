@@ -539,7 +539,7 @@ widget 行中的 taskId 可直接复制，用于 `/subagent-watch` 实时观察�
 
 ### 转录渲染
 
-- assistant 文本与工具结果文本按 Markdown 渲染（标题、列表、表格、引用、链接、代码块）；代码块用 `highlight.js` 高亮。
+- assistant 文本按 Markdown 渲染（标题、列表、表格、引用、链接、代码块），代码块用 `highlight.js` 高亮；工具结果按纯文本显示（保留空白与换行，不解析 Markdown 结构；反引号与 ``` 围栏仍按代码片段呈现）。
 - thinking、工具调用与工具结果折叠显示。
 - Markdown 里的原始 HTML 在解析前转义为文本，模型输出无法注入活动标记。链接目标只接受 `http(s)` 与页内 `#` 锚点；`javascript:`、`data:` 等降级为纯文本。
 - `mermaid` 代码块按普通代码块显示（等宽、可横向滚动、可复制），不做图形渲染。

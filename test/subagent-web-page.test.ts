@@ -4530,3 +4530,62 @@ describe("PAGE_HTML 340–440px 区间徽章收紧（本轮 A，红阶段，CSS 
 		);
 	});
 });
+
+// ================================================================
+// 回归（红阶段，字符串级契约）：「bash 工具结果被 GFM 删除线划掉」缺陷 ——
+//   renderMessage() 在 role === "toolResult" 分支以 markdown=true 调用
+//   details(label, content, "tool-result", true)，内容进入
+//   renderMarkdown() → marked.parse(escapeRawHtml(text))。marked v18 GFM
+//   删除线单个 ~ 即定界，提示符 student@debian:~$ 里的 ~ 一配对就把中间
+//   包成 <del>；换行被折叠、- / 1. / # / > 开头的行被重解释为列表/标题。
+//   修复方案 A'（已定稿）：toolResult 改走纯文本 textBlock() 路径
+//   （details 不再传第 4 个参数），其余角色不动。
+//   DOM 行为级用例见 test/subagent-web-tool-result.test.ts；本组锁定 renderMessage
+//   源码落点（jsRegion 抽出 function renderMessage( 到 function renderEntry( 之间），
+//   分支级精确锁定 toolResult 的 details 调用，不误伤 assistant 分支的 renderMarkdown。
+// 实现由 coder 落地；本组在 src 未改时预期红。
+// ================================================================
+
+describe("PAGE_HTML toolResult 纯文本渲染（回归 GFM 删除线缺陷，字符串级契约）", () => {
+	it("should route the tool-result details call through textBlock: no 4th markdown argument and no renderMarkdown in the toolResult branch", () => {
+		// Arrange: renderMessage 的函数体片段
+		const renderMsg = jsRegion("function renderMessage(", "function renderEntry(");
+
+		// Arrange: toolResult 分支体（到 var fallback 兜底分支为止）——
+		// 分支级切片确保不误伤 assistant 分支的 renderMarkdown(
+		const branchStart = renderMsg.indexOf('role === "toolResult"');
+		expect(branchStart, "missing toolResult branch in renderMessage").toBeGreaterThan(-1);
+		const branchEnd = renderMsg.indexOf('var fallback = el("div", "entry")', branchStart);
+		expect(branchEnd, "missing fallback branch after toolResult").toBeGreaterThan(branchStart);
+		const branch = renderMsg.slice(branchStart, branchEnd);
+
+		// Assert（修复前红）: toolResult 分支内不得出现 renderMarkdown( ——
+		// bash 输出必须走纯文本 textBlock() 路径（marked v18 会把提示符里的
+		// ~ 配对成 <del> 删除线）
+		expect(branch, 'the toolResult branch must not call renderMarkdown( —— tool output goes through the plain-text textBlock path').not.toContain("renderMarkdown(");
+
+		// Assert（修复前红）: "tool-result" 的那个 details 调用不得带第 4 个
+		// 参数 true（markdown 标记）；修复后应为 details(label, content, "tool-result")
+		expect(
+			renderMsg,
+			'the tool-result details call must not carry a 4th markdown argument: details(label, content, "tool-result") —— no ", true"',
+		).not.toMatch(/"tool-result"\s*,\s*true\s*\)/);
+	});
+
+	it("should keep the assistant branch on renderMarkdown (only the toolResult branch changes)", () => {
+		// Arrange: assistant 分支体（renderMessage 内 role === "assistant" 到
+		// role === "toolResult" 之间）—— 方案 A' 明确「其余角色不动」
+		const renderMsg = jsRegion("function renderMessage(", "function renderEntry(");
+		const assistantStart = renderMsg.indexOf('role === "assistant"');
+		expect(assistantStart, "missing assistant branch in renderMessage").toBeGreaterThan(-1);
+		const assistantEnd = renderMsg.indexOf('role === "toolResult"', assistantStart);
+		expect(assistantEnd, "missing toolResult branch after assistant").toBeGreaterThan(assistantStart);
+		const assistantBranch = renderMsg.slice(assistantStart, assistantEnd);
+
+		// Assert: assistant 文本仍经 renderMarkdown( 渲染（防误伤回滚）
+		expect(
+			assistantBranch,
+			'the assistant branch must keep rendering text parts through renderMarkdown( —— fix A\' changes only the toolResult branch',
+		).toContain("renderMarkdown(");
+	});
+});
