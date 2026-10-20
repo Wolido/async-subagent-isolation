@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.2] - 2026-10-20
+
+### Fixed
+
+- `/subagent-web` transcript backfill no longer stalls when the cursor sits immediately after an oversized JSONL line: `readBefore()` returns the examined window start as a strictly backward cursor when a trimmed head leaves no complete entry, so the client no longer mistakes zero progress for the start of the session.
+- `/subagent-web` can now backfill single JSONL lines larger than 9 MiB: `/api/session?before=` retries once with a 32 MiB window when the default window yields no complete entry, returning the oversized line and the complete lines before it. Oversized subagent tool results no longer disappear from the transcript; their structured image parts keep using the existing `imageRef` lazy-load path.
+- Inline `data:image/...;base64,...` payloads embedded in transcript strings (including Markdown image syntax) are now replaced server-side with a `[图片已省略：<type>，<size>]` placeholder; base64 is never sent to the browser. Structured image parts still load through `/api/image`.
+
 ## [1.14.1] - 2026-10-15
 
 ### Fixed
