@@ -543,7 +543,7 @@ widget 行中的 taskId 可直接复制，用于 `/subagent-watch` 实时观察�
 - thinking、工具调用与工具结果折叠显示。
 - Markdown 里的原始 HTML 在解析前转义为文本，模型输出无法注入活动标记。链接目标只接受 `http(s)` 与页内 `#` 锚点；`javascript:`、`data:` 等降级为纯文本。
 - `mermaid` 代码块按普通代码块显示（等宽、可横向滚动、可复制），不做图形渲染。
-- 图片按需加载：`/api/session` 剥离 base64，只回 `imageRef`；点击 `Load image` 后从 `/api/image` 取字节并显示。外部图片不自动加载：`http(s)` 图片变成占位与可点链接，其余降级为纯文本。
+- 图片按需加载：`/api/session` 剥离 base64，只回 `imageRef`；点击 `Load image` 后从 `/api/image` 取字节并显示。正文里内嵌的 `data:image/...;base64,...`（含 Markdown 图片写法）同样在服务端被替换为 `[图片已省略：类型，大小]` 占位，base64 不下发。外部图片不自动加载：`http(s)` 图片变成占位与可点链接，其余降级为纯文本。
 - 转录不截断：首屏用服务端尾窗口，客户端随后自动向前分片补齐到会话开头（`before` 游标），到底显示 `Beginning of session`。
 - 不在底部时显示 `New content` 提示，点击回到底部。取数失败按指数退避重试（1 秒起，最多 30 秒）。
 

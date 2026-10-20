@@ -1174,6 +1174,94 @@ describe("readBefore — 反向字节窗口回读契约", () => {
 		expect(result.startOffset, "游标必须小于文件大小（严格前进）").toBeLessThan(fileSnapshot.size);
 	}, 30_000);
 
+	it("should advance backward past a jumbo line that ends exactly at the cursor instead of stalling", () => {
+		// Arrange: 3 行 —— 小行 / >9 MiB 巨型行（带结尾换行）/ 小行，before 取第 3 行
+		// 行首。名义窗口（1 MiB）与追赶上限（8 MiB）全部落在巨型行内部，追不到
+		// 该行行首；而窗口末字节恰是巨型行的结尾换行。旧实现的「裁剪头部半行」
+		// 逻辑因此命中这条位于 buf.length - 1 的换行，subarray 后得到空 buffer、
+		// base 被推到 before，startOffset 回退成 before —— 零进度。
+		const lines = [
+			JSON.stringify({ id: "head-1" }),
+			JSON.stringify({ id: "huge", payload: "x".repeat(12 * 1024 * 1024) }),
+			JSON.stringify({ id: "tail-1" }),
+		];
+		const content = lines.join("\n") + "\n";
+		const filePath = writeJsonl("back-jumbo-line-end.jsonl", content);
+		const before = Buffer.byteLength(lines[0]) + 1 + Buffer.byteLength(lines[1]) + 1;
+		expect(Buffer.byteLength(lines[1]), "前提自检：中间行必须超过 1MiB 窗口 + 8MiB 追赶上限").toBeGreaterThan(
+			9 * 1024 * 1024,
+		);
+		expect(before, "before 必须恰为第 3 行行首").toBe(content.indexOf(lines[2]));
+
+		// Act 1: 窗口起点落在巨型行内部，追不到行首 → 本次窗口无完整行可回
+		const first = readBeforeOrThrow(filePath, before);
+
+		// Assert 1: 无 entry，但游标必须有界且严格向前（旧实现返回 startOffset === before，
+		// 客户端 page.ts:1786 的 `next >= before` 守卫会因此永久停止回填）
+		expect(first.entries).toEqual([]);
+		expect(first.entryOffsets).toEqual([]);
+		expect(first.startOffset, "游标必须非零").toBeGreaterThan(0);
+		expect(
+			first.startOffset,
+			"游标必须严格小于 before：旧实现会把 startOffset 跑成 before，导致客户端 page.ts:1786 永久停止回填",
+		).toBeLessThan(before);
+		expect(first.oversizeLine, "响应不得伪装成 EOF").toBe(true);
+
+		// Act 2: 从 before 起循环回溯到 0
+		const collected: any[][] = [];
+		let cursor = before;
+		let iterations = 0;
+		while (cursor > 0) {
+			const chunk = readBeforeOrThrow(filePath, cursor);
+			expectChunkConsistent(chunk, cursor);
+			expect(chunk.startOffset, "每片都必须严格向前推进（否则回溯死循环）").toBeLessThan(cursor);
+			collected.unshift(chunk.entries);
+			cursor = chunk.startOffset;
+			iterations++;
+			expect(iterations, "回溯循环必须有界终止").toBeLessThan(100);
+		}
+
+		// Assert 2: 循环必须到达 0；巨型行沿用现有丢弃策略（不在本次范围），
+		// 但其前面的第 1 行小行必须被收集到
+		expect(cursor).toBe(0);
+		expect(iterations, "巨型行只需少量大步回退，不应退化成逐字节爬行").toBeLessThanOrEqual(3);
+		expect(collected.flat()).toEqual([JSON.parse(lines[0])]);
+		expect(
+			collected.flat().some((entry: any) => entry.id === "huge"),
+			"巨型行不得被回填进 entries",
+		).toBe(false);
+	}, 30_000);
+
+	it("should return a >9 MiB line whole when the caller widens maxBytes to 32 MiB", () => {
+		// Arrange: 3 行 —— 小行 / >9 MiB 巨型行 / 小行，before 取第 3 行行首。
+		// 默认 1 MiB 名义窗口 + 8 MiB 追赶上限追不到 10 MiB 行的行首（上一条用例）；
+		// 调用方把 maxBytes 放宽到 32 MiB 后，窗口一次覆盖全文件，整行必须被完整取回。
+		const lines = [
+			JSON.stringify({ id: "head-1" }),
+			JSON.stringify({ id: "huge", payload: "x".repeat(10 * 1024 * 1024) }),
+			JSON.stringify({ id: "tail-1" }),
+		];
+		const content = lines.join("\n") + "\n";
+		const filePath = writeJsonl("back-wide-window.jsonl", content);
+		expect(Buffer.byteLength(lines[1]), "前提自检：中间行必须超过默认窗口 + 追赶上限").toBeGreaterThan(
+			9 * 1024 * 1024,
+		);
+		const before = content.indexOf(lines[2]);
+		expect(before, "before 必须恰为第 3 行行首").toBeGreaterThan(0);
+
+		// Act: 宽窗口（32 MiB）一次读回 before 之前的全部完整行
+		const result = readBeforeOrThrow(filePath, before, 32 * 1024 * 1024);
+
+		// Assert: 两行都拿到，巨型行整行完整，无超限/坏行标记
+		expect(result.entries.length).toBe(2);
+		expect(result.entryOffsets).toEqual([0, Buffer.byteLength(lines[0]) + 1]);
+		expect(result.startOffset).toBe(0);
+		expect(result.entries[1].id).toBe("huge");
+		expect(result.entries[1].payload.length).toBe(10 * 1024 * 1024);
+		expect(result.oversizeLine).toBe(false);
+		expect(result.malformed).toBe(0);
+	}, 30_000);
+
 	it("should skip malformed lines and count them in malformed", () => {
 		// Arrange: 坏行夹在两条合法行之间
 		const filePath = writeJsonl("back-malformed.jsonl", '{"ok":1}\n{not json\n{"ok":2}\n');

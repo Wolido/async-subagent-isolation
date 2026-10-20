@@ -83,6 +83,13 @@ const JSON_CONTENT_TYPE = "application/json; charset=utf-8";
 const HTML_CONTENT_TYPE = "text/html; charset=utf-8";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
+/**
+ * One-shot wide window for `?before=` backfill. Only used when the default
+ * window returns nothing because a single line outgrew it; never the default
+ * window (`tail.ts`'s 8 MiB chase constant stays untouched).
+ */
+const WIDE_BACKFILL_BYTES = 32 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // taskId containment and defaults
 // ---------------------------------------------------------------------------
@@ -506,10 +513,18 @@ function handleSessionRequest(
 		// `offset` cursor. `offset`/`nextOffset` echo `before` so an old client
 		// cannot mistake the response for a forward increment.
 		const before = parseBefore(beforeRaw);
-		const back = readBefore(resolved.filePath, before);
+		let back = readBefore(resolved.filePath, before);
 		if (back === null) {
 			sendJson(404, { error: "Session not found" });
 			return;
+		}
+		// A line larger than the default window yields no complete entry (empty
+		// `entries` + `oversizeLine`) but still a bounded backward cursor. Retry
+		// once with a wide window to pull that line in together with the complete
+		// lines before it; the wide result only replaces a strictly backward one.
+		if (back.entries.length === 0 && back.oversizeLine) {
+			const wide = readBefore(resolved.filePath, before, WIDE_BACKFILL_BYTES);
+			if (wide !== null && wide.startOffset < before) back = wide;
 		}
 		sendJson(200, {
 			taskId: resolved.taskId,

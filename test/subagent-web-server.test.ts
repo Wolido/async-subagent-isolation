@@ -1514,6 +1514,64 @@ describe("/api/session?before 反向回读（客户端自动向前补齐）", ()
 		expectJsonHeaders(alive);
 		expect(parseJson(alive).entries).toEqual([{ seq: 1 }, { seq: 2 }]);
 	});
+
+	it(
+		"should read a >9 MiB line through one wide backfill retry and strip its inline image",
+		async () => {
+			// Arrange: 会话头 + 单行 >9 MiB（正文内嵌 Markdown data URI 图片）+ 尾行。
+			// 默认 1 MiB + 8 MiB 追赶窗口读不回该行（返回空 entries + oversizeLine),
+			// 宽窗口（32 MiB）一次重试必须能回到文件头并把内嵌图片换成占位。
+			const handle = await start();
+			const taskId = uuid(89);
+			const payload = "A".repeat(10 * 1024 * 1024);
+			const lines = [
+				sessionHeaderLine(taskId, PAST),
+				JSON.stringify({
+					type: "message",
+					message: {
+						role: "toolResult",
+						content: [{ type: "text", text: "BEFORE ![img](data:image/png;base64," + payload + ") AFTER" }],
+					},
+				}),
+				JSON.stringify({ seq: "tail" }),
+			];
+			const filePath = writeTaskJsonl(taskId, lines);
+			const size = fs.statSync(filePath).size;
+			const before = Buffer.byteLength(lines[0]) + 1 + Buffer.byteLength(lines[1]) + 1;
+			expect(before, "前提自检：before 必须恰为第 3 行行首").toBe(
+				size - Buffer.byteLength(lines[2]) - 1,
+			);
+
+			// Act: 从尾行行首反向回读（默认窗口读不回大行 → 实现须用 32 MiB 宽窗口重试一次）
+			const res = await request(handle.port, beforePath(taskId, handle.token, before));
+
+			// Assert: 宽窗口一次回到文件头
+			expect(res.status).toBe(200);
+			expectJsonHeaders(res);
+			const body = parseJson(res);
+			expect(body.entriesStartOffset).toBe(0);
+			expect(body.truncatedBefore).toBe(false);
+			expect(body.entries.length).toBeGreaterThanOrEqual(2);
+			expect(
+				body.entries.some((e: any) => JSON.stringify(e).includes("BEFORE")),
+				"大行必须出现在 entries 里",
+			).toBe(true);
+
+			// Assert: 大行正文的 data URI 被换成占位（10 MiB base64 → 7.5 MB）
+			const bigText = body.entries
+				.flatMap((e: any) => e?.message?.content ?? [])
+				.find((p: any) => typeof p?.text === "string" && p.text.includes("BEFORE")).text;
+			expect(bigText).toContain("[图片已省略：image/png，7.5 MB]");
+			expect(bigText).not.toContain("data:image");
+			expect(bigText.length).toBeLessThan(200);
+
+			// Assert: 响应体绝不下发 base64（<100 KB 且无 data:image）
+			expect(res.body).not.toContain("data:image");
+			expect(Buffer.byteLength(res.body)).toBeLessThan(100_000);
+			expect(body.size).toBe(size);
+		},
+		30_000,
+	);
 });
 
 // ================================================================

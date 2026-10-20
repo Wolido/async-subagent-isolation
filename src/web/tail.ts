@@ -76,7 +76,13 @@ export interface TailBeforeResult {
 	entryOffsets: number[];
 	malformed: number;
 	oversizeLine: boolean;
-	/** Absolute offset of the first returned entry (0 when there is none). */
+	/**
+	 * Backward cursor for the next `readBefore` call. With entries it is the
+	 * absolute start offset of the first entry; with no complete entry it is the
+	 * window start examined by this call, which is always strictly below
+	 * `before` (0 means there are no earlier bytes). The client can therefore
+	 * always keep walking backwards instead of stalling on the same `before`.
+	 */
 	startOffset: number;
 	size: number;
 	mtime: number;
@@ -163,7 +169,9 @@ export function parseChunk(buf: Buffer, maxBytes: number = DEFAULT_MAX_BYTES): P
  * a single line longer than `maxBytes` is still returned whole. A trailing
  * line cut by a mid-line `before` is dropped; malformed lines are skipped and
  * counted. Entries stay in file order and `entryOffsets` holds the absolute
- * byte offset of each line start. A missing/unreadable file returns null.
+ * byte offset of each line start. When nothing complete is returned,
+ * `startOffset` falls back to the examined window start so it stays a strictly
+ * backward cursor below `before`. A missing/unreadable file returns null.
  *
  * Unlike `createTailReader().read`, this function is pure: it never touches
  * the per-`taskId` forward cache.
@@ -222,6 +230,7 @@ export function readBefore(
 
 		let buf = readExact(fd, windowStart, clamped - windowStart);
 		let base = windowStart;
+		let headTrimmed = false;
 		if (base > 0 && !isLineStart(fd, base)) {
 			const boundary = buf.indexOf(NEWLINE);
 			if (boundary === -1) {
@@ -238,6 +247,7 @@ export function readBefore(
 					mtime: stat.mtimeMs,
 				};
 			}
+			headTrimmed = true;
 			buf = buf.subarray(boundary + 1);
 			base += boundary + 1;
 		}
@@ -245,7 +255,7 @@ export function readBefore(
 		const parsed = parseChunk(buf, buf.length);
 		const entries = parsed.entries;
 		const entryOffsets = parsed.lineStarts.map((start) => base + start);
-		let oversizeLine = false;
+		let oversizeLine = headTrimmed && entries.length === 0;
 		for (const start of parsed.lineStarts) {
 			const newline = buf.indexOf(NEWLINE, start);
 			const lineEnd = newline === -1 ? buf.length : newline;
@@ -260,7 +270,7 @@ export function readBefore(
 			entryOffsets,
 			malformed: parsed.malformed,
 			oversizeLine,
-			startOffset: entryOffsets.length > 0 ? entryOffsets[0] : base,
+			startOffset: entryOffsets.length > 0 ? entryOffsets[0] : windowStart,
 			size,
 			mtime: stat.mtimeMs,
 		};

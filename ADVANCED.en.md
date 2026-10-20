@@ -543,7 +543,7 @@ Six statuses exist: running, recent, pending, rejected, failed, finished. The pr
 - Thinking, tool calls and tool results render folded.
 - Raw HTML inside Markdown is escaped to text before parsing, so model output can never inject live markup. Link targets accept only `http(s)` and in-page `#` anchors; `javascript:`, `data:` and other targets degrade to plain text.
 - `mermaid` code blocks render as ordinary code blocks (monospace, horizontally scrollable, copyable); no diagram rendering.
-- Images load on demand: `/api/session` strips base64 and returns only `imageRef`; clicking `Load image` fetches the bytes from `/api/image`. External images never auto-load: an `http(s)` image becomes a placeholder with a clickable link, and any other source degrades to plain text.
+- Images load on demand: `/api/session` strips base64 and returns only `imageRef`; clicking `Load image` fetches the bytes from `/api/image`. Inline `data:image/...;base64,...` payloads in text (including Markdown image syntax) are likewise replaced server-side with a `[图片已省略：<type>，<size>]` placeholder and their base64 is never sent; structured image parts still load through `/api/image`. External images never auto-load: an `http(s)` image becomes a placeholder with a clickable link, and any other source degrades to plain text.
 - The transcript is not truncated: the first screen comes from the server's tail window, and the client then backfills earlier chunks automatically until the start of the session (the `before` cursor), ending at `Beginning of session`.
 - When the viewport is not at the bottom, a `New content` hint appears and a click returns to the end. Failed fetches retry with exponential backoff (from 1 second up to 30 seconds).
 

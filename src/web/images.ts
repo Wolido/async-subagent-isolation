@@ -1,13 +1,19 @@
 /**
  * Image lazy-loading helpers for the local web viewer.
  *
- * Base64 image parts are megabytes large, so `/api/session` never ships them:
- * `stripImages` rewrites every image part into a small placeholder carrying an
- * `imageRef {entryIndex, block}` (entryIndex = absolute JSONL byte offset).
- * The page later fetches one image on demand through `/api/image`, which uses
- * `lookupImage` to re-read exactly that JSONL line and decode the requested
- * block. The size cap is checked before decoding so an oversized image never
- * allocates its decoded Buffer.
+ * Base64 images are megabytes large, so `/api/session` never ships them:
+ * `stripImages` rewrites every structured image part into a small placeholder
+ * carrying an `imageRef {entryIndex, block}` (entryIndex = absolute JSONL byte
+ * offset). The page later fetches one image on demand through `/api/image`,
+ * which uses `lookupImage` to re-read exactly that JSONL line and decode the
+ * requested block. The size cap is checked before decoding so an oversized
+ * image never allocates its decoded Buffer.
+ *
+ * A second, text-only path covers `data:image/...;base64,...` payloads that
+ * tools embed directly inside a string (Markdown image syntax included): those
+ * are replaced by a `[图片已省略：<mime>，<size>]` placeholder while the prose
+ * around them is preserved. They are never downloadable, so no `imageRef` is
+ * produced; base64 is stripped from the response in both paths.
  *
  * Node built-ins only (zero runtime dependencies).
  */
@@ -80,6 +86,11 @@ export function imageMimeType(part: ImagePart): string {
  * `entryIndex` comes from `entryOffsets[i]`; `block` counts image parts in
  * depth-first traversal order across the whole entry. The input is never
  * mutated, and entries without images come out deep-equal to their originals.
+ *
+ * Inline `data:image/...;base64,...` payloads embedded in a string (bare URIs
+ * and Markdown image syntax) are replaced by a `[图片已省略：mime，size]` text
+ * placeholder instead of an `imageRef`: they carry no `block` index and never
+ * reach `/api/image`, so `block` numbering of structured parts is unaffected.
  */
 export function stripImages(entries: unknown[], entryOffsets: number[]): unknown[] {
 	return entries.map((entry, index) => cloneEntry(entry, entryOffsets[index] ?? 0));
@@ -90,6 +101,7 @@ function cloneEntry(entry: unknown, entryIndex: number): unknown {
 
 	const cloneValue = (value: unknown): unknown => {
 		if (Array.isArray(value)) return value.map(cloneValue);
+		if (typeof value === "string") return stripInlineImages(value);
 		if (value === null || typeof value !== "object") return value;
 		const record = value as Record<string, unknown>;
 		if (record.type === "image" && typeof record.data === "string") {
@@ -109,6 +121,40 @@ function cloneEntry(entry: unknown, entryIndex: number): unknown {
 	};
 
 	return cloneValue(entry);
+}
+
+/**
+ * Replace inline base64 image payloads inside `text` with a short
+ * `[图片已省略：<mime>，<size>]` placeholder. Markdown image syntax is replaced
+ * as a whole, a bare URI only in itself, so surrounding prose (and a trailing
+ * `)`) survives. Strings without `data:image/` are returned as-is (no copy,
+ * no replace). The payload is never decoded: its length comes from
+ * `base64ByteLength`. Inline images stay text-only: no `imageRef` is emitted.
+ */
+function stripInlineImages(text: string): string {
+	if (!text.includes("data:image/")) return text;
+	const placeholder = (mimeType: string, payload: string): string =>
+		`[图片已省略：image/${mimeType}，${formatBytes(base64ByteLength(payload))}]`;
+	return text
+		.replace(
+			// `alt` is capped at 200 chars to keep the match linear: with an
+			// unbounded class every `![` start rescans to the next `]`, which is
+			// O(n²) on adversarial input. An over-long alt only degrades to
+			// "base64 stripped, `![...](…)` shell kept" — never a base64 leak,
+			// because the bare-URI pass below still replaces the payload.
+			/!\[[^\]]{0,200}\]\(\s*data:image\/([\w.+-]+);base64,([A-Za-z0-9+/=]*)\s*\)/g,
+			(_match, mimeType: string, payload: string) => placeholder(mimeType, payload),
+		)
+		.replace(/data:image\/([\w.+-]+);base64,([A-Za-z0-9+/=]*)/g, (_match, mimeType: string, payload: string) =>
+			placeholder(mimeType, payload),
+		);
+}
+
+/** Placeholder size: `B` below 1 KiB, `KB` (rounded) below 1 MiB, else `MB` (1 decimal). */
+function formatBytes(bytes: number): string {
+	if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+	if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+	return `${bytes} B`;
 }
 
 /**

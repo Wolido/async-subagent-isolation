@@ -427,6 +427,137 @@ describe("stripImages（深拷贝 + 剥离 base64 image part）", () => {
 		expect(stripped).toEqual(snapshot);
 		expect(stripped).toEqual(entries);
 	});
+
+	// ---- 字符串内嵌 data URI：与结构化 image part 并行的第二条剥离路径 ----
+	// 真实会话里 toolResult 正文常把图片以 Markdown 内嵌 data URI 塞进字符串，
+	// 单行因此 >9MiB 无法回填；占位格式固定为
+	// `[图片已省略：<mime>，<size>]`（全角冒号/逗号），size 由 base64ByteLength 决定。
+
+	it("should replace an inline Markdown data-URI image with a size placeholder", () => {
+		// Arrange: assistant 文本里内嵌一整个 Markdown 图片（data URI 走字符串）
+		const entries = [
+			{
+				type: "message",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: `看图 ![样张](data:image/png;base64,${PNG_B64}) 完成` }],
+				},
+			},
+		];
+
+		// Act
+		const stripped = stripImages(entries, [0]);
+
+		// Assert: 整段 Markdown 图片变成一个占位；前后文字保留；data URI 不再残留
+		const text = (stripped[0] as any).message.content[0].text;
+		expect(text).toBe("看图 [图片已省略：image/png，70 B] 完成");
+		expect(text).not.toContain("data:image");
+		expect(text.startsWith("看图 ")).toBe(true);
+		expect(text.endsWith(" 完成")).toBe(true);
+	});
+
+	it("should replace a bare data URI inside text with a size placeholder", () => {
+		// Arrange: 没有 Markdown 语法包裹的裸 data URI
+		const entries = [
+			{
+				type: "message",
+				message: {
+					role: "toolResult",
+					content: [{ type: "text", text: `截图：data:image/png;base64,${PNG_B64} 结束` }],
+				},
+			},
+		];
+
+		// Act
+		const stripped = stripImages(entries, [0]);
+
+		// Assert: 只替换 URI 本身，周围文字不动
+		const text = (stripped[0] as any).message.content[0].text;
+		expect(text).toBe("截图：[图片已省略：image/png，70 B] 结束");
+		expect(text).not.toContain("data:image");
+	});
+
+	it("should leave ordinary text and external markdown images untouched", () => {
+		// Arrange: 普通文本 + 外链 Markdown 图片（非 data URI）+ 行内 code
+		const original = "普通文本 ![外链](https://example.com/a.png) 与 code";
+		const entries = [
+			{ type: "message", message: { role: "assistant", content: [{ type: "text", text: original }] } },
+		];
+
+		// Act
+		const stripped = stripImages(entries, [0]);
+
+		// Assert: 逐字相同（不要求引用相等）
+		const text = (stripped[0] as any).message.content[0].text;
+		expect(text).toEqual(original);
+	});
+
+	it("should strip multiple inline images in one string", () => {
+		// Arrange: 同一个字符串里两处 data URI，中间夹文字
+		const text = `A ![one](data:image/png;base64,${PNG_B64}) B data:image/png;base64,${PNG_B64} C`;
+		const entries = [{ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } }];
+
+		// Act
+		const stripped = stripImages(entries, [0]);
+
+		// Assert: 两处都变占位，夹在中间的文字保留
+		const result = (stripped[0] as any).message.content[0].text;
+		expect(result).toBe(
+			"A [图片已省略：image/png，70 B] B [图片已省略：image/png，70 B] C",
+		);
+		expect(result).not.toContain("data:image");
+	});
+
+	it("should shrink a 10 MiB inline base64 payload to a short placeholder", () => {
+		// Arrange: 10 MiB 的 base64 载荷（解码 7,864,320 B → 7.5 MB）
+		const text = `BEFORE ![img](data:image/png;base64,${"A".repeat(10 * 1024 * 1024)}) AFTER`;
+		const entries = [
+			{ type: "message", message: { role: "toolResult", content: [{ type: "text", text }] } },
+		];
+
+		// Act
+		const stripped = stripImages(entries, [0]);
+
+		// Assert: 行被压到很短，尺寸按 MB（1 位小数）呈现，两端文字保留
+		const result = (stripped[0] as any).message.content[0].text;
+		expect(result.length).toBeLessThan(200);
+		expect(result).toContain("[图片已省略：image/png，7.5 MB]");
+		expect(result).not.toContain("data:image");
+		expect(result).toContain("BEFORE");
+		expect(result).toContain("AFTER");
+		expect(result.endsWith("AFTER")).toBe(true);
+	});
+
+	it("should keep the structured image part path working while stripping inline URIs", () => {
+		// Arrange: 同一 entry 内既有结构化 image part，又有含 data URI 的 text part
+		const entries = [
+			{
+				type: "message",
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "image", mimeType: "image/png", data: PNG_B64 },
+						{ type: "text", text: `内嵌 ![img](data:image/png;base64,${PNG_B64}) 结束` },
+					],
+				},
+			},
+		];
+
+		// Act
+		const stripped = stripImages(entries, [0]);
+		const content = (stripped[0] as any).message.content;
+
+		// Assert: 结构化图片仍走 imageRef 懒加载（block 0），text 里的 URI 走文本占位
+		expect(content[0]).toEqual({
+			type: "image",
+			mimeType: "image/png",
+			byteLength: 70,
+			imageRef: { entryIndex: 0, block: 0 },
+		});
+		expect(content[0]).not.toHaveProperty("data");
+		expect(content[1].text).toBe("内嵌 [图片已省略：image/png，70 B] 结束");
+		expect(content[1].text).not.toContain("data:image");
+	});
 });
 
 // ================================================================
