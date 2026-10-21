@@ -1338,3 +1338,169 @@ describe("K. G2: exhaustive cwd-probe truth table (probe threw ≠ probe answere
 		});
 	});
 });
+
+/* ═══════════════════════════════════════════════════════════════════
+ * L. BUN SINGLE-FILE BUILD — an existing argv[1] must never be prepended
+ *    for a non-generic runtime (issue #3).
+ *
+ *    In a `bun build --compile` binary, `process.argv[1]` is the virtual path
+ *    `/$bunfs/root/pi` and Bun's virtual FS makes `fs.existsSync()` answer
+ *    TRUE for it. `getPiInvocation()` currently tests the entry script FIRST
+ *    and only then the runtime name, so it takes the "run this script with the
+ *    generic runtime" branch and prefixes that path to the child's argv: the
+ *    subagent then sees a bogus first user message `/$bunfs/root/pi` and
+ *    `usage.turns` becomes 2.
+ *
+ *    Contract locked here:
+ *      L-1  non-generic runtime (basename(execPath) is neither node nor bun) +
+ *           an EXISTING argv[1]  →  command = execPath, and the child's args
+ *           must NOT contain that argv[1] (it is not a script for us to run).
+ *      L-2  generic runtime (basename(execPath) === node) + the same existing
+ *           argv[1]  →  argv[1] *is* the script we must re-run, so it stays as
+ *           the first child arg (non-regression twin: green before and after
+ *           the fix, so the fix cannot be "stop prepending, ever").
+ *      L-3  non-generic runtime + a MISSING argv[1]  →  still command =
+ *           execPath with the args passed through verbatim; falling back to the
+ *           bare "pi" name there would silently swap the compiled binary for
+ *           whatever `pi` resolves to on PATH (a mutation the rest of the
+ *           suite does not catch).
+ *
+ *    Mutation intent: hoisting the runtime-kind check above the entry-script
+ *    check flips only [l-bunfs-not-prepended]; the twin keeps green and fails
+ *    if the entry-script branch is deleted or the generic-runtime branch is
+ *    inverted. argv[1] is made a REAL file (inside a literal `$bunfs` dir) so
+ *    the EXISTS fact matches what Bun's virtual FS reports, and the fake
+ *    runtimes are real /bin/sh copies (chmod 755) so the preflight's absolute
+ *    path + X_OK check passes instead of masking the bug as EXEC_MISSING.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+describe("L. Bun single-file build: an existing argv[1] never leaks into the child's args", () => {
+	const f = new Fixture();
+
+	beforeEach(() => f.beforeEach_());
+	afterEach(() => f.afterEach_());
+
+	/**
+	 * Place an executable named exactly `name` at `dir/name`. Preferred source is
+	 * a copy of /bin/sh (unchanged behaviour, real X_OK bit); symlinking is the
+	 * fallback so the basename — the only thing the runtime-kind check reads —
+	 * is preserved on any host. Returns the absolute path to use as execPath.
+	 */
+	function installFakeRuntime(dir: string, name: string): string {
+		const target = path.join(dir, name);
+		fs.mkdirSync(dir, { recursive: true });
+		try {
+			fs.copyFileSync("/bin/sh", target);
+			fs.chmodSync(target, 0o755);
+		} catch {
+			fs.symlinkSync("/bin/sh", target);
+		}
+		return target;
+	}
+
+	/** The Bun virtual-FS equivalent: `<tmp>/$bunfs/root/pi`, a real file whose
+	 *  `fs.existsSync()` is TRUE — exactly the observable fact that misleads the
+	 *  current entry-script-first branch. */
+	function createBunfsEntry(): { entry: string; bunfsDir: string } {
+		const bunfsDir = path.join(f.tmpBase, "$bunfs", "root");
+		const entry = path.join(bunfsDir, "pi");
+		fs.mkdirSync(bunfsDir, { recursive: true });
+		fs.writeFileSync(entry, "// bun --compile virtual entry\n", "utf-8");
+		fs.chmodSync(entry, 0o755);
+		return { entry, bunfsDir };
+	}
+
+	/**
+	 * Dispatch with `process.execPath` / `process.argv[1]` injected (the same
+	 * direct-assignment seam family J uses). Both assignments sit INSIDE `try` so
+	 * injection and restoration are strictly paired: if the second assignment
+	 * threw on some exotic host, `finally` would still undo the first one.
+	 * Restoration goes back to the captured originals, and argv[1] is deleted
+	 * again when it was absent originally.
+	 */
+	async function dispatchWithInjectedGlobals(
+		execPath: string,
+		argv1: string,
+		task: string,
+	): Promise<any> {
+		const hadArgv1 = 1 in process.argv && process.argv[1] !== undefined;
+		const prevArgv1 = process.argv[1];
+		const prevExecPath = process.execPath;
+		try {
+			process.argv[1] = argv1;
+			process.execPath = execPath;
+			return await f.runSubagent({ task });
+		} finally {
+			process.execPath = prevExecPath;
+			if (hadArgv1) process.argv[1] = prevArgv1;
+			else delete process.argv[1];
+		}
+	}
+
+	it("[l-bunfs-not-prepended] a bunfs-like argv[1] is not passed to the child when the runtime is not node/bun", async () => {
+		// Arrange: an EXISTING argv[1] under a literal `$bunfs` dir + a non-generic
+		// runtime (basename `pi`, the closest thing to a compiled standalone build).
+		const { entry } = createBunfsEntry();
+		const fakeRuntime = installFakeRuntime(path.join(f.tmpBase, "fake-runtime"), "pi");
+		expect(fs.existsSync(entry)).toBe(true); // the fact that misleads the current branch
+		expect(path.basename(fakeRuntime)).not.toMatch(/^(node|bun)(\.exe)?$/i);
+
+		// Act
+		await dispatchWithInjectedGlobals(fakeRuntime, entry, "bunfs probe");
+
+		// Assert: it really spawned (so a RED can only come from the args check),
+		// with the injected runtime as the command…
+		expect(f.spawnCalls).toHaveLength(1);
+		expect(f.spawnCalls[0].command).toBe(fakeRuntime);
+		// …and the virtual entry path must not be smuggled in as a script argument.
+		expect(f.spawnCalls[0].args).not.toContain(entry);
+		// Pinpointed: no arg equals the entry or even ends with the bunfs path, so a
+		// failure message names the leak instead of a generic array diff.
+		expect(f.spawnCalls[0].args.some((a) => a === entry || a.endsWith("$bunfs/root/pi"))).toBe(false);
+		// The tail is still the Task line — the real prompt is untouched.
+		expect(f.spawnCalls[0].args.at(-1)).toBe("Task: bunfs probe");
+	});
+
+	it("[l-generic-node-prepends] a node runtime still re-runs the real argv[1] script (non-regression twin)", async () => {
+		// Same EXISTING argv[1], but the runtime IS generic (basename `node`): here
+		// argv[1] is a genuine script the child must execute, so it stays first.
+		const { entry } = createBunfsEntry();
+		const fakeNode = installFakeRuntime(path.join(f.tmpBase, "generic-runtime", "bin"), "node");
+		expect(fs.existsSync(entry)).toBe(true);
+		expect(path.basename(fakeNode).toLowerCase()).toBe("node");
+
+		// Act
+		await dispatchWithInjectedGlobals(fakeNode, entry, "generic node probe");
+
+		// Assert
+		expect(f.spawnCalls).toHaveLength(1);
+		expect(f.spawnCalls[0].command).toBe(fakeNode);
+		expect(f.spawnCalls[0].args[0]).toBe(entry);
+		expect(f.spawnCalls[0].args.at(-1)).toBe("Task: generic node probe");
+	});
+
+	it("[l-non-generic-keeps-execpath] a non-generic runtime keeps execPath even when argv[1] is missing", async () => {
+		// Third leg of the same contract: for a non-generic runtime the entry-script
+		// branch must not be reachable at all, so a MISSING argv[1] may not degrade
+		// into the bare-"pi" fallback either (that shape is only for a generic
+		// runtime re-running a real script).
+		const absent = path.join(f.tmpBase, "absent-entry", "pi");
+		const fakeRuntime = installFakeRuntime(path.join(f.tmpBase, "fake-runtime"), "pi");
+		expect(fs.existsSync(absent)).toBe(false); // precondition: the entry script really is gone
+		expect(path.basename(fakeRuntime)).not.toMatch(/^(node|bun)(\.exe)?$/i);
+
+		// Act
+		await dispatchWithInjectedGlobals(fakeRuntime, absent, "absent entry probe");
+
+		// Assert: it really spawned (so a RED cannot come from "no spawn" /
+		// "preflight rejected the runtime")…
+		expect(f.spawnCalls).toHaveLength(1);
+		// …the command is still the injected runtime, never the bare-name fallback…
+		expect(f.spawnCalls[0].command).toBe(fakeRuntime);
+		expect(f.spawnCalls[0].command).not.toBe("pi");
+		// …the absent path is not smuggled into the args…
+		expect(f.spawnCalls[0].args).not.toContain(absent);
+		// …and the real prompt is still the last argument.
+		expect(f.spawnCalls[0].args.at(-1)).toBe("Task: absent entry probe");
+	});
+});

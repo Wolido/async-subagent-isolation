@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.3] - 2026-10-21
+
+### Fixed
+
+- Child `pi` invocation now decides the runtime kind before looking at `process.argv[1]`. A compiled single-file build reports `process.argv[1]` as Bun's virtual `/$bunfs/root/pi` path, for which `fs.existsSync()` answers true, so the old entry-script-first order passed that path to the child as a script argument: the subagent session opened with a bogus `/$bunfs/root/pi` user message and `usage.turns` read 2. Non-generic runtimes now hand their own args through untouched, while a generic `node`/`bun` runtime with a real entry script still prepends it and a missing entry script still falls back to the bare `pi` command (#3).
+
 ## [1.14.2] - 2026-10-20
 
 ### Fixed
