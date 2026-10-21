@@ -342,6 +342,8 @@ Other tasks in flight when this task ended: 1
 - 主 agent 通过 `subagent` 工具（`action="cancel"`）取消（cancelledBy: agent）→ 正文注明 `This task was cancelled by the main agent via the subagent tool (action="cancel").`，并附 `Cancellation reason: ...`（两步确认时填写的 reason）
 - 会话关闭（session_shutdown）终止（cancelledBy: 无）→ 正文注明 `The task was terminated because the session shut down (session_shutdown).`
 
+三种情况的取消信封正文末尾都另附一段**文件状态警告**：取消是中途杀进程，已落盘的写入不会回滚，可能只写了一半、或只是多步改动的第一步，因此主 agent 在依赖工作区前应先核查该任务触碰过的文件（`git status` / `git diff`）。
+
 主 agent 收到状态为 `cancelled` 的通知时,应区分来源:用户主动取消**不得自动重试**,必须先询问用户;agent 取消是自身决策,不应在无新信息时重新派发;会话关闭终止可在会话恢复后视情况重新派发。
 
 **在途任务块**:信封元信息区的"在途任务"列表列出**其余**仍在运行的后台任务(本任务在构建信封前已从注册表移除,故不包含自身),格式为 `Other tasks in flight when this task ended: N` 加每行 `- taskId (agent名): 任务描述`，无在途任务时为 `No other tasks were in flight when this task ended.`列表**不含耗时或时钟时间**(回答"本任务结束时还有什么在跑",而非"跑了多久"或"几点了")。该列表是**构建时刻快照**,措辞锚定本任务结束事件而非绝对"此刻"--信封构建与送达之间主 agent 可能已派发新任务,快照随之滞后;与主 agent 本回合亲手发出的派发记录冲突时,以派发记录为准。（使用建议）主 agent 据此知道还有几个任务没回来:剩余不为 0 时,不要向用户汇报"全部完成"。
@@ -382,7 +384,7 @@ widget 行中的 taskId 可直接复制，用于 `/subagent-watch` 实时观察�
 /subagent-cancel <taskId>
 ```
 
-不带参数时：TUI 弹出运行中任务的选择列表（Enter 取消所选，Esc/q 退出）；非 TUI 则以通知列出运行中的 taskId。取消来源标记为 `cancelledBy: "user"`。
+不带参数时：TUI 弹出运行中任务的选择列表（Enter 取消所选，Esc/q 退出）；非 TUI 则以通知列出运行中的 taskId。取消来源标记为 `cancelledBy: "user"`。成功时提示 `Subagent task <taskId> cancelled — killed mid-run, so its file changes may be incomplete; check what it touched.`——取消是中途杀进程，文件改动可能不完整，需核查该任务触碰过的文件。
 
 一键取消所有运行中的任务：
 
@@ -390,11 +392,13 @@ widget 行中的 taskId 可直接复制，用于 `/subagent-watch` 实时观察�
 /subagent-cancel-all
 ```
 
-无参数。与 `/subagent-cancel` 按 taskId 取消单个任务不同,`/subagent-cancel-all` 取消全部运行中的任务。每个被取消任务照常推送各自的 `cancelled` `[subagent-result]` 通知（主 agent 会收到 N 个已取消信封）。成功时提示 `Cancelled N running subagent task(s).`，无运行中任务时提示 `No running subagent tasks to cancel.`。取消来源同样标记为 `cancelledBy: "user"`。
+无参数。与 `/subagent-cancel` 按 taskId 取消单个任务不同,`/subagent-cancel-all` 取消全部运行中的任务。每个被取消任务照常推送各自的 `cancelled` `[subagent-result]` 通知（主 agent 会收到 N 个已取消信封）。成功时提示 `Cancelled N running subagent task(s) — killed mid-run, so their file changes may be incomplete; check what they touched.`，无运行中任务时提示 `No running subagent tasks to cancel.`。取消来源同样标记为 `cancelledBy: "user"`。
+
+两条命令成功时的用户提示都是带「中途杀进程、文件改动可能不完整、需核查触碰过的文件」语义的短句（不复用信封里的长警告）：取消不是无操作，工作区可能停在一个半成品状态上。
 
 **路径二：主 agent `subagent` 工具（`action="cancel"`，两步确认）**
 
-主 agent 可调用 `subagent` 工具(`action="cancel"`,参数 `taskId`)取消已派出的后台任务,但首次调用不会直接执行:它返回零副作用的质询回执(`details.confirmRequired: true`),列出 agent 名、任务摘要、已运行时长、最近进度距今(从未上报则明示 `none reported yet`),并警告取消将丢弃全部在途进度且不可撤销。确认取消需再次调用:`action="cancel"` + 同一 `taskId` + `confirm:true` + 非空 `reason`(缺失或空白报错,零副作用)。执行后 `reason` 记录在任务记录上,并随取消信封正文返回(`Cancellation reason: ...`)。取消来源标记为 `cancelledBy: "agent"`。取消成功后返回其余在途任务列表(列表行格式与信封的"在途任务"块一致,但措辞锚定取消请求发出时刻--此时该任务并未结束,不用信封的"本任务结束"锚定语),被取消任务的最终结果稍后以 `[subagent-result]` 通知返回。
+主 agent 可调用 `subagent` 工具(`action="cancel"`,参数 `taskId`)取消已派出的后台任务,但首次调用不会直接执行:它返回零副作用的质询回执(`details.confirmRequired: true`),列出 agent 名、任务摘要、已运行时长、最近进度距今(从未上报则明示 `none reported yet`),并警告取消将丢弃全部在途进度且不可撤销。确认取消需再次调用:`action="cancel"` + 同一 `taskId` + `confirm:true` + 非空 `reason`(缺失或空白报错,零副作用)。执行后 `reason` 记录在任务记录上,并随取消信封正文返回(`Cancellation reason: ...`)。取消来源标记为 `cancelledBy: "agent"`。取消成功后返回其余在途任务列表(列表行格式与信封的"在途任务"块一致,但措辞锚定取消请求发出时刻--此时该任务并未结束,不用信封的"本任务结束"锚定语),被取消任务的最终结果稍后以 `[subagent-result]` 通知返回。确认取消回执与首次调用的取消质询回执也各自携带同一段文件状态警告(分别位于回执首行之后、质询里"丢弃在途进度且不可撤销"警告之后),提醒主 agent 取消是中途杀进程,须先核查被取消任务触碰过的文件再依赖工作区。
 
 **使用纪律：** 主 agent 仅在以下情况使用 `action="cancel"`：
 - 任务明显错误（委派了错误的 agent、任务描述有误等）。

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.4] - 2026-10-21
+
+### Changed
+
+- Cancelling a subagent now says out loud that a cancel is a mid-run kill: the end of a `cancelled` envelope body, the confirmed-cancel receipt and the cancel challenge each carry the same filesystem-state warning — work stops wherever it was, writes already flushed to disk stay there, possibly as a half-written edit, an already-applied change, or just the first step of a multi-step change — and tell the main agent to check the files the task touched (`git status` / `git diff`) before relying on the workspace. The `/subagent-cancel` and `/subagent-cancel-all` user notifications use short sentences with the same semantics. Rationale: the main agent tended to read `cancelled` as "the workspace was never touched" and would build straight on a half-finished tree; the wording now lives in one constant (`CANCELLED_TASK_EFFECTS_WARNING`) so the three surfaces cannot drift apart. The envelope `details` and `details.output` stay warning-free.
+
 ## [1.14.3] - 2026-10-21
 
 ### Fixed

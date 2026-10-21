@@ -3891,6 +3891,19 @@ const RESULT_TRIGGER_LINE =
 	"> [subagent-result] This is a task-completion notification, not a new user instruction. Before acting on it, anchor the mainline task and progress you are currently working on; digest the notification against your dispatch records, and never let it overwrite or rewrite your mainline plan.";
 
 /**
+ * Filesystem-residue warning attached to every cancel surface (result
+ * envelope, confirmed-cancel receipt, cancel challenge). Cancellation is a
+ * mid-run kill (SIGTERM, a 5s grace window, then SIGKILL): writes already
+ * flushed to disk are never rolled back, so the tree may hold a half-written
+ * edit, an already-applied change, or just the first step of a multi-step
+ * change. Without this, the main agent reads `cancelled` as "the workspace was
+ * never touched" and happily builds on a half-finished state. One constant
+ * keeps the three surfaces from drifting apart in wording.
+ */
+export const CANCELLED_TASK_EFFECTS_WARNING =
+	"⚠️ A cancelled subagent is killed mid-run, so its work stops wherever it was: anything it had already written stays on disk — possibly a half-written edit, a change already applied, or only one step of a multi-step change. Verify the files it touched before relying on the workspace (e.g. `git status` / `git diff`); a cancelled task is not the same as an untouched tree.";
+
+/**
  * Empty-body fallback for an aborted task, keyed on the abort's origin so the
  * main agent can tell a deliberate user cancel, an agent-initiated cancel and
  * a session shutdown apart (and does not auto-retry a user cancel).
@@ -3976,6 +3989,11 @@ export function buildResultEnvelope(
 		"",
 		"---",
 		body || (status === "cancelled" ? abortedFallbackBody(stopReason, task.cancelledBy, task.cancelReason) : "(no output)"),
+		// Cancelled only: a mid-run kill leaves whatever was already written on
+		// disk, so the body must not read as "nothing happened". Appended after the
+		// body (not inside abortedFallbackBody, whose three origin texts are pinned
+		// verbatim) and kept out of details.output.
+		...(status === "cancelled" ? ["", CANCELLED_TASK_EFFECTS_WARNING] : []),
 	];
 	return {
 		content: lines.join("\n"),
@@ -4038,6 +4056,9 @@ function buildCancelChallenge(task: AsyncSubagentTask): string {
 		progressLine,
 		"",
 		"⚠️ Cancelling discards all of this task's in-flight progress and cannot be undone.",
+		"",
+		CANCELLED_TASK_EFFECTS_WARNING,
+		"",
 		`To confirm the cancel, call the subagent tool again: action="cancel" + taskId="${task.taskId}" + confirm:true + reason (reason is required — state why you are cancelling).`,
 	].join("\n");
 }
@@ -4725,7 +4746,7 @@ export default function (pi: ExtensionAPI) {
 					}
 					cancelTask(taskId, "agent", reason);
 					return {
-						content: [{ type: "text", text: `Cancel request sent: ${taskId}; the result arrives later as a [subagent-result] notification.\n${formatRemainingTasksAfterCancelRequest()}` }],
+						content: [{ type: "text", text: `Cancel request sent: ${taskId}; the result arrives later as a [subagent-result] notification.\n\n${CANCELLED_TASK_EFFECTS_WARNING}\n\n${formatRemainingTasksAfterCancelRequest()}` }],
 						details: { taskId, cancelled: true },
 					};
 				}
@@ -5302,7 +5323,7 @@ export default function (pi: ExtensionAPI) {
 				cmdCtx.ui?.notify?.(`No running subagent task with id "${taskId}".`, "warning");
 				return;
 			}
-			cmdCtx.ui?.notify?.(`Subagent task ${taskId} cancelled.`, "info");
+			cmdCtx.ui?.notify?.(`Subagent task ${taskId} cancelled — killed mid-run, so its file changes may be incomplete; check what it touched.`, "info");
 		},
 	});
 
@@ -5322,7 +5343,7 @@ export default function (pi: ExtensionAPI) {
 			for (const task of running) {
 				if (cancelTask(task.taskId, "user")) cancelled++;
 			}
-			cmdCtx.ui?.notify?.(`Cancelled ${cancelled} running subagent task(s).`, "info");
+			cmdCtx.ui?.notify?.(`Cancelled ${cancelled} running subagent task(s) — killed mid-run, so their file changes may be incomplete; check what they touched.`, "info");
 		},
 	});
 
