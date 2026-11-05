@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.15.0] - 2026-10-22
+
+### Added
+
+- The `subagent` tool gains `action="peek"`: a one-shot, read-only snapshot of mid-flight state that never waits and never polls. With a `taskId` it prints at most 8 lines for that task, in a fixed order with missing items skipped — relative elapsed/idle durations and rounds in the header, a 120-character `派单` dispatch summary, a `自述` self-report (the last assistant message's text, falling back to the first sentence of its thinking, truncated to 60 characters, omitted when empty), the last three tool calls with an argument summary (values truncated to 40 characters), touched files with counts, a `失败` failure count (tool results with `isError`, omitted at 0), the current status word, and deterministic warnings (the same file edited 3+ times in a row, a read-only streak past 20 rounds, more than 8 distinct files touched, idle over 5 minutes, a silent tool-result ending). Without a `taskId` it lists every running task plus every task finished in this process, one line each, ascending by `startedAt`. Output is facts only: peek never says whether a task is drifting and never calls an LLM to summarize. When the in-process registry is empty after a restart or `/reload`, a `taskId` falls back to the task's on-disk session file, reading only the 64KB head and 2MB tail, and reports the status word as `未知（无内存数据）`. The old "no query, nag or status action" wording was replaced by "do not use peek to wait or to poll", and peek is added to the action list in the tool description and prompt guidelines.
+- Peek gains a `detail` parameter (peek only, default `"brief"`); `detail: "tail"` appends an `— 原文 —` section after the brief with the last 2 messages, 150 characters each.
+
+### Changed
+
+- Peek with a `taskId` now prefers the in-memory completed-task records before falling back to disk: a task that finished inside this process is found in `completedTasks`, so its `派单`, status word (e.g. `succeeded` instead of `未知（无内存数据）`) and relative durations come from memory while the behavioural lines (`自述` / `最近` / `已碰` / `失败`) still come from the session file. Also in peek: the "same file N times in a row" warning now counts write tools only (three reads of one file no longer read as three edits), `bash` in the recent window now suppresses the "read-only streak" warning (a shell command may well be writing), and a leading markdown marker (`## `, `**`, `- `, `> `) is stripped from the self-report line.
+- Peek no longer reports a finished task as idle: the header (and each list line) shows a completion time (`结束 X 前`) instead of `空闲 X`, and the `空闲超过 5 分钟` / `结尾无回音` warnings are skipped for terminal tasks, since a finished task's last activity is its end time and both thresholds would fire on every finished task. Behaviour warnings (`同一文件连续改` / `只读不写` / `触及 N 个文件`) and running tasks stay as they were. The self-report line also no longer leaves the closing `**` of a bold lead-in behind: `**结论**：x` now renders as `结论：x`, while markup in the body (e.g. a leading `**/*.ts` glob) is kept verbatim.
+- Peek's disk-fallback status word is now `未知（无内存数据）` (the registry path keeps `正在执行 <name>` / `空闲`), so a memory-less snapshot can no longer be mistaken for a live status.
+- Peek no longer reports liveness warnings on the disk fallback: `空闲超过 5 分钟` / `结尾无回音` now fire only when memory confirms the task is still running, since a memory-less snapshot cannot tell a stuck task from one that ended before the reload; the behavioural warnings and the neutral `空闲 X` time column stay.
+- Documentation aligned with the new peek behavior: README (both languages) shows the 8-line example and describes `detail: "tail"`, ADVANCED now describes the notification envelope's in-flight block plus a one-shot `action="peek"` snapshot instead of denying any query surface, and `examples/pi/agent/master.md` allows a one-shot mid-flight look while keeping the no-polling discipline.
+
 ## [1.14.4] - 2026-10-21
 
 ### Changed
