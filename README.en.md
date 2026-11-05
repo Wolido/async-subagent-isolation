@@ -215,7 +215,28 @@ When the subagent finishes, its result is pushed as a **`[subagent-result]` syst
 - If the main agent is **busy**, it is queued and delivered with steer semantics — after the current assistant turn's tool calls finish, before the next LLM call — without waiting for the whole turn to end.
 - Either way, the envelope carries a fixed **trigger line** right under the title, reminding the main agent that this is a completion notification rather than a new user instruction, and to anchor its current mainline task and progress before digesting it (see "Notification envelope and card" for the format).
 
-Results arrive automatically — **no polling**. In-flight task information is provided directly by the `[subagent-result]` notification envelope; `action="status"` was removed as a cleanup in v1.2.0.
+Results arrive automatically — **no polling**. In-flight task information is provided directly by the `[subagent-result]` notification envelope; when you need a one-shot snapshot use `action="peek"` (next section), but never use it to wait or to poll in a loop. `action="status"` was removed as a cleanup in v1.2.0.
+
+### 4.1 Mid-flight snapshot (`action="peek"`)
+
+When a background subagent is still running and you don't want to sit idle, `action="peek"` on the `subagent` tool returns a **single** read-only snapshot: with a `taskId` it shows one task (**at most 8 lines** with `detail: "brief"`, the default; `detail: "tail"` appends an `— original —` section on top of that, 3 extra lines); without one it lists every task one line each (running plus finished in this process, ascending by startedAt). It never waits, never polls, and never judges whether the task is drifting — it reports facts and leaves the judgment to the main agent. Durations are relative only (seconds/minutes/hours/days); no clock face appears.
+
+```
+#01a1aa26 engineer-legion · elapsed 3m 4s · idle 12s · 10 rounds · running
+Dispatch: read through and organize the uncommitted changes in async-subagent-isolation, then produce a commit plan
+Self-report: first read the diff with codemode myself, then dispatch executor to run typecheck and test
+Recent: codemode(read the diff of src/index.ts) → subagent(executor)
+Touched: src/index.ts ×3 · test/peek.test.ts ×1
+Failures: 2
+Status: running subagent
+Warning: same file edited 3 times in a row
+```
+
+The single-task block has a fixed line order and skips missing items: `Dispatch` is the task text, capped at 120 characters; `Self-report` is the text of the last assistant message (falling back to the first sentence of its thinking when there is no text), truncated to 60 characters, and the whole line is omitted when empty; `Recent` is the last 3 tool calls with an argument summary (values truncated to 40 characters); `Touched` lists the files tool calls touched with counts; `Failures` is the number of tool results with `isError`, and the line is omitted at 0; `Status` is `running <name>` or `idle`.
+
+The `Warning` line lists only deterministic hits (the same file edited N times in a row / read-only streak / N distinct files touched / idle over 5 minutes / silent ending); when nothing hits, the line is omitted entirely. If the registry is empty after a restart or `/reload`, peek falls back to the task's session file (reading only the 64KB head and 2MB tail) and prints the same shape, omitting memory-only fields, with `Status` reported as `unknown (no in-memory data)`. A task that finished inside this process is looked up in the completed records first: `Dispatch`, `Status` (e.g. `succeeded`) and the relative durations come from the in-memory record, while `Self-report` / `Recent` / `Touched` / `Failures` are still read from the on-disk session file — the two are merged into one block. For a finished task the time column shows when it ended (`结束 X 前`, i.e. ended X ago) instead of idle time, in the list shape as well, and the `idle over 5 minutes` / `silent ending` warnings are not evaluated for it. The disk fallback (no in-memory data) skips those two liveness warnings as well, since nothing there confirms the task is still running.
+
+The `detail` parameter is only meaningful for peek and defaults to `"brief"`; `detail: "tail"` appends an `— original —` section after the brief with the last 2 messages, 150 characters each. peek still reports deterministic facts only, with no LLM summarization.
 
 ### 5. Read the full result (`/subagent-result`)
 
@@ -271,8 +292,9 @@ User runs /subagent-result <taskId> to read the full output
 |------|---------|----------------|
 | `subagent` | Single-entry tool (`action` parameter); `action="dispatch"` (default) dispatches asynchronously (TUI mode), falls back to sync in non-TUI | Receipt ≠ result; results arrive as notifications, don't poll; in list mode you can only dispatch agents on this process's roster (an empty roster at startup registers no `subagent` tool at all; a roster that shrinks to empty at runtime keeps the tool and rejects every dispatch), and legacy mode has no roster restriction |
 | `subagent` `action="cancel"` | Main agent cancels one in-flight task (two-step confirmation: first call returns a challenge; `confirm:true` + a non-empty `reason` executes) | Only when clearly wrong or no longer needed; never for being slow |
+| `subagent` `action="peek"` | One-shot mid-flight snapshot (`taskId` optional; omit to list every task; `detail: "tail"` appends the last two messages verbatim); never waits, never polls | Output is facts only (relative durations, recent tools with arguments, touched files, failure count, deterministic warnings), at most 8 lines with `detail: "brief"` (the default) and 3 extra lines of `— original —` with `detail: "tail"`, and makes no "drifting" judgment; the disk fallback reads only the session file's head and tail, and reports `Status` as `unknown (no in-memory data)` |
 
-> **v1.2.0 note**: the `subagent` tool's `action="status"` has been removed as a cleanup. In-flight task information is now provided by the `[subagent-result]` notification envelope's in-flight block, with no active-query entry point.
+> **v1.2.0 note**: the `subagent` tool's `action="status"` has been removed as a cleanup. In-flight task information is provided by the `[subagent-result]` notification envelope's in-flight block; since v1.15.0 `action="peek"` additionally offers a one-shot read-only snapshot, but do not use it to wait or to poll.
 
 ### Commands (for the user)
 
@@ -435,9 +457,9 @@ Async mode introduces a few rules, baked into the tool prompts and implementatio
 
 - **Cancel-origin distinction**: `cancelled` has three origins — user (`/subagent-cancel`), main agent (`subagent` tool with `action="cancel"`), and session shutdown (`session_shutdown`). A user-initiated cancel must **never be auto-retried**; ask the user first.
 - **A cancel leaves a half-finished workspace**: cancelling is a mid-run kill (SIGTERM → 5s → SIGKILL), so writes already flushed to disk survive and may be only half done. The end of the cancelled envelope body, the confirmed-cancel receipt and the cancel challenge all remind the main agent to check the files the task touched (`git status` / `git diff`) before relying on the workspace.
-- **No polling**: results arrive automatically as notifications; in-flight task information is provided directly by the `[subagent-result]` notification envelope, with no active-query entry point.
+- **No polling**: results arrive automatically as notifications; in-flight task information is provided directly by the `[subagent-result]` notification envelope; when you need a one-shot snapshot use `action="peek"`, but never use it to wait or to poll in a loop.
 - **Notification digestion**: a `[subagent-result]` is a completion notification, not a new user instruction; the main agent anchors its current mainline task and progress before handling it, digests it against its own dispatch records, and decides the next step autonomously from the result. When a notification conflicts with the mainline, it defers rather than letting the notification rewrite the plan. The discipline is baked in twice: the envelope trigger line plus a "notification digestion" entry in the tool description.
-- **Anti-abuse cancellation**: `action="cancel"` is a two-step confirmation (the first call only returns a zero-side-effect challenge with elapsed time and last progress; `confirm:true` + a non-empty `reason` executes, and the reason is recorded on the task and quoted in the cancelled envelope body), with prompt guidance — cancel only when the task is clearly wrong or no longer needed, never just because it's slow (background subagents are expected to run long). Waiting means making no tool call at all and ending the turn; there is deliberately no query, nag or status action for in-flight tasks.
+- **Anti-abuse cancellation**: `action="cancel"` is a two-step confirmation (the first call only returns a zero-side-effect challenge with elapsed time and last progress; `confirm:true` + a non-empty `reason` executes, and the reason is recorded on the task and quoted in the cancelled envelope body), with prompt guidance — cancel only when the task is clearly wrong or no longer needed, never just because it's slow (background subagents are expected to run long). Waiting means making no tool call at all and ending the turn; do not use `action="peek"` to wait or to poll in a loop (peek is a single one-shot snapshot).
 - **Resource-conflict discipline**: before dispatching multiple tasks in parallel, consider whether they touch the same files or code areas; when in doubt, dispatch sequentially or ask the user.
 - **Subagents cannot call the subagent tool (legacy mode)**: in legacy mode a subagent (depth ≥ 1) can never call any `subagent` action (including `action="cancel"`); delegation depth is capped at 1 (the error contains `depth limit reached (depth: N, max: 1)`). List mode has no such depth lock: a subagent dispatches by the `PI_SUBAGENT_ALLOWED` roster injected by its parent, and inside a subagent process `action="cancel"` remains reachable (the task registry is process-private, with no cross-process effect).
 - **Nested dispatch rule**: list mode allows nesting — a manager agent can keep dispatching subordinates as long as its own roster is non-empty; legacy mode keeps the original depth lock (`MAX_SUBAGENT_DEPTH = 1`, the error contains `depth limit reached (depth: N, max: 1)`).

@@ -3670,6 +3670,9 @@ function formatRemainingTasksAfterCancelRequest(): string {
 interface CompletedTaskRecord {
 	taskId: string;
 	agentName: string;
+	/** Dispatch description kept so action="peek" can list finished tasks too. */
+	task: string;
+	startedAt: number;
 	status: SubagentTaskStatus;
 	finishedAt: number;
 }
@@ -3680,7 +3683,7 @@ interface CompletedTaskRecord {
  * it without limit; entries whose session file is gone are filtered at read
  * time by listViewableFinishedTasks.
  */
-const completedTasks: CompletedTaskRecord[] = [];
+export const completedTasks: CompletedTaskRecord[] = [];
 const COMPLETED_TASKS_KEEP = 50;
 
 /** Record a finished task (called once per task from completeAsyncTask). */
@@ -3690,7 +3693,14 @@ function recordCompletedTask(task: AsyncSubagentTask, status: SubagentTaskStatus
 	for (let i = completedTasks.length - 1; i >= 0; i--) {
 		if (completedTasks[i].taskId === task.taskId) completedTasks.splice(i, 1);
 	}
-	completedTasks.push({ taskId: task.taskId, agentName: task.agentName, status, finishedAt: Date.now() });
+	completedTasks.push({
+		taskId: task.taskId,
+		agentName: task.agentName,
+		task: task.task,
+		startedAt: task.startedAt,
+		status,
+		finishedAt: Date.now(),
+	});
 	if (completedTasks.length > COMPLETED_TASKS_KEEP) {
 		completedTasks.splice(0, completedTasks.length - COMPLETED_TASKS_KEEP);
 	}
@@ -3717,6 +3727,528 @@ function listViewableFinishedTasks(limit: number): CompletedTaskRecord[] {
 		result.push(record);
 	}
 	return result;
+}
+
+// ===== action="peek": one-shot mid-flight snapshot =====
+
+// Disk fallback reads only the head (session header + first user message) and the
+// tail (latest records): a long-running subagent's JSONL can be tens of MB and
+// peek must stay a cheap, synchronous, one-shot observation.
+const PEEK_HEAD_BYTES = 64 * 1024;
+const PEEK_TAIL_BYTES = 2 * 1024 * 1024;
+const PEEK_TASK_SUMMARY_MAX = 120;
+const PEEK_CALL_VALUE_MAX = 40;
+const PEEK_NARRATION_MAX = 60;
+const PEEK_TAIL_MESSAGE_COUNT = 2;
+const PEEK_TAIL_EXCERPT_MAX = 150;
+const PEEK_MAX_TOUCHED_SHOWN = 5;
+const PEEK_IDLE_WARN_MS = 300_000;
+const PEEK_SILENT_END_WARN_MS = 600_000;
+const PEEK_MAX_SAME_FILE_RUN = 3;
+const PEEK_READ_ONLY_ROUNDS = 20;
+const PEEK_READ_ONLY_WINDOW = 5;
+const PEEK_TOUCHED_FILE_LIMIT = 8;
+const PEEK_WRITE_TOOL_NAMES = new Set(["write", "edit", "str_replace", "create"]);
+
+/**
+ * Relative-only duration for peek. Deliberately never renders a clock face:
+ * peek output must not imply an absolute time the task happened at.
+ */
+function formatRelativeDuration(ms: number): string {
+	const totalSec = Math.max(0, Math.floor(ms / 1000));
+	if (totalSec < 60) return `${totalSec} 秒`;
+	const days = Math.floor(totalSec / 86_400);
+	const hours = Math.floor((totalSec % 86_400) / 3_600);
+	const minutes = Math.floor((totalSec % 3_600) / 60);
+	const seconds = totalSec % 60;
+	if (days > 0) return `${days} 天 ${hours} 小时`;
+	if (hours > 0) return `${hours} 小时 ${minutes} 分`;
+	return seconds === 0 ? `${minutes} 分` : `${minutes} 分 ${seconds} 秒`;
+}
+
+/** Short taskId prefix used as the row identity (full id stays in details). */
+function shortTaskId(taskId: string): string {
+	return `#${taskId.slice(0, 8)}`;
+}
+
+interface PeekToolCall {
+	id?: string;
+	name: string;
+	args: Record<string, any>;
+}
+
+interface PeekAnalysis {
+	rounds: number;
+	recentText: string;
+	touchedText: string;
+	statusText: string;
+	/** The last assistant turn's own words: a deterministic excerpt, never a summary. */
+	selfNarration: string;
+	failedCount: number;
+	warnings: string[];
+}
+
+// Argument keys peek reads, in priority order. Each one is a value the tool call
+// itself carried; peek never interprets them, so a new tool needs no code here.
+const PEEK_CALL_ARG_KEYS = ["path", "file_path", "filePath", "command", "pattern", "agent", "task", "sessionId", "code"];
+
+/**
+ * Peek-only tool-call summary: `name(value)`. Deliberately separate from
+ * summarizeToolCall, which the TUI progress widget shares — that formatter is
+ * space-separated, width-budgeted and ANSI-aware, so widening it would change
+ * the widget's rendering too.
+ */
+function summarizePeekCall(name: string, args: Record<string, any>): string {
+	let value = "";
+	for (const key of PEEK_CALL_ARG_KEYS) {
+		const raw = args[key];
+		if (typeof raw !== "string") continue;
+		// `code` is multi-line; its first line is what says what is being done.
+		const firstLine = key === "code" ? raw.split("\n")[0] : raw;
+		const oneLine = firstLine.replace(/\u001b\[[0-9;]*m/g, "").replace(/\s+/g, " ").trim();
+		if (oneLine) {
+			value = oneLine;
+			break;
+		}
+	}
+	if (!value) return name;
+	return `${name}(${value.length > PEEK_CALL_VALUE_MAX ? `${value.slice(0, PEEK_CALL_VALUE_MAX)}…` : value})`;
+}
+
+/**
+ * Strip leading markdown block markers from the one-line narration: `## `,
+ * `**` (only when it opens a bold run), `- ` / `* ` / `+ `, and `> `. Only
+ * the line head is touched — the sentence's own words are the point of the
+ * field, the formatting in front of them is noise.
+ *
+ * `**` rule demands evidence that it is markdown: either whitespace right
+ * after it (`** lead-in`) or a matching closing `**` whose next character ends
+ * the bold run — whitespace, end of line, or punctuation such as the colon in
+ * `**结论**：…`. A body that merely starts with a glob (a `**` path pattern)
+ * carries neither — its next character is `/` and there is no closing `**` —
+ * so it is kept verbatim; stripping it would eat the first path of the
+ * sentence. Restricting the terminator to "not a word character and not `/`"
+ * is what separates `：` (formatting) from `/*.ts` (content).
+ *
+ * When the `**` we strip is the opener of a bold run, its closing `**` is
+ * removed too: leaving it behind renders `结论**：x`, a marker that opens
+ * nothing. The pairing comes from the same match that justified stripping the
+ * opener, so exactly that one `**` is deleted — counting `**` across the whole
+ * string instead would eat a body glob after a heading (`## **` 后接 `/…`），or a
+ * literal `**` (`- 用 ** 表示通配符`), and would leave the leftover whenever a
+ * later `**` happens to exist (`## **A** 与 **B**`). Body markup is otherwise
+ * untouched: this is a prefix strip, not a markdown cleanup.
+ */
+function stripNarrationPrefix(text: string): string {
+	let out = text;
+	// Loop because a heading is often followed by a bold lead-in (`## **x**`).
+	for (;;) {
+		const plain = out.match(/^(?:#{1,6}\s+|[-*+]\s+|>\s+)/);
+		if (plain) {
+			out = out.slice(plain[0].length).trimStart();
+			continue;
+		}
+		// Same evidence rule as before, split so the two shapes can be handled
+		// differently below. Nothing matches → the head is body text, stop.
+		if (!/^\*\*(?:\s+|(?=[^*\n]+\*\*(?:$|[^\w/])))/.test(out)) return out;
+		const bold = out.slice(2).match(/^[^*\n]+?\*\*(?=$|[^\w/])/);
+		if (!bold) {
+			// `** lead-in`: an opener with no pair of its own, so only it goes.
+			out = out.slice(2).trimStart();
+			continue;
+		}
+		// Drop the opener and the closing `**` this match found, keeping the
+		// bold content and everything after it as-is.
+		out = (bold[0].slice(0, -2) + out.slice(2 + bold[0].length)).trimStart();
+	}
+}
+
+/** First sentence of a thinking block, capped at PEEK_NARRATION_MAX characters. */
+function firstThinkingSentence(thinking: string): string {
+	const oneLine = thinking.replace(/\s+/g, " ").trim();
+	const delimiter = oneLine.search(/[。！？.]/);
+	const sentence = delimiter >= 0 ? oneLine.slice(0, delimiter).trim() : oneLine;
+	// Strip before truncating (the spec's order): a marker left in front of the
+	// 60-char cut would waste budget and leave visible `##` noise.
+	const stripped = stripNarrationPrefix(sentence);
+	return stripped.length > PEEK_NARRATION_MAX ? stripped.slice(0, PEEK_NARRATION_MAX) : stripped;
+}
+
+/**
+ * First path-like argument of a tool call; `command` is deliberately excluded.
+ * Collapsed to one line: peek guarantees a bounded line count, and a path that
+ * carried a newline would otherwise split the 已碰 row.
+ */
+function getToolCallPath(args: Record<string, any>): string {
+	for (const key of ["path", "file_path", "filePath"]) {
+		const value = args[key];
+		if (typeof value === "string") {
+			const oneLine = value.replace(/\s+/g, " ").trim();
+			if (oneLine) return oneLine;
+		}
+	}
+	return "";
+}
+
+/**
+ * Derive the deterministic facts peek shows. Split out of the formatter so the
+ * registry and disk paths share one parser and can never drift apart.
+ */
+function analyzePeekMessages(messages: Message[], idleMs: number, knownLive: boolean): PeekAnalysis {
+	const toolCalls: PeekToolCall[] = [];
+	// id -> isError: liveness needs the ids, the failure count needs the flag.
+	const resultIds = new Map<string, boolean>();
+	let lastAssistant: Extract<Message, { role: "assistant" }> | undefined;
+	let rounds = 0;
+	for (const message of messages) {
+		if (message.role === "assistant") {
+			rounds++;
+			lastAssistant = message;
+			for (const part of message.content) {
+				if (part.type === "toolCall") {
+					toolCalls.push({ id: part.id, name: part.name, args: part.arguments ?? {} });
+				}
+			}
+		} else if (message.role === "toolResult") {
+			resultIds.set(message.toolCallId, message.isError === true);
+		}
+	}
+
+	let failedCount = 0;
+	for (const isError of resultIds.values()) if (isError) failedCount++;
+
+	// Self-narration is the last assistant turn's own text, verbatim apart from
+	// whitespace collapsing. With no text at all we fall back to the first
+	// sentence of its last thinking block: still the agent's own words, never a
+	// generated summary.
+	let selfNarration = "";
+	if (lastAssistant) {
+		const textParts: string[] = [];
+		let lastThinking = "";
+		for (const part of lastAssistant.content) {
+			if (part.type === "text" && part.text.trim()) textParts.push(part.text.replace(/\s+/g, " ").trim());
+			else if (part.type === "thinking" && part.thinking.trim()) lastThinking = part.thinking;
+		}
+		selfNarration = textParts.length > 0 ? textParts.join(" ") : firstThinkingSentence(lastThinking);
+		// Agents routinely open a closing report with `## `: the marker is
+		// formatting noise on a one-line field, so strip leading block markers.
+		selfNarration = stripNarrationPrefix(selfNarration);
+	}
+
+	// A trailing toolCall without its paired toolResult is the only in-memory
+	// evidence that the subagent is currently inside a tool; everything else is
+	// reported as idle, never as a guess.
+	const lastToolCall = toolCalls[toolCalls.length - 1];
+	const runningTool = lastToolCall && (!lastToolCall.id || !resultIds.has(lastToolCall.id)) ? lastToolCall.name : "";
+	const statusText = runningTool ? `正在执行 ${runningTool}` : "空闲";
+
+	const pathCounts = new Map<string, number>();
+	let maxSameFileRun = 0;
+	let runKey = "";
+	let runLength = 0;
+	for (const call of toolCalls) {
+		const filePath = getToolCallPath(call.args);
+		if (!filePath) {
+			runKey = "";
+			runLength = 0;
+			continue;
+		}
+		// 已碰 counts every path-taking call (reads included); the "repeat" run
+		// below counts writes only — three reads of one file are not three edits.
+		pathCounts.set(filePath, (pathCounts.get(filePath) ?? 0) + 1);
+		if (!PEEK_WRITE_TOOL_NAMES.has(call.name)) {
+			runKey = "";
+			runLength = 0;
+			continue;
+		}
+		const key = `${call.name}\u0000${filePath}`;
+		if (key === runKey) runLength++;
+		else {
+			runKey = key;
+			runLength = 1;
+		}
+		if (runLength > maxSameFileRun) maxSameFileRun = runLength;
+	}
+
+	const touchedParts = [...pathCounts.entries()]
+		.slice(0, PEEK_MAX_TOUCHED_SHOWN)
+		.map(([filePath, count]) => `${filePath} ×${count}`);
+	if (pathCounts.size > PEEK_MAX_TOUCHED_SHOWN) {
+		touchedParts.push(`另有 ${pathCounts.size - PEEK_MAX_TOUCHED_SHOWN} 个`);
+	}
+
+	const recentText = toolCalls
+		.slice(-MAX_RECENT_TOOLS)
+		.map((call) => summarizePeekCall(call.name, call.args))
+		.join(" → ");
+
+	// bash is deliberately treated as neither read nor write: it can hide
+	// `> file`, `sed -i` or `git commit`, so one bash in the window drops the
+	// warning. Under-reporting beats claiming "only reading" about a shell run.
+	const lastWindow = toolCalls.slice(-PEEK_READ_ONLY_WINDOW);
+	const readOnlyStreak =
+		rounds >= PEEK_READ_ONLY_ROUNDS &&
+		lastWindow.length > 0 &&
+		lastWindow.every((call) => !PEEK_WRITE_TOOL_NAMES.has(call.name) && call.name !== "bash");
+
+	const lastMessage = messages[messages.length - 1];
+	const warnings: string[] = [];
+	if (maxSameFileRun >= PEEK_MAX_SAME_FILE_RUN) warnings.push(`同一文件连续改 ${maxSameFileRun} 次`);
+	if (readOnlyStreak) warnings.push("只读不写");
+	if (pathCounts.size > PEEK_TOUCHED_FILE_LIMIT) warnings.push(`触及 ${pathCounts.size} 个文件`);
+	// Only a task we know to be running can be idle or silent. Both warnings
+	// presume "this task should be alive": a finished task's last activity is
+	// its end time (every finished task would fire), and on the disk fallback we
+	// have no memory state at all, so we cannot say whether it is stuck or just
+	// gone. Behaviour warnings above stay valid everywhere.
+	if (knownLive) {
+		if (idleMs >= PEEK_IDLE_WARN_MS) warnings.push("空闲超过 5 分钟");
+		if (lastMessage?.role === "toolResult" && idleMs >= PEEK_SILENT_END_WARN_MS) warnings.push("结尾无回音");
+	}
+
+	return { rounds, recentText, touchedText: touchedParts.join(" · "), statusText, selfNarration, failedCount, warnings };
+}
+
+interface PeekDetailInput {
+	taskId: string;
+	agentName?: string;
+	task?: string;
+	startedAt: number;
+	lastActivityAt: number;
+	/** Omitted for disk fallback: liveness is memory-only information. */
+	statusWord?: string;
+	/**
+	 * True when statusWord is a terminal word from a finished-task record rather
+	 * than the live "running" word of a registry entry. A finished task's 状态
+	 * line must show that terminal word: falling back to the messages-derived
+	 * 空闲 there would contradict the header's `succeeded` and read as "still
+	 * idle" about a task that already ended.
+	 */
+	finished?: boolean;
+	/**
+	 * True only when we have memory evidence the task is still running. Liveness
+	 * warnings (idle / silent ending) presume the task should be alive, so they
+	 * fire only here: a finished record says it ended, and the disk fallback
+	 * knows nothing.
+	 */
+	knownLive?: boolean;
+	messages: Message[];
+	now: number;
+	/** "tail" appends the last two messages' raw excerpts after the brief block. */
+	detail?: "brief" | "tail";
+}
+
+/** One assistant/toolResult message flattened to a single line of its text blocks. */
+function peekMessageText(message: Message): string {
+	if (typeof message.content === "string") return message.content.replace(/\s+/g, " ").trim();
+	const parts: string[] = [];
+	for (const part of message.content) {
+		if (part.type === "text" && part.text.trim()) parts.push(part.text);
+	}
+	return parts.join(" ").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Raw tail for detail="tail": the brief block is deterministic but lossy, so
+ * this hands back the last two messages verbatim (whitespace-collapsed and
+ * capped) when the summary is not enough to judge a task.
+ */
+function buildPeekTailExcerpt(messages: Message[]): string {
+	const tail = messages.slice(-PEEK_TAIL_MESSAGE_COUNT);
+	if (tail.length === 0) return "";
+	const lines = ["— 原文 —"];
+	for (const message of tail) {
+		const text = peekMessageText(message);
+		const excerpt = text.length > PEEK_TAIL_EXCERPT_MAX ? `${text.slice(0, PEEK_TAIL_EXCERPT_MAX)}…` : text;
+		lines.push(`[${message.role}] ${excerpt}`);
+	}
+	return lines.join("\n");
+}
+
+/** Single-task peek block: at most eight lines, relative durations only. */
+function buildPeekTaskDetail(input: PeekDetailInput): string {
+	const elapsedMs = input.now - input.startedAt;
+	const idleMs = input.now - input.lastActivityAt;
+	const analysis = analyzePeekMessages(input.messages, idleMs, input.knownLive === true);
+	const identity = input.agentName ? `${shortTaskId(input.taskId)} ${input.agentName}` : shortTaskId(input.taskId);
+	// A finished task has no idle time left to report: its last activity is the
+	// moment it ended, so the column reads as a completion time. The disk path
+	// knows neither, so it keeps the live wording rather than guessing.
+	const timePart = input.finished
+		? `结束 ${formatRelativeDuration(idleMs)} 前`
+		: `空闲 ${formatRelativeDuration(idleMs)}`;
+	const headerParts = [
+		`已跑 ${formatRelativeDuration(elapsedMs)}`,
+		timePart,
+		`${analysis.rounds} 轮`,
+	];
+	if (input.statusWord) headerParts.push(input.statusWord);
+	const lines = [`${identity} · ${headerParts.join(" · ")}`];
+	if (input.task) lines.push(`派单：${truncateTaskDescription(input.task, PEEK_TASK_SUMMARY_MAX)}`);
+	if (analysis.selfNarration) lines.push(`自述：${truncateTaskDescription(analysis.selfNarration, PEEK_NARRATION_MAX)}`);
+	if (analysis.recentText) lines.push(`最近：${analysis.recentText}`);
+	if (analysis.touchedText) lines.push(`已碰：${analysis.touchedText}`);
+	if (analysis.failedCount > 0) lines.push(`失败：${analysis.failedCount} 次`);
+	// The disk path has no memory state: saying "空闲" there would read as
+	// "nothing is happening right now" when in fact we simply cannot know.
+	// A finished record knows the outcome, so it reports its terminal word.
+	const statusLine = !input.statusWord
+		? "未知（无内存数据）"
+		: input.finished
+			? input.statusWord
+			: analysis.statusText;
+	lines.push(`状态：${statusLine}`);
+	if (analysis.warnings.length > 0) lines.push(`警示：${analysis.warnings.join("；")}`);
+	if (input.detail === "tail") {
+		const tail = buildPeekTailExcerpt(input.messages);
+		if (tail) lines.push(tail);
+	}
+	return lines.join("\n");
+}
+
+interface PeekListEntry {
+	taskId: string;
+	agentName: string;
+	task: string;
+	startedAt: number;
+	lastActivityAt: number;
+	statusWord: string;
+	/** Mirrors PeekDetailInput.finished: the time column means end time, not idle. */
+	finished: boolean;
+}
+
+/** Argument-less peek: one line per task, ascending by startedAt. */
+function buildPeekTaskList(now: number): string {
+	const entries: PeekListEntry[] = [];
+	for (const task of taskRegistry.values()) {
+		if (task.status !== "running") continue;
+		entries.push({
+			taskId: task.taskId,
+			agentName: task.agentName,
+			task: task.task,
+			startedAt: task.startedAt,
+			lastActivityAt: progressManager.getLastActivityAt(task.taskId) ?? task.liveResult?.lastPhaseChange ?? task.startedAt,
+			statusWord: "running",
+			finished: false,
+		});
+	}
+	for (const record of completedTasks) {
+		entries.push({
+			taskId: record.taskId,
+			agentName: record.agentName,
+			task: record.task,
+			startedAt: record.startedAt,
+			lastActivityAt: record.finishedAt,
+			statusWord: STATUS_WORDS[record.status],
+			finished: true,
+		});
+	}
+	if (entries.length === 0) return "没有正在运行或本进程内已结束的子 agent 任务。";
+	entries.sort((a, b) => a.startedAt - b.startedAt);
+	return entries
+		.map((entry) => {
+			const timePart = entry.finished
+				? `结束 ${formatRelativeDuration(now - entry.lastActivityAt)} 前`
+				: `空闲 ${formatRelativeDuration(now - entry.lastActivityAt)}`;
+			return `${shortTaskId(entry.taskId)} ${entry.agentName} · ${formatRelativeDuration(now - entry.startedAt)} · ${timePart} · ${entry.statusWord} · ${truncateTaskDescription(entry.task, PEEK_TASK_SUMMARY_MAX)}`;
+		})
+		.join("\n");
+}
+
+interface DiskPeekSnapshot {
+	startedAt: number;
+	lastActivityAt: number;
+	task?: string;
+	messages: Message[];
+}
+
+/** Parse JSONL records, skipping malformed or partially written lines. */
+function parseJsonlRecords(text: string, dropFirstPartialLine: boolean): any[] {
+	const lines = text.split("\n");
+	if (dropFirstPartialLine) lines.shift();
+	const records: any[] = [];
+	for (const line of lines) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		try {
+			records.push(JSON.parse(trimmed));
+		} catch {
+			/* tolerate a truncated line at a read boundary */
+		}
+	}
+	return records;
+}
+
+function readFileSegment(fd: number, start: number, length: number): string {
+	const buffer = Buffer.alloc(length);
+	const bytesRead = fs.readSync(fd, buffer, 0, length, start);
+	return buffer.subarray(0, bytesRead).toString("utf-8");
+}
+
+/**
+ * Read a task's session file without loading more than its head and tail.
+ * Registry entries vanish on process restart / `/reload`, so peek falls back
+ * here for tasks that are only known on disk.
+ */
+function readDiskPeekSnapshot(filePath: string): DiskPeekSnapshot | null {
+	let fd: number;
+	try {
+		fd = fs.openSync(filePath, "r");
+	} catch {
+		return null;
+	}
+	try {
+		const size = fs.fstatSync(fd).size;
+		const headLength = Math.min(size, PEEK_HEAD_BYTES);
+		const tailStart = Math.max(0, size - PEEK_TAIL_BYTES);
+		// Small files fit entirely in the two windows: read once and share the
+		// parsed records, so head/tail never double-count or diverge.
+		const whole = tailStart <= headLength;
+		const headText = readFileSegment(fd, 0, whole ? size : headLength);
+		const headRecords = parseJsonlRecords(headText, false);
+		const tailRecords = whole
+			? headRecords
+			: parseJsonlRecords(readFileSegment(fd, tailStart, size - tailStart), true);
+
+		let startedAt: number | undefined;
+		let task: string | undefined;
+		for (const record of headRecords) {
+			if (startedAt === undefined && record?.type === "session") {
+				const timestamp = Date.parse(record.timestamp);
+				if (Number.isFinite(timestamp)) startedAt = timestamp;
+			}
+			if (task === undefined && record?.type === "message" && record.message?.role === "user") {
+				for (const part of record.message.content ?? []) {
+					if (part?.type === "text" && typeof part.text === "string" && part.text.trim()) {
+						task = part.text.replace(/^\s*Task:\s*/i, "").trim();
+						break;
+					}
+				}
+			}
+			if (startedAt !== undefined && task !== undefined) break;
+		}
+
+		const messages: Message[] = [];
+		let lastActivityAt: number | undefined;
+		for (const record of tailRecords) {
+			if (record?.type !== "message" || !record.message) continue;
+			messages.push(record.message as Message);
+			const timestamp = Date.parse(record.timestamp);
+			if (Number.isFinite(timestamp)) lastActivityAt = timestamp;
+		}
+
+		const stat = fs.fstatSync(fd);
+		return {
+			startedAt: startedAt ?? stat.birthtimeMs ?? stat.mtimeMs,
+			lastActivityAt: lastActivityAt ?? stat.mtimeMs,
+			task,
+			messages,
+		};
+	} catch {
+		return null;
+	} finally {
+		fs.closeSync(fd);
+	}
 }
 
 /** Build a picker item whose label carries the full taskId (a 36-char UUID). */
@@ -4133,10 +4665,10 @@ const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
 // Union-of-literals (anyOf + const) rather than StringEnum so the emitted
 // JSON Schema enumerates each action as its own const branch.
 const SubagentActionSchema = Type.Union(
-	[Type.Literal("dispatch"), Type.Literal("cancel")],
+	[Type.Literal("dispatch"), Type.Literal("cancel"), Type.Literal("peek")],
 	{
 		description:
-			'Action to perform. "dispatch" (default): delegate the task to a subagent. "cancel": cancel a running background task by taskId.',
+			'Action to perform. "dispatch" (default): delegate the task to a subagent. "cancel": cancel a running background task by taskId. "peek": one-shot snapshot of in-flight tasks (never waits, never polls).',
 		default: "dispatch",
 	},
 );
@@ -4146,7 +4678,7 @@ const SubagentParams = Type.Object({
 	agent: Type.Optional(Type.String({ description: "Name of the agent to invoke (required for action=dispatch)" })),
 	task: Type.Optional(Type.String({ description: "Task to delegate (required for action=dispatch). Must be non-empty and include background, input, requirements, output format, and acceptance criteria." })),
 	taskId: Type.Optional(Type.String({
-		description: "taskId of the running background subagent task to cancel (required for action=cancel; from the dispatch receipt).",
+		description: "taskId of the background subagent task, from the dispatch receipt. Required for action=cancel; optional for action=peek (omit to list every task).",
 	})),
 	confirm: Type.Optional(Type.Boolean({
 		description:
@@ -4159,6 +4691,9 @@ const SubagentParams = Type.Object({
 	})),
 	sessionId: Type.Optional(Type.String({
 		description: "Only for resuming the session id from a previous dispatch receipt; omit to generate a new one.",
+	})),
+	detail: Type.Optional(StringEnum(["brief", "tail"] as const, {
+		description: "peek only. \"brief\" (default) is the structured summary; \"tail\" appends the last two messages' raw excerpts for when the summary is not enough.",
 	})),
 	agentScope: Type.Optional(AgentScopeSchema),
 	confirmProjectAgents: Type.Optional(
@@ -4614,6 +5149,7 @@ export default function (pi: ExtensionAPI) {
 				"ACTIONS (action parameter, default \"dispatch\"):",
 				"- dispatch: delegate the task (async in TUI mode, blocking otherwise).",
 				"- cancel: request cancellation of a running background task by taskId (two-step: the first call returns a challenge; confirm:true + reason executes).",
+				"- peek: one-shot snapshot of mid-flight state (optional taskId; omit to list every task). Never waits, never polls.",
 				"- sessionId: only set when resuming a previously dispatched task. Must be the session id from a previous dispatch receipt. Omit otherwise; a new one is generated automatically.",
 				"",
 				"ASYNC (TUI mode): returns immediately with a dispatch receipt (taskId + session id).",
@@ -4635,8 +5171,9 @@ export default function (pi: ExtensionAPI) {
 				"run long; be patient and let the [subagent-result]",
 				"notification arrive.",
 				"",
-				"WAITING: there is deliberately no query, nag or status action for in-flight",
-				"tasks. Waiting means making no tool call at all and ending the turn.",
+				"WAITING: do not wait on results with peek and do not poll; peek is a",
+				"single one-shot look at mid-flight state. Waiting means making no tool",
+				"call at all and ending the turn.",
 				"",
 				"SYNC (non-TUI modes): waits for the subagent to finish and returns the full",
 				"result directly (no notification follows).",
@@ -4654,7 +5191,8 @@ export default function (pi: ExtensionAPI) {
 				"subagent: Pass sessionId only when resuming a previously dispatched task; the value must come from that task's dispatch receipt; omit sessionId otherwise so a new one is generated automatically.",
 				"subagent: A [subagent-result] notification with status cancelled can come from the user (/subagent-cancel) or from you (action=\"cancel\"); the envelope body states the source. A user-initiated cancel is a deliberate user action, so do NOT automatically retry or re-dispatch it; ask the user before re-dispatching.",
 				"subagent: Cancelling a background task is a two-step confirmation: the first action=\"cancel\" call only returns a challenge (confirmRequired) and cancels nothing; to actually cancel, call again with the same taskId + confirm:true + a non-empty reason explaining why. Never cancel just because a task runs long.",
-				"subagent: Waiting for a background task means making NO tool call at all and ending the turn; there is deliberately no query, nag or status action for in-flight tasks; results arrive on their own as [subagent-result] notifications.",
+				"subagent: Waiting for a background task means making NO tool call at all and ending the turn; do not repeatedly poll for progress; results arrive on their own as [subagent-result] notifications.",
+				"subagent: action=\"peek\" is a single one-shot look at a background task's mid-flight state (optional taskId; omit to list every task); use it at most when you genuinely need a snapshot, never in a loop or as a wait. Its output is facts only (elapsed, recent tools, touched files, warnings) — whether the task is drifting is your judgment, not its conclusion.",
 				"subagent: Before dispatching multiple tasks in parallel, consider whether they touch the same files or code areas; parallel tasks modifying the same files can conflict. When in doubt, dispatch sequentially or ask the user.",
 				"subagent: The in-flight block in a [subagent-result] envelope is a build-time snapshot anchored to that task's end event and may be stale by the time you process the notification; if it conflicts with dispatch records you issued yourself this turn, trust your dispatch records.",
 			],
@@ -4687,7 +5225,7 @@ export default function (pi: ExtensionAPI) {
 					return {
 						content: [{
 							type: "text",
-							text: `Subagent tool is blocked: depth limit reached (depth: ${currentDepth}, max: ${MAX_SUBAGENT_DEPTH}). Agent \`${agentName}\` runs inside a subagent and cannot invoke subagent actions (dispatch/cancel).`,
+							text: `Subagent tool is blocked: depth limit reached (depth: ${currentDepth}, max: ${MAX_SUBAGENT_DEPTH}). Agent \`${agentName}\` runs inside a subagent and cannot invoke subagent actions (dispatch/cancel/peek).`,
 						}],
 						details: {
 							mode: "single",
@@ -4751,9 +5289,115 @@ export default function (pi: ExtensionAPI) {
 					};
 				}
 
+				if (action === "peek") {
+					const taskId = typeof params.taskId === "string" ? params.taskId.trim() : "";
+					// detail only widens the output; dispatch/cancel ignore it.
+					const detail = params.detail === "tail" ? "tail" : "brief";
+					const now = Date.now();
+					if (!taskId) {
+						return {
+							content: [{ type: "text", text: buildPeekTaskList(now) }],
+							details: { action: "peek", scope: "all" },
+						};
+					}
+					// Registry first: only it carries live messages and the progress
+					// timestamps that a running task updates in place.
+					const task = taskRegistry.get(taskId);
+					if (task) {
+						const lastActivityAt =
+							progressManager.getLastActivityAt(taskId) ?? task.liveResult?.lastPhaseChange ?? task.startedAt;
+						return {
+							content: [{
+								type: "text",
+								text: buildPeekTaskDetail({
+									taskId,
+									agentName: task.agentName,
+									task: task.task,
+									startedAt: task.startedAt,
+									lastActivityAt,
+									statusWord: task.status === "running" ? "running" : task.status,
+									// Registry entries are the only source that confirms liveness.
+									knownLive: task.status === "running",
+									messages: task.liveResult?.messages ?? [],
+									now,
+									detail,
+								}),
+							}],
+							details: { action: "peek", taskId, source: "registry" },
+						};
+					}
+					// Registry is process-local and empty after a restart / `/reload`;
+					// completedTasks still knows tasks that finished in this process, so
+					// it supplies identity and status while the session file supplies the
+					// behavioural trace (the record keeps no messages once freed).
+					let record: CompletedTaskRecord | undefined;
+					for (let i = completedTasks.length - 1; i >= 0; i--) {
+						if (completedTasks[i].taskId === taskId) {
+							record = completedTasks[i];
+							break;
+						}
+					}
+					const file = findSessionFile(taskId);
+					const snapshot = file ? readDiskPeekSnapshot(file) : null;
+					if (record) {
+						return {
+							content: [{
+								type: "text",
+								text: buildPeekTaskDetail({
+									taskId,
+									agentName: record.agentName,
+									task: record.task,
+									startedAt: record.startedAt,
+									// Time base comes from memory (startedAt / finishedAt): the record is
+									// the authoritative timeline; the disk file is only the trace.
+									lastActivityAt: record.finishedAt,
+									statusWord: STATUS_WORDS[record.status],
+									finished: true,
+									// A completed record confirms the task ended: never live.
+									knownLive: false,
+									messages: snapshot?.messages ?? [],
+									now,
+									detail,
+								}),
+							}],
+							details: { action: "peek", taskId, source: "completed" },
+						};
+					}
+					// The session file is the only surviving trace of a task from an
+					// earlier process (or one pruned from the bounded record list).
+					if (!snapshot) {
+						return {
+							content: [{
+								type: "text",
+								text: `未找到 taskId 为 ${taskId} 的子 agent 任务（内存注册表和磁盘会话都没有记录）。用不带 taskId 的 peek 看现有任务。`,
+							}],
+							details: { action: "peek", taskId },
+							isError: true,
+						};
+					}
+					return {
+						content: [{
+							type: "text",
+							text: buildPeekTaskDetail({
+								taskId,
+								task: snapshot.task,
+								startedAt: snapshot.startedAt,
+								lastActivityAt: snapshot.lastActivityAt,
+								// Liveness is memory-only: the builder renders an explicit "unknown"
+								// status word on this path rather than a misleading "idle".
+								knownLive: false,
+								messages: snapshot.messages,
+								now,
+								detail,
+							}),
+						}],
+						details: { action: "peek", taskId, source: "disk" },
+					};
+				}
+
 				if (action !== "dispatch") {
 					return {
-						content: [{ type: "text", text: `Invalid action: "${action}". Must be one of "dispatch" (default), "cancel".` }],
+						content: [{ type: "text", text: `Invalid action: "${action}". Must be one of "dispatch" (default), "cancel", "peek".` }],
 						details: {
 							mode: "single",
 							agentScope: (params.agentScope ?? "both") as AgentScope,

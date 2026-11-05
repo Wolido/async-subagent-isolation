@@ -790,10 +790,10 @@ describe("单入口 action 模式 — 新契约红阶段", () => {
 			const props = subagent.parameters.properties || {};
 			const actionConsts = (props.action.anyOf || props.action.oneOf || []).map((s: any) => s.const);
 
-			// status literal 已废弃；枚举恰好剩下 dispatch + cancel
+			// status literal 已废弃；枚举剩下 dispatch + cancel + peek
 			expect(actionConsts).not.toContain("status");
-			expect(actionConsts).toEqual(expect.arrayContaining(["dispatch", "cancel"]));
-			expect(actionConsts).toHaveLength(2);
+			expect(actionConsts).toEqual(expect.arrayContaining(["dispatch", "cancel", "peek"]));
+			expect(actionConsts).toHaveLength(3);
 		});
 
 		it("description 不应再将 status 列为可用 action（RED：当前含 '- status:' 与 action=\"status\" 引用）", () => {

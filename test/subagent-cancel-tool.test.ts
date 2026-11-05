@@ -1126,19 +1126,19 @@ describe("action=cancel 两步确认 — 红阶段测试", () => {
 			expect(hasWaitingSemantics).toBe(true);
 		});
 
-		it("应声明「对在途任务不存在查询/催办类动作（刻意设计）」语义（RED）", () => {
+		it("应声明「peek 只是单次观测，不得用它等待或反复轮询」", () => {
 			const { toolsByName } = setupExtension();
 			const subagent = toolsByName.get("subagent");
 			const lines = [
 				...(subagent.description as string).split("\n"),
 				...((subagent.promptGuidelines as string[]) || []),
 			];
-			// 宽松断言：同一行/条内出现查询/催办类词与否定语义
-			//（不含 poll —— 现行描述已有 "Do NOT poll"，避免误过）
-			const hasNoQuerySemantics = lines.some(
-				(l) => /query|nag/i.test(l) && /no |none/i.test(l),
+			// peek 新增后，旧「不存在查询动作」的绝对表述被替换为「可用 peek 一次性
+			// 查看，但不要用它等结果或反复轮询」；断言锁定后者。
+			const hasNoPollingSemantics = lines.some(
+				(l) => /peek/i.test(l) && /(no|not|never)[^\n]*poll|\u4e0d[^\n]*\u8f6e\u8be2/i.test(l),
 			);
-			expect(hasNoQuerySemantics).toBe(true);
+			expect(hasNoPollingSemantics).toBe(true);
 		});
 	});
 
